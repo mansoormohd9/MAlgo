@@ -1,0 +1,20 @@
+# Core
+pandas>=2.2
+numpy>=1.26
+scipy>=1.13          # Black-Scholes normal CDF
+
+# UI
+streamlit>=1.40
+plotly>=5.22
+
+# Data
+yfinance>=0.2.40     # delayed fallback feed
+pyarrow>=16.0        # parquet
+requests>=2.32
+python-dotenv>=1.0
+
+# Alerts
+plyer>=2.1           # Windows desktop toast
+
+# Tests
+pytest>=8.0
