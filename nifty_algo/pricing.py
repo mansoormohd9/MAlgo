@@ -77,6 +77,57 @@ def time_to_expiry_years(today: date, expiry: date) -> float:
     return max((expiry - today).days, 0) / 365.0
 
 
+# Volatility bounds for the IV solver. 1% and 500% annualised: wide enough for
+# anything a real index option prints, including expiry-day gamma silliness,
+# narrow enough that a nonsense premium fails to bracket rather than converging
+# on a nonsense answer.
+MIN_IV = 0.01
+MAX_IV = 5.00
+
+
+def implied_vol(price: float, spot: float, strike: float, t_years: float,
+                r: float, option_type: str) -> float | None:
+    """
+    Back out implied volatility from a REAL market premium.
+
+    This is the piece that lets a live chain drive strike selection. A broker
+    gives you a premium, not a delta - and `RiskEngine.select_strike()` selects
+    on delta, because delta is what converts the underlying stop into a rupee
+    loss. So: premium -> IV -> delta, per strike, from live quotes.
+
+    Doing it per strike is also what makes the SKEW visible. `synthetic_chain`
+    assumes one flat IV across every strike; real index options are priced with
+    OTM puts materially bid over equidistant calls. Under a flat-IV assumption
+    the PE deltas are simply wrong, and the wrong delta buys the wrong strike.
+
+    Returns None when the premium cannot be bracketed - typically a stale or
+    crossed quote, or a premium below intrinsic. None means "do not trust this
+    quote", and callers should drop the strike rather than guess a fallback IV.
+    """
+    if price <= 0 or spot <= 0 or strike <= 0 or t_years <= 0:
+        return None
+
+    # No volatility can price an option below its own intrinsic value; such a
+    # quote is stale or crossed, not cheap.
+    intrinsic = max(spot - strike, 0.0) if option_type == "CE" else max(strike - spot, 0.0)
+    if price < intrinsic - 0.01:
+        return None
+
+    def diff(iv: float) -> float:
+        return bs_price(spot, strike, t_years, iv, r, option_type) - price
+
+    lo, hi = diff(MIN_IV), diff(MAX_IV)
+    if lo > 0 or hi < 0:
+        # Price sits outside what the model can produce at any volatility.
+        return None
+
+    from scipy.optimize import brentq
+    try:
+        return float(brentq(diff, MIN_IV, MAX_IV, xtol=1e-6, maxiter=100))
+    except (ValueError, RuntimeError):
+        return None
+
+
 @dataclass
 class SyntheticChainSpec:
     """How wide a chain to fabricate around spot."""
@@ -121,5 +172,6 @@ def synthetic_chain(spot: float, t_years: float, option_type: str,
             bid=round(max(premium - half_spread, 0.05), 2),
             ask=round(premium + half_spread, 2),
             open_interest=spec.fake_open_interest,
+            iv=spec.assumed_iv,       # flat by construction - there is no skew here
         ))
     return quotes

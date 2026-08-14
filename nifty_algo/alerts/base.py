@@ -21,10 +21,23 @@ from typing import Any, Optional
 
 class AlertKind(str, Enum):
     ENTRY = "entry"                  # a tradeable setup
+    MANAGE = "manage"                # stop moved: breakeven shift or a trail
+    PARTIAL_EXIT = "partial_exit"    # runner banked a lot at +2R
+    EXIT = "exit"                    # a position closed
+    CLOSE_ALL = "close_all"          # a day rule fired while positions were open
     FORCE_EXIT = "force_exit"        # 15:10 - flat before close, non-negotiable #2
     HALT = "halt"                    # session governor tripped
     KILL_SWITCH = "kill_switch"      # data gap or unhandled error
     TEST = "test"                    # channel test from the Settings page
+
+
+# Kinds that describe an OPEN POSITION rather than a proposal. These must never
+# be suppressed by the dedupe window: missing a duplicate entry alert costs you
+# an opportunity, missing an exit alert costs you the trade.
+POSITION_KINDS = frozenset({
+    AlertKind.MANAGE, AlertKind.PARTIAL_EXIT, AlertKind.EXIT,
+    AlertKind.CLOSE_ALL,
+})
 
 
 @dataclass

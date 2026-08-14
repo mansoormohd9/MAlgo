@@ -8,6 +8,7 @@ streamlit>=1.40
 plotly>=5.22
 
 # Data
+kiteconnect>=5.0     # Zerodha: live quotes, real option chain, deep index history
 yfinance>=0.2.40     # delayed fallback feed
 pyarrow>=16.0        # parquet
 requests>=2.32

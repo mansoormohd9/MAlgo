@@ -15,6 +15,36 @@ class CapitalConfig:
     session_stop_pct: float = 0.05     # -5%  of capital -> stop for the day
     max_entries_per_session: int = 3   # 3 orders -> stop for the day
 
+    # --- Give-back ratchet ---
+    # "If I have a positive of 2% in the first order I would like to trail my
+    # stoploss from 5% to 3%, and likewise."
+    #
+    # Expressed as a give-back cap off the day's PEAK realised P&L, so it keeps
+    # working for any sequence of trades instead of needing a lookup table:
+    #
+    #     floor = max(-session_stop_pct, peak - ratchet_giveback_pct)
+    #
+    # With a 5% give-back that reproduces your rule exactly, and keeps going:
+    #
+    #     peak      floor     the day stop now reads
+    #     +0%       -5%       5%   <- opening budget
+    #     +2%       -3%       3%   <- your stated rule
+    #     +4%       -1%       1%
+    #     +6%       +1%       day can no longer finish red
+    #     +8%       +3%
+    #
+    # The "3%" is not a second parameter - it is what a 5% give-back from a
+    # +2% peak reads as on the day's P&L. The floor is monotonic because the
+    # peak is; it never loosens.
+    #
+    # Note that the give-back equals the opening budget, so you always have
+    # exactly three trades' worth of risk (3 x 1.667%) of room below the peak,
+    # which is what keeps this consistent with max_entries_per_session.
+    ratchet_giveback_pct: float = 0.05   # max give-back from the day's peak
+    ratchet_arm_at_pct: float = 0.0      # peak needed before trailing starts;
+                                         # 0.0 trails from the first rupee banked,
+                                         # 0.02 would wait for your +2% before arming
+
     # --- Derived per-trade levels ---
     # Deliberately derived, not independently set, so the three governors
     # above stay mathematically consistent with each other.
@@ -155,13 +185,54 @@ class RegimeConfig:
 
 
 @dataclass
+class TradeManagementConfig:
+    """
+    What happens AFTER the entry. Everything here is denominated in R, where
+    1R is `CapitalConfig.risk_per_trade_rupees`, so the exit ladder speaks the
+    same units as the entry stop.
+    """
+    enable_runner: bool = True
+
+    breakeven_at_r: float = 1.0        # +1R -> stop to entry, trade cannot lose
+    partial_exit_at_r: float = 2.0     # +2R -> bank part of the position
+    partial_exit_lots: int = 1         # how many lots to release at that point
+
+    trail_atr_multiple: float = 1.0    # runner trails 1 ATR behind the underlying
+
+    # NSE requires order quantities in exact multiples of the lot size, so a
+    # partial exit is impossible on a single lot. Size two by default and fall
+    # back to one - with the runner disabled - when two will not fit the risk
+    # budget or the free capital.
+    preferred_lots: int = 2
+    min_lots: int = 1
+
+
+@dataclass
+class BrokerConfig:
+    """
+    Order placement. `dry_run` is the only thing standing between this system
+    and your money; it defaults to True and nothing in the code path flips it
+    automatically.
+    """
+    name: str = "kite"
+    dry_run: bool = True
+
+    exchange: str = "NFO"
+    product: str = "MIS"               # intraday; this system is never overnight
+    order_type: str = "LIMIT"          # never MARKET on an option book
+    limit_buffer_ticks: int = 2        # cross the spread by this much to fill
+    variety: str = "regular"
+
+
+@dataclass
 class DataConfig:
-    provider: str = "csv"              # "csv" | "yfinance" | "fyers" | "dhan"
+    provider: str = "csv"              # "csv" | "kite" | "yfinance" | "fyers" | "dhan"
     symbol: str = "NIFTY"
     yfinance_ticker: str = "^NSEI"
     interval_minutes: int = 5
     lookback_days: int = 5
-    csv_path: str = "data/sample_nifty_5m.csv"
+    csv_path: str = "data/nifty_5m.csv"
+    vix_csv_path: str = "data/india_vix_daily.csv"
     poll_seconds: int = 30
     max_data_gap_bars: int = 3         # exceed this -> kill switch
 
@@ -186,9 +257,13 @@ class BacktestConfig:
     train_months: int = 6
     test_months: int = 2
     mode: str = "underlying"           # "underlying" | "synthetic_premium"
-    assumed_iv: float = 0.14           # only used by synthetic_premium
+    assumed_iv: float = 0.14           # fallback when no VIX reading for the day
+    use_vix_iv: bool = True            # calibrate per-day IV from India VIX
+    vix_to_iv_scale: float = 1.0       # VIX/100 is already an annualised sigma
     risk_free_rate: float = 0.065
     max_bars_in_trade: int = 60        # exit at this many bars if neither hit
+    apply_trade_management: bool = True  # simulate the exit ladder, not a flat 2:1
+    apply_session_governors: bool = True  # simulate the day rules, not just signals
 
 
 @dataclass
@@ -199,6 +274,8 @@ class Config:
     signal: SignalConfig = field(default_factory=SignalConfig)
     strategy: StrategyConfig = field(default_factory=StrategyConfig)
     regime: RegimeConfig = field(default_factory=RegimeConfig)
+    trade: TradeManagementConfig = field(default_factory=TradeManagementConfig)
+    broker: BrokerConfig = field(default_factory=BrokerConfig)
     data: DataConfig = field(default_factory=DataConfig)
     alerts: AlertConfig = field(default_factory=AlertConfig)
     backtest: BacktestConfig = field(default_factory=BacktestConfig)

@@ -7,7 +7,8 @@ import streamlit as st
 from .theme import get_palette
 from .charts import price_chart, build_overlays
 from .components import (feed_banner, session_header, alert_card,
-                         evaluations_table, banner)
+                         evaluations_table, banner, positions_panel,
+                         broker_banner)
 from .state import get_engine, get_config, get_journal, play_alert_sound, engine_error
 
 
@@ -24,6 +25,7 @@ def render() -> None:
         return
 
     feed_banner(engine, p)
+    broker_banner(engine, p)
 
     # --- controls ---
     c1, c2, c3 = st.columns([1.4, 1.4, 3])
@@ -67,6 +69,9 @@ def render() -> None:
         if state.last_run else "Not evaluated yet."
     )
 
+    # --- open positions, before alerts: managing money at risk comes first ---
+    positions_panel(engine, p)
+
     # --- alerts ---
     st.subheader("Alerts")
     if len(state.alerts) > prev_alerts:
@@ -83,8 +88,29 @@ def render() -> None:
             journal.paper_fill(alert.to_dict(), premium,
                                note="manual paper fill from UI")
 
+        def confirm(alert):
+            pos = engine.confirm_entry(alert)
+            if pos is None:
+                st.warning(
+                    "Not entered. The alert is stale, already confirmed, or a "
+                    "day rule has closed the session since it fired. Nothing "
+                    "was sent to the broker."
+                )
+            else:
+                st.success(
+                    f"Entered {pos.state.lots_total} lot(s) of "
+                    f"{pos.quote.strike}{pos.quote.option_type}. Exits, the "
+                    f"breakeven shift and the trail are now automatic."
+                )
+                st.rerun()
+
+        confirmable = {o["key"] for o in state.pending_orders}
         for i, alert in enumerate(reversed(state.alerts[-8:])):
-            alert_card(alert, p, key=f"{i}_{alert.dedupe_key}", on_paper_fill=log_fill)
+            alert_card(
+                alert, p, key=f"{i}_{alert.dedupe_key}",
+                on_paper_fill=log_fill,
+                on_confirm=confirm if alert.dedupe_key in confirmable else None,
+            )
 
     # --- chart ---
     st.subheader("Chart")

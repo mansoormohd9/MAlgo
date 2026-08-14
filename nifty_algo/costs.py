@@ -55,6 +55,21 @@ class CostModel:
         return (self.round_trip(entry_premium, exit_premium, quantity)
                 + self.slippage(quantity))
 
+    # ---- per-leg, for positions that exit in more than one piece ----
+    #
+    # A runner that banks half at +2R and trails the rest is ONE buy and TWO
+    # sells, so it pays the flat brokerage three times, not twice, plus an
+    # extra slippage leg. That is a real cost of scaling out and the backtest
+    # would overstate the runner's benefit if it charged a single round trip.
+
+    def entry_friction(self, entry_premium: float, quantity: int) -> float:
+        return (self._leg(entry_premium * quantity, is_sell=False)
+                + self.slippage(quantity, legs=1))
+
+    def exit_friction(self, exit_premium: float, quantity: int) -> float:
+        return (self._leg(exit_premium * quantity, is_sell=True)
+                + self.slippage(quantity, legs=1))
+
     def breakeven_move(self, entry_premium: float, quantity: int) -> float:
         """
         How far the premium must move in your favour just to break even.

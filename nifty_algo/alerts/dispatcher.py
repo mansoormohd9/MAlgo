@@ -27,7 +27,7 @@ from datetime import datetime, timedelta
 from typing import Callable, Iterable
 
 from ..config import Config, DEFAULT
-from .base import Notifier, TradeAlert, AlertKind
+from .base import Notifier, TradeAlert, AlertKind, POSITION_KINDS
 
 
 class AlertDispatcher:
@@ -46,6 +46,13 @@ class AlertDispatcher:
         # Operational alerts are never suppressed by cooldown. A kill switch
         # that gets rate-limited is a kill switch that did not fire.
         if alert.kind in (AlertKind.KILL_SWITCH, AlertKind.TEST):
+            return None
+
+        # Nor are alerts about a position you already hold. Suppressing a
+        # duplicate ENTRY costs an opportunity; suppressing a stop move or an
+        # exit costs the trade. These describe something that has ALREADY
+        # happened to your money and must always get through.
+        if alert.kind in POSITION_KINDS or alert.kind is AlertKind.FORCE_EXIT:
             return None
 
         a = self.cfg.alerts

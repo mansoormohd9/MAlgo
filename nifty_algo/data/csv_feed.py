@@ -47,9 +47,13 @@ class CsvFeed(DataFeed):
             return self._cache
         if not self.path.exists():
             raise NotConfigured(
-                f"data file not found: {self.path}. Generate the sample with "
-                f"`python -m nifty_algo.data.sample`, or point "
-                f"DataConfig.csv_path at your own file."
+                f"data file not found: {self.path}.\n"
+                f"  Real history:  python scripts/fetch_history.py   "
+                f"(needs a Kite Connect subscription)\n"
+                f"  Fabricated:    python -m nifty_algo.data.sample   "
+                f"then set DataConfig.csv_path to data/sample_nifty_5m.csv\n"
+                f"The sample is a RANDOM WALK. Backtest numbers from it describe "
+                f"nothing. This does not silently fall back to it on purpose."
             )
         if self.path.suffix.lower() in (".parquet", ".pq"):
             df = pd.read_parquet(self.path)

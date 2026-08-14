@@ -6,9 +6,12 @@ A from-scratch algo trading system for NSE index options, sized for a
 Run `python -m nifty_algo.demo_risk` first. It prints the actual economics
 of your rules before you write any strategy logic.
 
-**This system alerts. It never places an order.** It computes the strike,
-size, target, and stop and tells you; you place the trade. There is no broker
-order path anywhere in the package.
+**Entries need your click. Exits do not.** An alert never becomes a position on
+its own — you press **Place order**, which calls `engine.confirm_entry()`. Once
+you are in, the breakeven shift, the partial at +2R and the trailing stop run
+automatically, because a stop that needs a human to press a button is not a
+stop. `BrokerConfig.dry_run` defaults to `True`, so even a confirmed entry only
+logs its payload until you deliberately turn that off.
 
 ---
 
@@ -19,28 +22,39 @@ python -m venv .venv && .venv\Scripts\activate      # Windows
 pip install -r requirements.txt
 
 python -m nifty_algo.demo_risk        # the economics — read this first
-python -m nifty_algo.data.sample      # fabricated sample bars, so nothing blocks
-streamlit run app.py                  # the alert console
+streamlit run app.py                  # the console
 ```
 
-For alerts that reach you with the browser closed, copy `.env.example` to
-`.env`, fill in the Telegram keys, and run the headless loop:
+That runs on the synthetic chain with no data. To use real data:
 
 ```bash
-python -m nifty_algo.run_live --provider yfinance --telegram
+copy .env.example .env                # add KITE_API_KEY / KITE_API_SECRET
+python -m nifty_algo.broker.kite_login    # once per trading day
+python scripts/fetch_history.py           # ~4 years of real 5m NIFTY bars
+python scripts/fetch_vix.py               # India VIX, for backtest IV
+python -m nifty_algo.brief                # the day's frame + scored chain
+```
+
+For alerts that reach you with the browser closed:
+
+```bash
+python -m nifty_algo.run_live --provider kite --telegram
 ```
 
 Streamlit cannot notify you when the tab is shut. That is why the decision
 loop lives in `engine.py` and the UI is only a viewer over it — both drivers
-run identical code.
+run identical code. Note that `run_live` attaches **no broker**: it will use a
+real chain when Kite is authenticated, but it can never place an order, because
+reading quotes and sending orders are separate permissions.
 
-### The five pages
+### The six pages
 
 | Page | What it does |
 |---|---|
-| **Live alerts** | Session governors, alert cards with entry/target/stop/strike/size, candlestick chart with the levels, trendlines and VWAP the strategies actually used, and a *why nothing fired* table |
+| **Live alerts** | Session governors with the live ratcheting floor, open positions and where their stops actually sit, alert cards with a **Place order** button, candlestick chart with the levels/trendlines/VWAP the strategies used, and a *why nothing fired* table |
+| **Daily brief** | Pre-open frame (gap, ATR, VIX, expiry, the day's rupee budget); the option chain with **which gate each strike fails**; and a journal-driven review of any past day |
 | **Strategies** | Toggle each of the ten setups, tune every parameter, control the regime gate |
-| **Backtest** | Walk-forward run, metrics, equity curve, per-strategy expectancy, trade list |
+| **Backtest** | Walk-forward run, metrics, equity curve, per-strategy expectancy, **and how the day rules behaved** — target hits, floor hits, ratchets, entries used |
 | **Journal** | The append-only record, filterable, CSV/JSONL export |
 | **Settings** | Feed choice, notification channels with per-channel test buttons, `.env` status |
 
@@ -50,9 +64,9 @@ run identical code.
 
 | Rule | Value | Level |
 |---|---|---|
-| Session target | +10% (₹10,000) | Stop trading for the day |
-| Session stop | −5% (₹5,000) | Stop trading for the day |
-| Max entries | 3 | Stop trading for the day |
+| Session target | +10% (₹10,000) | **Close everything**, stop for the day |
+| Session floor | ratcheting, starts −5% | **Close everything**, stop for the day |
+| Max entries | 3 | Block new entries; keep managing what is open |
 | Risk per trade | 1.67% (₹1,667) | *derived* = 5% ÷ 3 |
 | Reward per trade | 3.33% (₹3,333) | *derived* = 10% ÷ 3 |
 | Reward:risk | 2.00 : 1 | breakeven win rate 33.3% |
@@ -61,26 +75,84 @@ The three governors are self-consistent: three consecutive losses land
 exactly on the session stop. "Max 3 orders" and "5% stop" are the same
 constraint expressed twice — that's a feature, keep it.
 
+Note the difference in the *Level* column. The target and the floor **flatten
+open positions**; running out of entries does not. That distinction matters
+because a runner can carry the day past +10% while it is still open, and
+blocking entries would do nothing about it. `governor.py` returns `CLOSE_ALL`
+for exactly that case.
+
+### The give-back ratchet
+
+> *"If I have a positive of 2% in the first order I would like to trail my
+> stoploss from 5% to 3%, and likewise."*
+
+Implemented as a give-back cap off the day's **peak realised P&L**, so it works
+for any sequence of trades rather than needing a lookup table:
+
+```
+floor = max(-5% of capital,  peak - 5% of capital)
+```
+
+| Peak realised | Floor | The day stop now reads |
+|---|---|---|
+| ₹0 | −₹5,000 | 5% — the opening budget |
+| **+₹2,000** | **−₹3,000** | **3% — your stated rule** |
+| +₹4,000 | −₹1,000 | 1% |
+| +₹6,000 | +₹1,000 | the day can no longer finish red |
+| +₹8,000 | +₹3,000 | |
+
+The "3%" is not a second parameter — it is what a 5% give-back from a +2% peak
+reads as. The floor is monotonic because the peak is, so it never loosens. And
+because the give-back equals the opening budget, you always have exactly three
+trades' worth of room below the peak, which keeps the ratchet consistent with
+`max_entries_per_session = 3`. Set `ratchet_arm_at_pct = 0.02` if you prefer
+the stricter reading where trailing does not begin until +2% is banked.
+
 ## The constraint that shapes everything
 
 ```
-max premium loss per unit = ₹1,667 / 65 = ₹25.64
-required delta            ≤ 25.64 / underlying_stop_points
+max premium loss per unit = ₹1,667 / (65 × lots)
+required delta            ≤ that / underlying_stop_points
 ```
 
-| Underlying stop | Max delta | Implication |
+**Lots is in the denominator.** Risk per trade is fixed, so doubling the size
+does not double the risk — it *halves the delta you may buy*.
+
+| Underlying stop | Max delta @ 1 lot | Max delta @ 2 lots |
 |---|---|---|
-| 40 pts | 0.64 | ATM affordable, but stop is inside the noise |
-| 60 pts | 0.43 | near-ATM |
-| 80 pts | 0.32 | OTM only |
-| 120 pts | 0.21 | deep OTM, gamma risk |
+| 30 pts | 0.85 → capped 0.45 | 0.43 |
+| 50 pts | 0.51 | 0.26 |
+| 64 pts | 0.40 | 0.20 — the boundary |
+| 80 pts | 0.32 | 0.16 — **no viable strike** |
 
 **The stop chooses the strike, not the reverse.** Every retail trader who
 picks a strike first and then "sets a stop" has the causality backwards.
 
 Sweet spot for this account: **60–80 point stop, 0.30–0.40 delta**, premium
-₹90–150, lot cost ₹6,000–10,000. Round-trip friction there is ~₹70, about
-4% of your risk budget.
+₹90–150. Round-trip friction there is ~₹70, about 4% of your risk budget.
+
+## Trade management
+
+| Trigger | Action |
+|---|---|
+| Entry | Stop −1R, target +2R |
+| +1R | Stop to breakeven — the trade can no longer lose |
+| +2R | **Bank one lot**; the rest becomes a runner |
+| Runner | Stop trails 1 ATR behind the underlying, **ratchet only** |
+| Stop touched | Exit whatever remains |
+| 15:10 | Force exit, unconditional |
+
+**The runner needs two lots.** NSE fills whole lots only, and NIFTY is 65 — you
+cannot sell 32 of one lot, so "bank half" is impossible on a single lot.
+`approve()` therefore sizes `preferred_lots` (2) and falls back to 1 when the
+halved delta ceiling leaves no viable strike. On the fallback the runner is
+**disabled** and 2R is a full exit; the alert says so in `sizing_note`, because
+a trade that silently became a plain 2:1 is one you would misread all day.
+
+`ExitLadder` in `positions.py` is written in **R and nothing else** — no
+premiums, no lots, no rupees. The live engine feeds it R computed from the
+option premium; the backtester feeds it R computed from the underlying. One
+state machine, so there is exactly one implementation to be wrong.
 
 ---
 
@@ -107,20 +179,25 @@ intend to trade.
 | File | Role |
 |---|---|
 | `config.py` | Every tunable number. Nothing hardcoded elsewhere. |
-| `costs.py` | Indian statutory charges + slippage. |
+| `costs.py` | Indian statutory charges + slippage, charged **per leg** so a scale-out pays its extra brokerage. |
 | `signals.py` | Pure functions: ATR, pivots, levels, trendlines, VWAP, EMA, compression, sweeps, gaps. |
 | `strategy.py` | `Strategy` ABC + `LevelBreakStrategy`. **Unchanged — do not edit.** |
 | `strategies/` | Eight added setups + the registry the UI and backtester share. |
-| `risk.py` | Session governors, strike selection, position bookkeeping. |
+| `risk.py` | Strike selection, sizing, approval. Delegates the day rules to `governor.py`. |
+| `governor.py` | The day rules: target, the ratcheting give-back floor, entry count. Pure arithmetic, separately testable. |
+| `positions.py` | `ExitLadder` (unit-free, in R) + `PositionManager`. Breakeven shift, partial, trail. |
 | `regime.py` | Day classifier — decides which strategies may speak today. |
-| `pricing.py` | Black-Scholes, for the synthetic chain and the backtest premium mode. |
-| `data/` | `DataFeed` ABC, CSV replay + `BarReplayer`, yfinance, Fyers/Dhan, chain provider. |
+| `pricing.py` | Black-Scholes, plus `implied_vol()` — premium → IV → delta, per strike, which is how skew becomes visible. |
+| `data/` | `DataFeed` ABC, CSV replay + `BarReplayer`, **Kite**, yfinance, Fyers/Dhan, chain provider. |
+| `broker/` | **The only package that can spend money.** Kite auth, real chain, order placement. |
 | `alerts/` | `TradeAlert`, four channels, and the de-duplicating dispatcher. |
 | `engine.py` | The decision loop. Headless; driven by both the UI and `run_live`. |
+| `brief.py` | The daily brief — CLI and the Streamlit page share this one implementation. |
 | `journal.py` | Append-only JSONL, one file per trading day. |
 | `backtest.py` | Walk-forward, two modes. Read its docstring before its numbers. |
-| `run_live.py` | Headless runner — alerts with the browser closed. |
+| `run_live.py` | Headless runner — alerts with the browser closed, no broker attached. |
 | `demo_risk.py` | Prints the economics. Start here. |
+| `../scripts/` | `fetch_history.py`, `fetch_vix.py` — one-time and daily data pulls. |
 | `../app.py` | Streamlit console. A viewer over the engine; decides nothing. |
 
 ### Your discretionary signals, made mechanical
@@ -194,29 +271,76 @@ switch alerts are exempt — a rate-limited kill switch is one that did not fire
 
 ---
 
+## Market data: what is possible, and what is not
+
+**Zerodha Kite Connect** — ₹500/month per API key, with historical data bundled
+into that price since February 2025 (it used to be a separate ₹2,000/month
+add-on). Longest track record of the Indian broker APIs and the largest
+ecosystem. `python -m nifty_algo.broker.kite_login` once each trading morning:
+the access token is issued per login and dies overnight, there is no refresh
+token, and any library claiming otherwise is scraping the login form.
+
+**The hard limit, and it shapes the whole backtest.** Kite serves **no
+historical data for expired option contracts** — once a weekly expires, its
+instrument token is retired. Zerodha have said on their own developer forum
+that they have no plans to add it. There is no route to a premium-level options
+backtest through Kite at any subscription tier. If you want real 1-minute option
+history, that is a paid vendor (TrueData, GlobalDatafeeds; roughly ₹1–3k/month),
+and it is a clean swap at the feed layer rather than a rewrite.
+
+Index tokens, by contrast, never expire — which is why `scripts/fetch_history.py`
+can pull years of real NIFTY 5-minute bars, and why the backtest is built on
+**real index history with modelled premiums** rather than the reverse.
+
+**Two things the index feed does not give you.** It has no traded volume — an
+index is a computed average and nothing trades in it — and Kite returns 0. Left
+unhandled that was three silent failures at once: `volume_surge` returned True
+on every bar (`0 >= 0 × 1.5`), `vwap` returned all-NaN so the VWAP strategy
+quietly never fired, and `underlying_liquidity_ok` blocked everything. Now
+`signals.has_traded_volume()` detects it and the gates fall back to range
+expansion, with VWAP degrading to a session TWAP. Same claim, different
+measurement — the backtester and the brief both say so out loud.
+
+**Not Lemonn.** It has no public developer API in India; its SmartInvest product
+is no-code prebuilt strategies. The `lemon.markets` API that turns up in
+searches is an unrelated European company.
+
 ## Roadmap
 
-**Phase 1 — Data ✅ scaffolded, ⬜ real history still needed**
-`DataFeed` ABC with CSV/Parquet replay, yfinance fallback, and Fyers/Dhan
-adapters. `BarReplayer` enforces the pivot confirmation delay (`find_pivots`
-uses a centred window — live you only know a pivot `lookback` bars later), and
-`tests/test_lookahead.py` asserts that property directly. **What remains: pull
-≥18 months of real Fyers or Dhan minute data.** The sample generator produces a
-random walk; it exercises the pipeline and proves nothing about edge.
+**Phase 1 — Data ✅**
+`DataFeed` ABC with CSV/Parquet replay, **Kite**, yfinance fallback, and
+Fyers/Dhan adapters. `BarReplayer` enforces the pivot confirmation delay
+(`find_pivots` uses a centred window — live you only know a pivot `lookback`
+bars later), and `tests/test_lookahead.py` asserts that property directly.
+`scripts/fetch_history.py` pulls real NIFTY 5-minute history, resumably. The
+sample generator is still a random walk and `CsvFeed` will **not** silently fall
+back to it.
 
-**Phase 2 — Backtest ✅**
-Walk-forward, train 6 / test 2, rolling; only test windows scored. Reports win
-rate, expectancy, max drawdown, longest losing streak, and profit factor **after
-`costs.py` friction**. Intrabar ties resolve to the stop, pessimistically.
+**Phase 2 — Backtest ✅, and it now tests the rules, not just the signals**
+Walk-forward, train 6 / test 2, rolling; only test windows scored. Intrabar ties
+resolve to the stop, pessimistically — including for the trailing stop.
+
+The previous version built a `RiskEngine` per simulated day and never called
+`register_exit`, so realised P&L stayed at zero, the target and floor could
+never fire, and the only governor with any effect was the entry count. It
+measured the setups. It did not measure the system. Now every simulated exit is
+booked and the result carries a `DayStats` block: days that hit the target, days
+that hit the floor, days the floor ratcheted, entries used, trades that banked a
+partial.
 
 **Phase 3 — Option pricing in backtest ⚠️ partial, and honestly labelled**
-There are still no historical option chains. Two modes instead:
+There are no historical option chains, at any price (see above). Two modes:
 `UNDERLYING` measures whether the setup reaches +2R before −1R on the
 underlying — the only question the signal layer can answer, and trustworthy.
-`SYNTHETIC_PREMIUM` prices that move through Black-Scholes at one flat IV and
-is **optimistic by 15–25%**, exactly as this section originally warned. The UI
-prints that sentence beside every number the mode produces. Neither is evidence
-to trade live capital.
+`SYNTHETIC_PREMIUM` prices that move through Black-Scholes at **that day's India
+VIX** rather than a flat 14%, which removes a bias that ran in opposite
+directions across calm and violent periods. It still has no skew and still
+fills every order, and is **optimistic by 15–25%**. Neither is evidence to trade
+live capital.
+
+Your rules survive this limitation better than most would, because they are
+denominated in R and in rupees off the underlying — `UNDERLYING` mode tests the
+ladder and the ratchet properly. It is the premium P&L that stays approximate.
 
 **Phase 4 — Paper trade**
 Minimum 40 live-market sessions with real WebSocket data and simulated
@@ -231,26 +355,42 @@ IP or VPS. Start at half the computed size for 20 sessions.
 ## Compliance checklist (mandatory since 1 April 2026)
 
 - [ ] Broker API that is registered under the retail algo framework
-      (Fyers / Dhan / Angel One / Zerodha — **not** IndMoney or Lemon)
+      (Zerodha / Fyers / Dhan / Angel One — **not** IndMoney or Lemonn)
 - [ ] Strategy registered via broker → exchange Algo-ID
 - [ ] Static IP or registered VPS whitelisted in the broker dev console
-- [ ] Order rate held under 10 orders/sec (trivially true here)
+- [ ] Order rate held under 10 orders/sec (trivially true here — Kite caps at 3)
 - [ ] White-box logic, own account only — no separate SEBI registration needed
+
+`confirm_entry()` is human-initiated by design, which is why this is built as
+one-click confirmation rather than autonomous execution. **Check your own
+obligations with Zerodha before setting `dry_run = False`.**
+
+### One operational dependency you must know about
+
+`kite_orders.modify_stop()` deliberately does **not** place a resting SL order
+at the broker. The stop trails on the underlying's ATR, so its premium level is
+recomputed every bar, and a resting order would have to be modified on every one
+of those bars — each modify being a request that can fail, be rejected, or race
+the fill. The engine holds the stop and sends a SELL when it triggers.
+
+**Which means the stop only exists while the engine is running.** That is a real
+dependency, and you should know it rather than discover it.
 
 ## Non-negotiables
 
 | # | Rule | Where it is enforced |
 |---|---|---|
-| 1 | Kill switch on any unhandled exception, data gap, or broker error | `engine.run_once()` catches everything and calls `trip_kill_switch()`; `DataFeed.detect_gap()` finds holes in the bar stream. Re-arming is manual — a kill switch that clears itself is a warning you never read. |
-| 2 | Flat before 15:10. Never carry an intraday option overnight | `engine._maybe_force_exit()` fires a force-exit alert at `session.force_exit` |
-| 3 | Every order, fill, and rejection in an append-only journal | `journal.py` — JSONL, one file per day, opened `"a"`, never rewritten. **Rejections are logged as carefully as approvals**: "risk refused 14 setups because no strike fit the budget" is a finding, and it is invisible if you only log fills. |
-| 4 | No live capital until paper slippage matches the model | Nothing in this package can place an order. Log paper fills from the Live page and accumulate the 40 sessions. |
-| 5 | Never buy an option with a spread wider than 0.5% of premium | `RiskEngine.select_strike()` — but note this gate **cannot reject a synthetic quote**, because the synthetic chain fabricates its own spread and OI to pass. Alerts built on a synthetic chain say so. |
+| 1 | Kill switch on any unhandled exception, data gap, or broker error | `engine.run_once()` catches everything and calls `trip_kill_switch()`; `DataFeed.detect_gap()` finds holes in the bar stream. Re-arming is manual — a kill switch that clears itself is a warning you never read. **`NotConfigured` is the one exception**: a missing file or an expired Kite token blocks loudly but does not latch, because a manual re-arm every morning before login trains you to click through the warning. |
+| 2 | Flat before 15:10. Never carry an intraday option overnight | `engine._maybe_force_exit()` alerts at `session.force_exit`, and `PositionManager.update()` force-exits every open position at that time regardless of where the ladder stands. |
+| 3 | Every order, fill, and rejection in an append-only journal | `journal.py` — JSONL, one file per day, opened `"a"`, never rewritten. **Rejections are logged as carefully as approvals**: "risk refused 14 setups because no strike fit the budget" is a finding, and it is invisible if you only log fills. Every stop move, partial and exit is journalled as `position_action`. |
+| 4 | No live capital until paper slippage matches the model | `BrokerConfig.dry_run` defaults to `True` and nothing in the code path flips it. Run dry for the 40 sessions and compare the modelled premium in each alert against what actually filled. |
+| 5 | Never buy an option with a spread wider than 0.5% of premium | `RiskEngine.select_strike()`. Against a **real** Kite chain this gate finally does work — `tests/test_kite_and_chain.py` asserts a wide-spread quote is rejected. On a synthetic chain it still cannot bite, because the synthetic chain fabricates its spread and OI to pass, and alerts built on one say so. |
+| 6 | Exit alerts are never suppressed | `dispatcher._suppressed()` exempts every `POSITION_KIND`. Suppressing a duplicate *entry* costs an opportunity; suppressing a stop move or an exit costs the trade. |
 
 ## Testing
 
 ```bash
-pytest                    # 50 tests
+pytest                    # 131 tests
 ```
 
 The suite that matters most is `tests/test_lookahead.py`. Every other failure
@@ -258,6 +398,15 @@ gives you a wrong answer you can see; look-ahead bias gives you a *flattering*
 one you cannot, and it invalidates every backtest number silently. Those tests
 build a frame with one unmistakable swing high and assert the replayer hides it
 until the confirming bars have printed.
+
+| File | What it pins |
+|---|---|
+| `test_lookahead.py` | The replayer hides unconfirmed pivots. Read this one first. |
+| `test_governor.py` | The ratchet, row by row; the floor is monotonic; three losses land exactly on −₹5,000 |
+| `test_positions.py` | Breakeven at +1R, partial at +2R, **the trail never loosens**, one bar crosses every rung it passed, the stop is tested at its pre-bar level |
+| `test_engine_lifecycle.py` | Confirm → manage → exit → day over. Includes the case the old design could not handle: a runner alone reaching +10% while still open. |
+| `test_kite_and_chain.py` | Kite candles become tz-naive IST; IV inversion round-trips and refuses sub-intrinsic quotes; **wide spreads and thin OI are rejected**; expiry comes from the dump, not the weekday guess |
+| `test_volumeless_index.py` | The three silent failures on a volume-less index series, all three fixed |
 
 ---
 

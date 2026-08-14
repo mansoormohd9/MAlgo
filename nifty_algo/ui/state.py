@@ -69,11 +69,43 @@ def get_engine(rebuild: bool = False) -> TradingEngine | None:
                  DesktopNotifier(), EmailNotifier()]
     dispatcher = AlertDispatcher(notifiers, cfg, journal_fn=journal.write)
 
+    chain_provider, broker = _build_kite(cfg, journal)
+
     keys = st.session_state.get("enabled_strategies", default_enabled_keys())
-    engine = TradingEngine(feed, dispatcher, cfg, keys, journal)
+    engine = TradingEngine(feed, dispatcher, cfg, keys, journal,
+                           chain_provider=chain_provider, broker=broker)
     st.session_state.engine = engine
     st.session_state.engine_error = None
     return engine
+
+
+def _build_kite(cfg: Config, journal: Journal):
+    """
+    Attach the real chain and the order path, when Kite is available.
+
+    Returns (chain_provider, broker). Both are None-safe: without credentials
+    the engine falls back to the synthetic chain and to alerts-only, which is
+    exactly how it behaved before Kite existed. Nothing here can fail in a way
+    that stops the engine starting - a broken broker must not cost you the
+    ability to see your signals.
+    """
+    from ..data.chain import ChainProvider
+    try:
+        from ..broker.kite_auth import KiteSession
+        from ..broker.kite_chain import KiteChain
+        from ..broker.kite_orders import KiteOrders
+
+        session = KiteSession()
+        if not session.authenticated:
+            return ChainProvider(cfg), None
+
+        chain = KiteChain(session, cfg)
+        provider = ChainProvider(cfg, broker_chain=chain)
+        orders = KiteOrders(session, cfg, chain=chain, journal=journal)
+        return provider, orders
+    except Exception as e:
+        st.session_state.kite_error = str(e)
+        return ChainProvider(cfg), None
 
 
 def engine_error() -> str | None:

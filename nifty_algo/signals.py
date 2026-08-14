@@ -54,8 +54,61 @@ def is_doji(df: pd.DataFrame, max_body_ratio: float = 0.15) -> pd.Series:
     return body_to_range(df) <= max_body_ratio
 
 
+# ---------------- participation: volume, or a proxy for it ----------------
+#
+# NSE INDEX series carry no traded volume. Kite, Fyers and Dhan all return
+# volume 0 for NIFTY 50, because an index is a computed average and nothing
+# trades in it. Left unhandled that is three SILENT failures at once:
+#
+#   volume_surge()          0 >= 0 * 1.5 is True -> the confirmation gate
+#                           passes on every bar, so breakouts are never filtered
+#   vwap()                  cumulative volume 0 -> NaN -> every VWAP comparison
+#                           is False, so the VWAP strategy quietly never fires
+#   underlying_liquidity_ok baseline 0 -> False -> blocks everything
+#
+# Each of those looks like normal behaviour from the outside. So instead of
+# assuming volume exists, detect it, and where it is absent substitute the
+# closest honest proxy for what the gate was actually asking.
+#
+# The question behind the volume gate is "did this bar have participation?".
+# Without volume the observable proxy is range expansion: a bar whose range
+# meaningfully exceeds the recent average. It is not the same measurement and
+# it should not be described as one, but it tests the same claim.
+
+def has_traded_volume(df: pd.DataFrame) -> bool:
+    """
+    Whether this frame carries real traded volume.
+
+    Callers that report to a human should surface this, because a system
+    running without volume is running with a weaker confirmation than the
+    strategy docstrings describe.
+    """
+    if "volume" not in df.columns:
+        return False
+    v = df["volume"]
+    return bool(v.notna().any() and (v.fillna(0) > 0).any())
+
+
+def _participation_weights(df: pd.DataFrame) -> pd.Series:
+    """Volume when it exists, equal weights when it does not."""
+    if has_traded_volume(df):
+        return df["volume"].fillna(0.0)
+    return pd.Series(1.0, index=df.index)
+
+
 def volume_surge(df: pd.DataFrame, lookback: int = 20,
                  multiple: float = 1.5) -> pd.Series:
+    """
+    Participation confirmation.
+
+    With volume: this bar's volume is `multiple` x the rolling average.
+    Without volume: this bar's RANGE is `multiple` x the rolling average range.
+    """
+    if not has_traded_volume(df):
+        rng = (df["high"] - df["low"]).abs()
+        baseline = rng.rolling(lookback).mean()
+        return (rng >= baseline * multiple).fillna(False)
+
     baseline = df["volume"].rolling(lookback).mean()
     return df["volume"] >= baseline * multiple
 
@@ -170,11 +223,21 @@ def fit_trendline(df: pd.DataFrame, lookback: int = 5,
 
 def underlying_liquidity_ok(df: pd.DataFrame, lookback: int = 20,
                             min_ratio: float = 0.5) -> bool:
-    """Refuse to trade in a dead tape - thin volume means bad option fills."""
+    """
+    Refuse to trade in a dead tape - thin activity means bad option fills.
+
+    Falls back to range when the frame has no volume (see has_traded_volume).
+    A dead tape shows up as a collapsed range just as clearly as it shows up
+    as thin volume.
+    """
     if len(df) < lookback + 1:
         return False
-    recent = float(df["volume"].iloc[-1])
-    baseline = float(df["volume"].iloc[-lookback:].mean())
+    if has_traded_volume(df):
+        series = df["volume"]
+    else:
+        series = (df["high"] - df["low"]).abs()
+    recent = float(series.iloc[-1])
+    baseline = float(series.iloc[-lookback:].mean())
     return baseline > 0 and recent / baseline >= min_ratio
 
 
@@ -200,13 +263,19 @@ def vwap(df: pd.DataFrame) -> pd.Series:
     Session-anchored VWAP. Resets at each new calendar day in the index, so a
     multi-day frame gives you one VWAP per session rather than a running
     average across days (which would be meaningless intraday).
+
+    On a volume-less index frame this degrades to an equal-weighted session
+    average of typical price - a session TWAP. That is a DIFFERENT benchmark:
+    real VWAP is where the volume actually traded, TWAP is only where price
+    spent its time. The reclaim setups still work against it, but call it what
+    it is - check has_traded_volume() before describing it as VWAP to a human.
     """
     tp = typical_price(df)
-    pv = tp * df["volume"]
+    w = _participation_weights(df)
     day = pd.Series(df.index.date, index=df.index)
-    cum_pv = pv.groupby(day).cumsum()
-    cum_vol = df["volume"].groupby(day).cumsum().replace(0, np.nan)
-    return cum_pv / cum_vol
+    cum_pv = (tp * w).groupby(day).cumsum()
+    cum_w = w.groupby(day).cumsum().replace(0, np.nan)
+    return cum_pv / cum_w
 
 
 def vwap_bands(df: pd.DataFrame, sigma: float = 1.0) -> tuple[pd.Series, pd.Series, pd.Series]:
@@ -216,11 +285,11 @@ def vwap_bands(df: pd.DataFrame, sigma: float = 1.0) -> tuple[pd.Series, pd.Seri
     """
     vw = vwap(df)
     tp = typical_price(df)
+    w = _participation_weights(df)
     day = pd.Series(df.index.date, index=df.index)
-    sq = ((tp - vw) ** 2) * df["volume"]
-    cum_sq = sq.groupby(day).cumsum()
-    cum_vol = df["volume"].groupby(day).cumsum().replace(0, np.nan)
-    dev = np.sqrt(cum_sq / cum_vol)
+    cum_sq = (((tp - vw) ** 2) * w).groupby(day).cumsum()
+    cum_w = w.groupby(day).cumsum().replace(0, np.nan)
+    dev = np.sqrt(cum_sq / cum_w)
     return vw - dev * sigma, vw, vw + dev * sigma
 
 

@@ -21,12 +21,14 @@ def render() -> None:
 
     banner(
         "<b>What this can and cannot measure.</b> There are no historical option "
-        "chains in this project. <b>Underlying</b> mode measures the only question "
-        "the signal layer can answer — does the setup reach +2R before −1R on the "
-        "underlying, after friction. <b>Synthetic premium</b> mode prices that same "
-        "move through Black-Scholes at one flat IV, and per the README's Phase 3 "
-        "note is <b>optimistic by 15–25%</b>. Neither is evidence to trade live "
-        "capital; forty paper sessions still come first.",
+        "chains available at any price — Kite serves no data for expired contracts "
+        "and retires their instrument tokens. <b>Underlying</b> mode measures the "
+        "only question the signal layer can answer — does the setup reach +2R "
+        "before −1R on the underlying, after friction. <b>Synthetic premium</b> "
+        "mode prices that same move through Black-Scholes at that day's India VIX, "
+        "with no skew, and per the README's Phase 3 note is <b>optimistic by "
+        "15–25%</b>. Neither is evidence to trade live capital; forty paper "
+        "sessions still come first.",
         p.warning, "⚠")
 
     infos = all_strategies()
@@ -123,6 +125,36 @@ def render() -> None:
                    f"optimistic by 15–25%, see the banner above.")
 
     st.plotly_chart(equity_curve(result.equity_curve_r, p), width="stretch")
+
+    # ---------------- the day rules ----------------
+    # Trade-level R says whether the SETUPS have edge. This block says whether
+    # the money management helps or hurts, which is a separate question and the
+    # one the original backtester could not answer at all.
+    d = result.day_stats
+    if d.days:
+        st.subheader("Session rules")
+        st.caption("How the day governors actually behaved — the +10% target, "
+                   "the ratcheting give-back floor, and the 3-entry budget. "
+                   "Trade R measures the signals; this measures the rules.")
+        g1, g2, g3, g4 = st.columns(4)
+        g1.metric("Trading days", d.days,
+                  f"{d.green_days} green", delta_color="off")
+        g2.metric("Hit +10% target", d.days_hit_target,
+                  f"{d.days_hit_target / d.days:.0%} of days", delta_color="off")
+        g3.metric("Hit give-back floor", d.days_hit_floor,
+                  f"floor ratcheted on {d.days_ratcheted}", delta_color="off")
+        g4.metric("Avg entries/day", f"{d.avg_entries:.2f}",
+                  f"of {cfg.capital.max_entries_per_session} · "
+                  f"₹{d.avg_realised:,.0f}/day", delta_color="off")
+
+        runners = d.trades_with_partial
+        if cfg.trade.enable_runner:
+            st.caption(
+                f"{runners} of {len(result.trades)} trades reached +2R and "
+                f"banked a partial, leaving a runner. If that number is zero "
+                f"the runner is not doing anything and the extra brokerage on "
+                f"the second exit is pure cost."
+            )
 
     # ---------------- per strategy ----------------
     if len(result.by_strategy) > 1:

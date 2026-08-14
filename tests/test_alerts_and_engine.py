@@ -180,8 +180,11 @@ def test_session_governors_stop_the_day_after_three_entries():
         e.register_entry(order, "long")
         e.register_exit(e.session.open_positions[-1], -1667.0)
 
+    # Three losses of 1R land on -Rs 5,001, a rupee past the day's opening
+    # floor - which is the whole point of deriving risk-per-trade from the
+    # session stop. Either governor tripping first is correct.
     assert e.check_halt(now=time(11, 0)).value in (
-        "max_entries_reached", "session_stop_hit")
+        "max_entries_reached", "give_back_floor_hit")
 
 
 # ---------------------------------------------------------------- pricing

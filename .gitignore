@@ -5,6 +5,10 @@
 journal/
 *.jsonl
 
+# Kite access token - a bearer credential for a live trading account.
+.kite_session.json
+.kite_instruments.csv
+
 # --- Market data (large, re-downloadable, not source) ---
 data/*.csv
 data/*.parquet

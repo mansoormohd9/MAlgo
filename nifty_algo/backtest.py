@@ -49,10 +49,12 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
+from . import signals as sig
 from .config import Config, DEFAULT
 from .costs import CostModel, DEFAULT_COSTS
 from .data.csv_feed import BarReplayer
 from .data.base import DataFeed
+from .positions import ExitKind, ExitLadder
 from .pricing import bs_price, bs_delta, time_to_expiry_years
 from .data.chain import next_weekly_expiry
 from .regime import classify, is_allowed
@@ -88,6 +90,9 @@ class BacktestTrade:
     bars_held: int
     r_multiple: float                 # net of friction, in R units
     reason: str = ""
+    lots: int = 1
+    exit_legs: int = 1                # >1 means the runner banked a partial
+    partial_banked: bool = False
     # synthetic-premium mode only
     entry_premium: float = 0.0
     exit_premium: float = 0.0
@@ -136,6 +141,41 @@ class Fold:
 
 
 @dataclass
+class DayStats:
+    """
+    How the SESSION RULES behaved, as opposed to how the signals behaved.
+
+    Trade-level R tells you whether the setups have edge. This tells you
+    whether your day rules help or hurt: how often the +10% target is actually
+    reached, how often the ratcheting floor ends a day that had been green,
+    and how much of the three-entry budget gets used.
+    """
+    days: int = 0
+    days_hit_target: int = 0
+    days_hit_floor: int = 0
+    days_ratcheted: int = 0
+    days_max_entries: int = 0
+    avg_entries: float = 0.0
+    avg_realised: float = 0.0
+    green_days: int = 0
+    trades_with_partial: int = 0
+
+    def as_dict(self) -> dict:
+        return {
+            "Trading days": self.days,
+            "Green days": f"{self.green_days} "
+                          f"({self.green_days / self.days:.0%})" if self.days else "0",
+            "Hit +10% target": self.days_hit_target,
+            "Hit give-back floor": self.days_hit_floor,
+            "Floor ratcheted": self.days_ratcheted,
+            "Used all 3 entries": self.days_max_entries,
+            "Avg entries/day": f"{self.avg_entries:.2f}",
+            "Avg realised/day": f"Rs {self.avg_realised:,.0f}",
+            "Trades that banked a partial": self.trades_with_partial,
+        }
+
+
+@dataclass
 class BacktestResult:
     mode: Mode
     folds: list[Fold]
@@ -143,6 +183,7 @@ class BacktestResult:
     metrics: Metrics
     by_strategy: dict[str, Metrics]
     warnings: list[str]
+    day_stats: DayStats = field(default_factory=DayStats)
 
     @property
     def equity_curve_r(self) -> pd.Series:
@@ -192,19 +233,47 @@ class Backtester:
         self.cfg = cfg
         self.costs = costs
         self.warnings: list[str] = []
+        self.ladder = ExitLadder(cfg)
+        self._vix: Optional[pd.Series] = None
+        self._days: list[dict] = []
+        self._day_outcomes: list[str] = []
+        self.load_vix()
 
     def run(self, bars: pd.DataFrame, strategy_keys: list[str] | None = None,
             mode: Mode = Mode.UNDERLYING) -> BacktestResult:
         bars = bars.sort_index()
         self.warnings = []
+        self._days = []
+        self._day_outcomes = []
+
+        if not sig.has_traded_volume(bars):
+            self.warnings.append(
+                "This frame has NO TRADED VOLUME - it is an index series. The "
+                "participation gates fall back to range expansion and VWAP "
+                "degrades to a session TWAP (see signals.has_traded_volume). "
+                "Both test the same claim as the volume versions but they are "
+                "not the same measurement, so a strategy tuned on volume data "
+                "is not being reproduced here."
+            )
 
         if mode is Mode.SYNTHETIC_PREMIUM:
+            b = self.cfg.backtest
+            iv_note = (f"per-day IV from India VIX ({len(self._vix):,} days loaded)"
+                       if self._vix is not None and b.use_vix_iv
+                       else f"a single flat IV of {b.assumed_iv:.0%}")
             self.warnings.append(
-                "SYNTHETIC_PREMIUM mode: premiums are Black-Scholes at a single flat "
-                f"IV of {self.cfg.backtest.assumed_iv:.0%}, with no skew, no spread, "
-                "and guaranteed fills. Per the README's Phase 3 note these results are "
-                "OPTIMISTIC BY 15-25%. Do not treat this P&L as achievable."
+                f"SYNTHETIC_PREMIUM mode: premiums are Black-Scholes at {iv_note}, "
+                "with NO SKEW, no spread and guaranteed fills. Per the README's "
+                "Phase 3 note these results are OPTIMISTIC BY 15-25%. Do not treat "
+                "this P&L as achievable."
             )
+            if self._vix is None and b.use_vix_iv:
+                self.warnings.append(
+                    f"India VIX not found at {self.cfg.data.vix_csv_path} - fell "
+                    f"back to a flat {b.assumed_iv:.0%}. Run scripts/fetch_vix.py. "
+                    f"A flat IV overprices calm periods and underprices violent "
+                    f"ones, in opposite directions."
+                )
 
         folds = self._make_folds(bars)
         if not folds:
@@ -245,7 +314,26 @@ class Backtester:
             metrics=compute_metrics(all_trades, rr),
             by_strategy=by_strategy,
             warnings=self.warnings,
+            day_stats=self._compute_day_stats(all_trades),
         )
+
+    def _compute_day_stats(self, trades: list[BacktestTrade]) -> DayStats:
+        d = DayStats(days=len(self._days))
+        d.trades_with_partial = sum(1 for t in trades if t.partial_banked)
+        if not self._days:
+            return d
+        d.days_hit_target = sum(1 for x in self._days
+                                if x["outcome"] == "session_target_hit")
+        d.days_hit_floor = sum(1 for x in self._days
+                               if x["outcome"] == "give_back_floor_hit")
+        d.days_ratcheted = sum(1 for x in self._days if x["ratcheted"])
+        d.days_max_entries = sum(
+            1 for x in self._days
+            if x["entries"] >= self.cfg.capital.max_entries_per_session)
+        d.green_days = sum(1 for x in self._days if x["realised"] > 0)
+        d.avg_entries = float(np.mean([x["entries"] for x in self._days]))
+        d.avg_realised = float(np.mean([x["realised"] for x in self._days]))
+        return d
 
     # ---------------- walk-forward split ----------------
 
@@ -289,14 +377,28 @@ class Backtester:
     def _run_session(self, session: pd.DataFrame, prior, day: date,
                      strategy_keys: list[str] | None, mode: Mode
                      ) -> list[BacktestTrade]:
+        """
+        One simulated trading day, INCLUDING the money-management rules.
+
+        The original version built a RiskEngine and never called register_exit,
+        so realised P&L stayed at zero, the day target and the give-back floor
+        could never fire, and the only governor with any effect was the entry
+        count. It measured the signals. It did not measure the system.
+
+        Now every simulated exit is booked, so a day can end because it reached
+        +10%, or because it gave back to the ratcheting floor - and the metrics
+        below report how often each actually happens.
+        """
         s = self.cfg.session
+        b = self.cfg.backtest
         strategies = build_enabled(strategy_keys, self.cfg)
         risk = RiskEngine(self.cfg)
         risk.start_day(day)
+        gov = risk.governor
 
         trades: list[BacktestTrade] = []
-        entries = 0
         cooldown_until = -1
+        atr_series = sig.atr(session, self.cfg.signal.atr_period)
 
         # BarReplayer is what keeps this honest - see its docstring. The
         # window it yields ends at the decision bar, so find_pivots() cannot
@@ -304,7 +406,10 @@ class Backtester:
         replayer = BarReplayer(session, warmup=max(self.cfg.signal.atr_period, 30))
 
         for i in range(replayer.warmup, len(session)):
-            if entries >= self.cfg.capital.max_entries_per_session:
+            if gov.entries_taken >= self.cfg.capital.max_entries_per_session:
+                break
+            if b.apply_session_governors and gov.evaluate().day_over:
+                self._day_outcomes.append(gov.evaluate().reason.value)
                 break
             if i <= cooldown_until:
                 continue
@@ -336,46 +441,76 @@ class Backtester:
                 if sig_out.confidence < self.cfg.strategy.min_confidence:
                     continue
 
+                # Shared with approve() so the backtest cannot size a trade the
+                # live engine would refuse.
+                lots = risk.lots_for(sig_out.stop_points)
                 trade = self._simulate(session, i, key, sig_out,
-                                       reading.regime.value, day, mode)
+                                       reading.regime.value, day, mode,
+                                       atr_series=atr_series, lots=lots)
                 if trade:
                     trades.append(trade)
-                    entries += 1
+                    gov.register_entry()
+                    if b.apply_session_governors:
+                        # The rupee P&L of one R is the risk budget by
+                        # definition, so an R-multiple converts directly.
+                        gov.register_exit(
+                            trade.r_multiple *
+                            self.cfg.capital.risk_per_trade_rupees)
                     cooldown_until = i + trade.bars_held
                 break                       # one entry per bar, first match wins
 
+        self._record_day(gov, trades)
         return trades
+
+    def _record_day(self, gov, trades: list[BacktestTrade]) -> None:
+        if not trades:
+            return
+        verdict = gov.evaluate()
+        self._days.append({
+            "realised": gov.realised_pnl,
+            "peak": gov.peak_realised_pnl,
+            "entries": gov.entries_taken,
+            "ratcheted": gov.floor > gov.base_floor,
+            "outcome": verdict.reason.value,
+        })
 
     # ---------------- trade simulation ----------------
 
     def _simulate(self, session: pd.DataFrame, entry_idx: int, key: str,
-                  sig_out, regime: str, day: date, mode: Mode
-                  ) -> Optional[BacktestTrade]:
+                  sig_out, regime: str, day: date, mode: Mode,
+                  atr_series: Optional[pd.Series] = None,
+                  lots: int = 1) -> Optional[BacktestTrade]:
         """
-        Walk forward bar by bar from the entry until the stop, the target, the
-        bar cap, or the force-exit time.
+        Walk forward bar by bar from the entry, driving the SAME `ExitLadder`
+        the live engine uses.
 
-        Intrabar ambiguity is resolved PESSIMISTICALLY: if a single bar's range
-        contains both the stop and the target, the stop is assumed to have hit
-        first. Without that assumption a backtest quietly awards itself the
-        best of both on every volatile bar, which is the single most common way
-        an equity curve is inflated.
+        That shared state machine is the point. The ladder takes R and returns
+        decisions; here R comes from the underlying, live it comes from the
+        option premium, and `RiskEngine.approve()` sizes the position so the
+        two agree. Reimplementing the breakeven shift, the partial and the
+        trail here would mean backtesting a system you do not run.
+
+        Intrabar ambiguity is resolved PESSIMISTICALLY: the stop is tested
+        against the bar's adverse extreme, at the level it held when the bar
+        opened, BEFORE any promotion from the favourable extreme. A bar whose
+        range contains both the stop and the next rung is scored as a stop.
+        Without that a backtest quietly awards itself the best of both on every
+        volatile bar, which is the most common way an equity curve is inflated.
         """
         b = self.cfg.backtest
-        entry_bar = session.iloc[entry_idx]
-        entry_price = float(entry_bar["close"])
+        entry_price = float(session.iloc[entry_idx]["close"])
         entry_time = session.index[entry_idx]
         stop_pts = float(sig_out.stop_points)
         if stop_pts <= 0:
             return None
 
         long_side = sig_out.direction == "long"
-        rr = self.cfg.capital.reward_risk_ratio
-        target_pts = stop_pts * rr
+        st = self.ladder.new_state(lots)
 
-        stop_price = entry_price - stop_pts if long_side else entry_price + stop_pts
-        target_price = entry_price + target_pts if long_side else entry_price - target_pts
-
+        # Realised R accumulates per leg. Exiting k of n lots at `exit_r`
+        # realises exit_r * k / n, because 1R is defined for the FULL position.
+        realised_r = 0.0
+        legs: list[tuple[float, int]] = []      # (exit_r, lots)
         outcome = Outcome.TIMEOUT
         exit_price = entry_price
         exit_time = entry_time
@@ -384,33 +519,73 @@ class Backtester:
         last_idx = min(entry_idx + b.max_bars_in_trade, len(session) - 1)
         for j in range(entry_idx + 1, last_idx + 1):
             bar = session.iloc[j]
-            hi, lo = float(bar["high"]), float(bar["low"])
+            hi, lo, close = float(bar["high"]), float(bar["low"]), float(bar["close"])
             bars_held = j - entry_idx
             exit_time = session.index[j]
+            exit_price = close
 
-            hit_stop = lo <= stop_price if long_side else hi >= stop_price
-            hit_target = hi >= target_price if long_side else lo <= target_price
+            if long_side:
+                best_r = (hi - entry_price) / stop_pts
+                worst_r = (lo - entry_price) / stop_pts
+            else:
+                best_r = (entry_price - lo) / stop_pts
+                worst_r = (entry_price - hi) / stop_pts
+            mark_r = ((close - entry_price) if long_side
+                      else (entry_price - close)) / stop_pts
 
-            if hit_stop:                       # pessimistic: stop wins ties
-                outcome, exit_price = Outcome.STOP, stop_price
+            trail_r = 0.0
+            if atr_series is not None and b.apply_trade_management:
+                a = float(atr_series.iloc[j]) if not pd.isna(atr_series.iloc[j]) else 0.0
+                trail_r = a * self.cfg.trade.trail_atr_multiple / stop_pts
+
+            forced = session.index[j].time() >= self.cfg.session.force_exit
+            if forced:
+                d = self.ladder.force_exit(st, mark_r)
+                if d.exit_lots:
+                    legs.append((d.exit_r, d.exit_lots))
+                    realised_r += d.exit_r * d.exit_lots / lots
+                outcome = Outcome.SESSION_END
+                exit_price = close
                 break
-            if hit_target:
-                outcome, exit_price = Outcome.TARGET, target_price
+
+            for d in self.ladder.advance(st, mark_r=mark_r, best_r=best_r,
+                                         worst_r=worst_r,
+                                         trail_distance_r=trail_r):
+                if not d.exit_lots:
+                    continue
+                legs.append((d.exit_r, d.exit_lots))
+                realised_r += d.exit_r * d.exit_lots / lots
+                if d.kind is ExitKind.STOPPED_OUT:
+                    outcome = Outcome.STOP
+                elif d.kind in (ExitKind.TARGET_EXIT, ExitKind.PARTIAL_EXIT):
+                    outcome = Outcome.TARGET
+                exit_price = (entry_price + d.exit_r * stop_pts if long_side
+                              else entry_price - d.exit_r * stop_pts)
+
+            if st.closed:
                 break
-            if session.index[j].time() >= self.cfg.session.force_exit:
-                outcome, exit_price = Outcome.SESSION_END, float(bar["close"])
-                break
-            exit_price = float(bar["close"])
 
         if bars_held == 0:
             return None
 
+        if not st.closed:
+            # Ran out of bars (or hit the bar cap) with lots still open.
+            mark_r = ((exit_price - entry_price) if long_side
+                      else (entry_price - exit_price)) / stop_pts
+            d = self.ladder.force_exit(st, mark_r, "bar cap / end of data")
+            if d.exit_lots:
+                legs.append((d.exit_r, d.exit_lots))
+                realised_r += d.exit_r * d.exit_lots / lots
+            if outcome is Outcome.TIMEOUT and len(legs) > 1:
+                outcome = Outcome.TARGET      # partial banked, runner timed out
+
         if mode is Mode.UNDERLYING:
             r_multiple, entry_prem, exit_prem, qty, pnl = self._r_underlying(
-                entry_price, exit_price, stop_pts, long_side)
+                realised_r, legs, lots)
         else:
             r_multiple, entry_prem, exit_prem, qty, pnl = self._r_synthetic(
-                entry_price, exit_price, stop_pts, sig_out.option_type, day)
+                entry_price, legs, stop_pts, sig_out.option_type, day,
+                long_side, lots)
 
         return BacktestTrade(
             entry_time=entry_time, exit_time=exit_time, strategy=key,
@@ -419,58 +594,80 @@ class Backtester:
             stop_points=stop_pts, outcome=outcome, bars_held=bars_held,
             r_multiple=r_multiple, reason=sig_out.reason,
             entry_premium=entry_prem, exit_premium=exit_prem,
-            quantity=qty, net_pnl=pnl,
+            quantity=qty, net_pnl=pnl, lots=lots, exit_legs=len(legs),
+            partial_banked=len(legs) > 1,
         )
 
-    def _r_underlying(self, entry: float, exit_: float, stop_pts: float,
-                      long_side: bool):
+    def _r_underlying(self, realised_r: float, legs: list[tuple[float, int]],
+                      lots: int):
         """
         R in underlying points, with friction converted into R.
 
         Friction is a rupee amount; R is a rupee amount too (risk_per_trade),
         so the conversion is direct and does not need an option price. That is
         what makes this mode trustworthy - no premium is assumed anywhere.
-        """
-        move = (exit_ - entry) if long_side else (entry - exit_)
-        gross_r = move / stop_pts
 
+        Friction is charged PER LEG. A runner that banks half and trails the
+        rest is one buy and two sells, so it pays the flat brokerage three
+        times. Charging a single round trip would quietly subsidise the runner
+        and make scaling out look better than it is.
+        """
         risk_rupees = self.cfg.capital.risk_per_trade_rupees
-        qty = self.cfg.instrument.lot_size
+        lot = self.cfg.instrument.lot_size
+        qty = lot * lots
+
         # Friction is evaluated at a representative premium in the sweet spot
         # the README identifies (Rs 90-150); it is nearly flat across that range.
-        friction = self.costs.total_friction(120.0, 120.0, qty)
-        return gross_r - friction / risk_rupees, 0.0, 0.0, qty, 0.0
+        ref = 120.0
+        friction = self.costs.entry_friction(ref, qty)
+        for _, leg_lots in legs:
+            friction += self.costs.exit_friction(ref, lot * leg_lots)
 
-    def _r_synthetic(self, entry: float, exit_: float, stop_pts: float,
-                     option_type: str, day: date):
+        return realised_r - friction / risk_rupees, 0.0, 0.0, qty, 0.0
+
+    def _r_synthetic(self, entry: float, legs: list[tuple[float, int]],
+                     stop_pts: float, option_type: str, day: date,
+                     long_side: bool, lots: int):
         """Express the same underlying move through a Black-Scholes option."""
         b = self.cfg.backtest
         expiry = next_weekly_expiry(day)
         t_entry = max(time_to_expiry_years(day, expiry), 0.5 / 365.0)
         # Time decays while the trade is open; a single session is ~1/365 year.
         t_exit = max(t_entry - (1.0 / 365.0) * 0.4, 0.25 / 365.0)
+        iv = self.iv_for(day)
 
         risk = RiskEngine(self.cfg)
-        ceiling = min(risk.required_max_delta(stop_pts), self.cfg.signal.max_delta)
-        strike = self._strike_for_delta(entry, ceiling, option_type, t_entry, b)
+        ceiling = min(risk.required_max_delta(stop_pts, lots),
+                      self.cfg.signal.max_delta)
+        strike = self._strike_for_delta(entry, ceiling, option_type, t_entry, iv)
         if strike is None:
             return 0.0, 0.0, 0.0, 0, 0.0
 
-        entry_prem = bs_price(entry, strike, t_entry, b.assumed_iv,
+        lot = self.cfg.instrument.lot_size
+        qty = lot * lots
+        entry_prem = bs_price(entry, strike, t_entry, iv,
                               b.risk_free_rate, option_type)
-        exit_prem = bs_price(exit_, strike, t_exit, b.assumed_iv,
-                             b.risk_free_rate, option_type)
 
-        qty = self.cfg.instrument.lot_size
-        gross = (exit_prem - entry_prem) * qty
-        friction = self.costs.total_friction(entry_prem, max(exit_prem, 0.05), qty)
-        net = gross - friction
+        net = -self.costs.entry_friction(entry_prem, qty)
+        last_exit_prem = entry_prem
+        for exit_r, leg_lots in legs:
+            underlying_exit = (entry + exit_r * stop_pts if long_side
+                               else entry - exit_r * stop_pts)
+            exit_prem = bs_price(underlying_exit, strike, t_exit, iv,
+                                 b.risk_free_rate, option_type)
+            leg_qty = lot * leg_lots
+            net += (exit_prem - entry_prem) * leg_qty
+            net -= self.costs.exit_friction(max(exit_prem, 0.05), leg_qty)
+            last_exit_prem = exit_prem
+
         return net / self.cfg.capital.risk_per_trade_rupees, \
-            entry_prem, exit_prem, qty, net
+            entry_prem, last_exit_prem, qty, net
 
     def _strike_for_delta(self, spot: float, target_delta: float,
-                          option_type: str, t_years: float, b) -> Optional[int]:
+                          option_type: str, t_years: float,
+                          iv: float) -> Optional[int]:
         """Highest-delta strike at or under the risk-engine's ceiling."""
+        b = self.cfg.backtest
         step = self.cfg.instrument.strike_step
         atm = int(round(spot / step) * step)
         best, best_delta = None, -1.0
@@ -478,8 +675,46 @@ class Backtester:
             strike = atm + i * step
             if strike <= 0:
                 continue
-            d = bs_delta(spot, strike, t_years, b.assumed_iv,
-                         b.risk_free_rate, option_type)
+            d = bs_delta(spot, strike, t_years, iv, b.risk_free_rate, option_type)
             if self.cfg.signal.min_delta <= d <= target_delta and d > best_delta:
                 best, best_delta = strike, d
         return best
+
+    # ---------------- implied volatility ----------------
+
+    def iv_for(self, day: date) -> float:
+        """
+        That day's implied volatility, from India VIX when it is loaded.
+
+        A flat 14% across four years spans everything from a dead-quiet 10 to
+        a crisis 30. That does not merely add noise - it systematically
+        overprices calm periods and underprices violent ones, in opposite
+        directions, which is exactly the bias an options backtest cannot
+        absorb. Falls back to `assumed_iv` for days with no reading.
+        """
+        b = self.cfg.backtest
+        if not b.use_vix_iv or self._vix is None:
+            return b.assumed_iv
+        try:
+            ts = pd.Timestamp(day)
+            window = self._vix.loc[:ts]
+            if window.empty:
+                return b.assumed_iv
+            return float(window.iloc[-1]) / 100.0 * b.vix_to_iv_scale
+        except Exception:
+            return b.assumed_iv
+
+    def load_vix(self, path: str | None = None) -> bool:
+        """Load the India VIX daily series written by scripts/fetch_vix.py."""
+        from pathlib import Path
+        p = Path(path or self.cfg.data.vix_csv_path)
+        if not p.exists():
+            self._vix = None
+            return False
+        try:
+            df = pd.read_csv(p, parse_dates=["date"]).set_index("date")
+            self._vix = df["vix"].sort_index()
+            return True
+        except Exception:
+            self._vix = None
+            return False

@@ -8,7 +8,15 @@ Telegram, desktop, and email alerts are to be worth anything, the decision
 loop has to survive without a browser - so it lives here and in engine.py,
 and the UI is only ever a viewer over it.
 
-Alert only. There is no order path in this process.
+ALERT ONLY. This process deliberately attaches no broker, so `confirm_entry()`
+is never called and nothing is ever ordered. It will still attach a REAL option
+chain when Kite is authenticated, because a real chain makes the alert's strike
+and premium real - reading a quote and placing an order are different
+permissions, and only the first one is granted here.
+
+Position management therefore does not run in this process either: there are
+no positions to manage. Confirm entries from the Streamlit UI if you want the
+exit ladder.
 """
 from __future__ import annotations
 import argparse
@@ -23,9 +31,29 @@ from .data.factory import build_feed, PROVIDERS
 from .alerts.channels import (InAppNotifier, TelegramNotifier,
                               DesktopNotifier, EmailNotifier)
 from .alerts.dispatcher import AlertDispatcher
+from .data.chain import ChainProvider
 from .engine import TradingEngine
 from .journal import Journal
 from .strategies.registry import all_strategies, default_enabled_keys
+
+
+def build_chain_provider(cfg: Config) -> ChainProvider:
+    """
+    A real chain when Kite is authenticated, synthetic otherwise.
+
+    Note `broker=None` at the TradingEngine call site: reading quotes and
+    placing orders are separate permissions and this runner only takes the
+    first.
+    """
+    try:
+        from .broker.kite_auth import KiteSession
+        from .broker.kite_chain import KiteChain
+        session = KiteSession()
+        if session.authenticated:
+            return ChainProvider(cfg, broker_chain=KiteChain(session, cfg))
+    except Exception:
+        pass
+    return ChainProvider(cfg)
 
 
 def build_engine(cfg: Config, strategy_keys: list[str]) -> TradingEngine:
@@ -34,7 +62,9 @@ def build_engine(cfg: Config, strategy_keys: list[str]) -> TradingEngine:
     notifiers = [InAppNotifier(), TelegramNotifier(),
                  DesktopNotifier(), EmailNotifier()]
     dispatcher = AlertDispatcher(notifiers, cfg, journal_fn=journal.write)
-    return TradingEngine(feed, dispatcher, cfg, strategy_keys, journal)
+    return TradingEngine(feed, dispatcher, cfg, strategy_keys, journal,
+                         chain_provider=build_chain_provider(cfg),
+                         broker=None)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -66,6 +96,10 @@ def main(argv: list[str] | None = None) -> int:
     engine = build_engine(cfg, args.strategies)
 
     print(f"Feed      : {engine.feed.name} — {engine.feed.latency_note}")
+    chain_kind = ("broker (real quotes)"
+                  if engine.chain_provider._broker_chain is not None
+                  else "synthetic (Black-Scholes, fabricated OI and spread)")
+    print(f"Chain     : {chain_kind}")
     print(f"Strategies: {', '.join(engine.strategies) or 'none'}")
     print(f"Channels  : {[c['name'] for c in engine.dispatcher.channel_status() if c['enabled']]}")
     for c in engine.dispatcher.channel_status():

@@ -58,14 +58,19 @@ def next_weekly_expiry(today: date | None = None) -> date:
 class ChainProvider:
     """Falls back to synthetic whenever a broker chain is unavailable."""
 
-    def __init__(self, cfg: Config = DEFAULT, prefer_broker: bool = True):
+    def __init__(self, cfg: Config = DEFAULT, prefer_broker: bool = True,
+                 broker_chain=None):
         self.cfg = cfg
         self.prefer_broker = prefer_broker
+        # Injected rather than constructed here so the engine can run without
+        # kiteconnect installed, and so tests can supply a recorded chain.
+        self._broker_chain = broker_chain
+        self._broker_failure: str = ""
 
     def get_chain(self, spot: float, option_type: str,
                   today: date | None = None) -> ChainResult:
         today = today or date.today()
-        expiry = next_weekly_expiry(today)
+        expiry = self.resolve_expiry(today)
         t_years = time_to_expiry_years(today, expiry)
 
         # Expiry-day options have ~zero time value; Black-Scholes with t=0
@@ -82,6 +87,8 @@ class ChainProvider:
         spec = SyntheticChainSpec(assumed_iv=self.cfg.backtest.assumed_iv,
                                   risk_free_rate=self.cfg.backtest.risk_free_rate)
         quotes = synthetic_chain(spot, t_years, option_type, self.cfg, spec)
+        why = f" Broker chain unavailable: {self._broker_failure}." \
+            if self._broker_failure else ""
         return ChainResult(
             quotes=quotes,
             source="synthetic",
@@ -89,17 +96,56 @@ class ChainProvider:
             is_synthetic=True,
             note=(f"SYNTHETIC chain: Black-Scholes at {spec.assumed_iv:.0%} flat IV, "
                   f"fabricated OI and spread. Strike maths is right; tradeability "
-                  f"is unverified. Confirm the live quote before acting."),
+                  f"is unverified. Confirm the live quote before acting.{why}"),
         )
+
+    def resolve_expiry(self, today: date) -> date:
+        """
+        The real expiry when a broker chain is attached, the weekday guess
+        otherwise.
+
+        `next_weekly_expiry()` assumes Tuesday and its own docstring flags that
+        the day has moved twice recently. The instrument dump states the actual
+        expiry of every listed contract, so prefer it whenever it is there.
+        """
+        if self._broker_chain is not None:
+            try:
+                real = self._broker_chain.nearest_expiry(today)
+                if real is not None:
+                    return real
+            except Exception:
+                pass                     # fall through to the guess
+        return next_weekly_expiry(today)
 
     def _try_broker_chain(self, spot: float, option_type: str,
                           expiry: date) -> ChainResult | None:
         """
-        Hook for a real chain.
+        Real quotes, when a broker chain has been attached.
 
-        Left unimplemented deliberately rather than guessed at: both Fyers and
-        Dhan expose option chains, but the response shapes differ and neither
-        could be verified without credentials. Returning None keeps the system
-        working on synthetic quotes until you fill this in.
+        Any failure returns None so the engine keeps running on synthetic
+        quotes rather than going silent - but the reason is recorded and
+        printed in the synthetic chain's note, because a system that quietly
+        downgrades from real data to fabricated data without telling you is
+        worse than one that stops.
         """
-        return None
+        if self._broker_chain is None:
+            return None
+        try:
+            quotes, real_expiry = self._broker_chain.get_chain(
+                spot, option_type, expiry=expiry)
+        except Exception as e:
+            self._broker_failure = f"{type(e).__name__}: {e}"
+            return None
+
+        if not quotes:
+            self._broker_failure = "broker returned no usable quotes"
+            return None
+
+        self._broker_failure = ""
+        return ChainResult(
+            quotes=quotes,
+            source="broker",
+            expiry=real_expiry,
+            is_synthetic=False,
+            note="",
+        )
