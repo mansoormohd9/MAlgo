@@ -72,10 +72,20 @@ class AlertDispatcher:
     # ---------------- dispatch ----------------
 
     def dispatch(self, alert: TradeAlert,
-                 force: bool = False) -> dict[str, tuple[bool, str]]:
+                 force: bool = False) -> dict[str, tuple[bool, str]] | None:
         """
-        Send to every enabled channel. Returns {channel: (delivered, detail)}.
-        `force` bypasses suppression - used by the Settings test button.
+        Send to every enabled channel. `force` bypasses suppression - used by
+        the Settings test button.
+
+        Returns None when the alert was SUPPRESSED, and a dict of
+        {channel: (delivered, detail)} when it was not - a dict that is empty
+        when no channel happens to be enabled.
+
+        That distinction matters. Both cases used to return {}, so a caller
+        could not tell "this is a duplicate, drop it" from "this is new, but
+        you have every channel switched off". The engine got that wrong: with
+        all channels disabled it dropped genuine alerts from the UI feed and
+        labelled them 'duplicate or within cooldown', which was simply untrue.
         """
         now = alert.timestamp or datetime.now()
 
@@ -84,7 +94,7 @@ class AlertDispatcher:
             if reason:
                 self._journal("alert_suppressed",
                               {"key": alert.dedupe_key, "reason": reason})
-                return {}
+                return None
 
         results: dict[str, tuple[bool, str]] = {}
         for n in self._enabled():
@@ -114,6 +124,10 @@ class AlertDispatcher:
             "email": a.enable_email,
         }
         return [n for n in self.notifiers if flags.get(n.name, True)]
+
+    def enabled_names(self) -> list[str]:
+        """Which channels an alert would actually go to right now."""
+        return [n.name for n in self._enabled()]
 
     def _journal(self, event: str, payload: dict) -> None:
         if self.journal_fn:

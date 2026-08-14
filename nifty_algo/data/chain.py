@@ -99,6 +99,17 @@ class ChainProvider:
                   f"is unverified. Confirm the live quote before acting.{why}"),
         )
 
+    @property
+    def expiry_is_verified(self) -> bool:
+        """
+        True when the expiry came from the broker's instrument dump rather than
+        `next_weekly_expiry()`'s Tuesday assumption.
+
+        Worth surfacing: that weekday has moved twice recently, and trading a
+        guessed expiry is trading the wrong contract.
+        """
+        return self._broker_chain is not None
+
     def resolve_expiry(self, today: date) -> date:
         """
         The real expiry when a broker chain is attached, the weekday guess

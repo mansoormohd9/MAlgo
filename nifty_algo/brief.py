@@ -185,12 +185,31 @@ class ChainRow:
     target: Optional[float] = None
     stop: Optional[float] = None
     lots: int = 0
+    quantity: int = 0
+    rupee_risk: Optional[float] = None
+    rupee_reward: Optional[float] = None
+    outlay: Optional[float] = None
+    runner: bool = False
+
+    @property
+    def viable(self) -> bool:
+        """Would `approve()` actually let you buy this one?"""
+        return self.entry is not None
 
     @property
     def verdict(self) -> str:
         if self.selected:
             return "SELECTED"
         return "ok" if not self.gates else "; ".join(self.gates)
+
+    @property
+    def action(self) -> str:
+        """What buying this row would mean, in words rather than a colour."""
+        if self.selected:
+            return f"BUY {self.lots} lot(s) - the engine's pick"
+        if self.viable:
+            return f"tradeable at {self.lots} lot(s), lower delta"
+        return "not tradeable"
 
 
 @dataclass
@@ -206,27 +225,97 @@ class ChainView:
     delta_ceiling: float
     rows: list[ChainRow]
     decision: object = None
+    days_to_expiry: int = 0
+    entry_permitted: bool = True
+    halt_reason: str = ""
+
+    # ---------------- what this view is actually telling you ----------------
+
+    @property
+    def approved(self) -> Optional[ApprovedOrder]:
+        return self.decision if isinstance(self.decision, ApprovedOrder) else None
+
+    @property
+    def pick(self) -> Optional[ChainRow]:
+        return next((r for r in self.rows if r.selected), None)
+
+    @property
+    def runner_ups(self) -> list[ChainRow]:
+        """
+        Tradeable strikes that lost, best delta first.
+
+        Shown because a single highlighted row looks like magic. Seeing the
+        two strikes that were also buyable, and that they were passed over for
+        less delta, is what makes the pick legible.
+        """
+        others = [r for r in self.rows if r.viable and not r.selected]
+        return sorted(others, key=lambda r: abs(r.delta), reverse=True)[:3]
+
+    def headline(self) -> str:
+        """
+        The suggestion in one plain sentence, with no jargon and no colour
+        doing the talking. The UI ticket and the CLI both print this, so the
+        two surfaces cannot describe the same chain differently.
+        """
+        d = self.approved
+        if d is None:
+            reason = getattr(self.decision, "reason", None)
+            detail = getattr(self.decision, "detail", "")
+            what = reason.value.replace("_", " ") if reason else "no viable strike"
+            return (f"Nothing to buy on the {self.option_type} side - {what}"
+                    f"{': ' + detail if detail else ''}.")
+        return (f"BUY {d.lots} lot(s) of {self.option_type} strike "
+                f"{d.quote.strike}, expiry {self.expiry:%d %b} "
+                f"({self.days_to_expiry} day{'' if self.days_to_expiry == 1 else 's'})"
+                f" - {d.quantity} qty at about {d.entry_premium:.2f}.")
+
+    def status(self) -> tuple[str, str]:
+        """(label, explanation) — is this a thing to do, or a thing to know?"""
+        if not self.entry_permitted:
+            return ("BLOCKED",
+                    f"Entries are closed: {self.halt_reason.replace('_', ' ')}. "
+                    f"Shown for reference only.")
+        if self.approved is None:
+            return ("NOTHING TO DO", "No strike on this side clears every gate.")
+        return ("REFERENCE ONLY",
+                f"No strategy has fired. This is the strike the engine would "
+                f"pick if a {self.option_type} signal appeared right now, at a "
+                f"{self.stop_points:.0f}-point stop.")
+
+    # ---------------- rendering ----------------
 
     def to_frame(self) -> pd.DataFrame:
+        """
+        Numbers stay numbers so the table can be sorted. Formatting is the
+        caller's job (`st.column_config` in the UI, `lines()` for the CLI).
+        """
         return pd.DataFrame([{
             "Strike": r.strike,
+            "Action": r.action,
             "Premium": round(r.premium, 2),
             "Bid": round(r.bid, 2),
             "Ask": round(r.ask, 2),
-            "Spread%": f"{r.spread_pct:.2%}",
+            "Spread%": r.spread_pct,
             "OI": r.open_interest,
-            "IV": f"{r.iv:.1%}" if r.iv else "-",
+            "IV": r.iv,
             "Delta": round(abs(r.delta), 3),
-            "Entry": round(r.entry, 2) if r.entry else None,
-            "Target": round(r.target, 2) if r.target else None,
-            "Stop": round(r.stop, 2) if r.stop else None,
-            "Verdict": r.verdict,
+            "Lots": r.lots or None,
+            "Entry": round(r.entry, 2) if r.entry is not None else None,
+            "Target": round(r.target, 2) if r.target is not None else None,
+            "Stop": round(r.stop, 2) if r.stop is not None else None,
+            "Risk": round(r.rupee_risk) if r.rupee_risk is not None else None,
+            "Reward": round(r.rupee_reward) if r.rupee_reward is not None else None,
+            "Outlay": round(r.outlay) if r.outlay is not None else None,
+            "Why not": "" if r.viable else "; ".join(r.gates),
         } for r in self.rows])
 
     def lines(self) -> list[str]:
+        label, explanation = self.status()
         out = [
             f"CHAIN  {self.option_type}  spot {self.spot:,.1f}  "
-            f"expiry {self.expiry:%d %b}  [{self.source}]",
+            f"expiry {self.expiry:%d %b} ({self.days_to_expiry}d)  [{self.source}]",
+            f"  {label}: {explanation}",
+            f"  >> {self.headline()}",
             f"  stop {self.stop_points:.0f} pts at {self.lots} lot(s) "
             f"-> delta ceiling {self.delta_ceiling:.3f}",
         ]
@@ -244,15 +333,24 @@ class ChainView:
             )
         if isinstance(self.decision, ApprovedOrder):
             d = self.decision
+            qty = d.quantity
             out += [
                 "",
                 f"  IF ENTERED NOW: BUY {d.lots} lot(s) x {d.quote.strike}"
-                f"{d.quote.option_type} = {d.quantity} qty",
+                f"{d.quote.option_type} = {qty} qty",
                 f"    entry  {d.entry_premium:.2f}",
                 f"    target {d.premium_target:.2f}   (+Rs {d.rupee_reward:,.0f})",
                 f"    stop   {d.premium_stop:.2f}   (-Rs {d.rupee_risk:,.0f})",
+                f"    outlay Rs {d.entry_premium * qty:,.0f}   "
+                f"costs Rs {DEFAULT_COSTS.round_trip(d.entry_premium, d.premium_target, qty):,.0f} "
+                f"round trip, breakeven "
+                f"+{DEFAULT_COSTS.breakeven_move(d.entry_premium, qty):.2f} pts",
                 f"    {d.sizing_note}",
             ]
+            if self.runner_ups:
+                out.append("    also tradeable: " + ", ".join(
+                    f"{r.strike}{r.option_type} (delta {abs(r.delta):.3f})"
+                    for r in self.runner_ups))
         elif isinstance(self.decision, RejectedOrder):
             out += ["", f"  NO TRADEABLE STRIKE: {self.decision.reason.value} "
                         f"- {self.decision.detail}"]
@@ -263,13 +361,26 @@ def build_chain_view(spot: float, option_type: str, stop_points: float,
                      cfg: Config = DEFAULT,
                      chain_provider: ChainProvider | None = None,
                      risk: RiskEngine | None = None,
-                     today: Optional[date] = None) -> ChainView:
+                     today: Optional[date] = None,
+                     entry_permitted: bool = True,
+                     halt_reason: str = "") -> ChainView:
     """
     The chain, scored by the real risk engine.
 
     Every gate verdict comes from `RiskEngine.gate_failures()` and the
     entry/target/stop from `RiskEngine.approve()` - the same calls the live
     engine makes. Nothing here recomputes a rule.
+
+    `approve()` is called once for the chain to find the pick, and then once
+    per quote against a single-strike chain to fill in what buying THAT strike
+    would mean. The second call is pure computation over a list of one and
+    reuses the rule rather than restating it, which is the only way the row
+    numbers cannot drift from the engine's.
+
+    `entry_permitted` / `halt_reason` are passed in by the caller because
+    `approve()` deliberately knows nothing about the session clock - it will
+    happily approve a strike at 3pm on expiry day. Carrying the answer on the
+    view is what stops a reference price from reading like an instruction.
     """
     today = today or date.today()
     provider = chain_provider or ChainProvider(cfg)
@@ -285,6 +396,10 @@ def build_chain_view(spot: float, option_type: str, stop_points: float,
     rows = []
     for q in sorted(result.quotes, key=lambda x: x.strike):
         selected = q.strike == chosen
+        # What this specific strike would cost you, decided by the same rule.
+        own = (decision if selected
+               else risk.approve([q], option_type, stop_points, risk.capital))
+        buyable = isinstance(own, ApprovedOrder)
         rows.append(ChainRow(
             strike=q.strike, option_type=q.option_type, premium=q.premium,
             bid=q.bid, ask=q.ask, spread_pct=q.spread_pct,
@@ -292,10 +407,15 @@ def build_chain_view(spot: float, option_type: str, stop_points: float,
             iv=q.iv,
             gates=risk.gate_failures(q, stop_points, lots),
             selected=selected,
-            entry=decision.entry_premium if selected else None,
-            target=decision.premium_target if selected else None,
-            stop=decision.premium_stop if selected else None,
-            lots=decision.lots if selected else 0,
+            entry=own.entry_premium if buyable else None,
+            target=own.premium_target if buyable else None,
+            stop=own.premium_stop if buyable else None,
+            lots=own.lots if buyable else 0,
+            quantity=own.quantity if buyable else 0,
+            rupee_risk=own.rupee_risk if buyable else None,
+            rupee_reward=own.rupee_reward if buyable else None,
+            outlay=(own.entry_premium * own.quantity) if buyable else None,
+            runner=own.runner_enabled if buyable else False,
         ))
 
     return ChainView(
@@ -303,6 +423,8 @@ def build_chain_view(spot: float, option_type: str, stop_points: float,
         source=result.source, is_synthetic=result.is_synthetic,
         note=result.note, stop_points=stop_points, lots=lots,
         delta_ceiling=ceiling, rows=rows, decision=decision,
+        days_to_expiry=max((result.expiry - today).days, 0),
+        entry_permitted=entry_permitted, halt_reason=halt_reason,
     )
 
 
@@ -332,12 +454,17 @@ def review(day: date, journal_dir: str = "journal") -> list[str]:
 
     entries = [r for r in records if r.get("event") == "entry_confirmed"]
     actions = [r for r in records if r.get("event") == "position_action"]
-    rejects = [r for r in records if r.get("event") == "rejection"]
+    # `Journal.rejection()` writes the event name "rejected". This filtered on
+    # "rejection", so the REJECTED block this module's docstring advertises was
+    # always empty - the one thing the review promised to show never rendered.
+    rejects = [r for r in records if r.get("event") == "rejected"]
 
     if entries:
         out += ["", "  ENTRIES"]
         for r in entries:
-            p = r.get("payload", r)
+            # `Journal.write()` flattens payload into the top-level record, so
+            # the record IS the payload. There is no "payload" key to look up.
+            p = r
             out.append(f"    {p.get('strike')}{p.get('option_type')}  "
                        f"{p.get('lots')} lot(s) @ {p.get('entry')}  "
                        f"stop {p.get('stop')}  target {p.get('target')}  "
@@ -348,7 +475,7 @@ def review(day: date, journal_dir: str = "journal") -> list[str]:
         out += ["", "  MANAGEMENT"]
         realised = 0.0
         for r in actions:
-            p = r.get("payload", r)
+            p = r
             realised += float(p.get("net") or 0.0)
             out.append(f"    {p.get('kind'):<18} {p.get('strike')}"
                        f"{p.get('option_type')}  {p.get('detail')}"
@@ -358,7 +485,7 @@ def review(day: date, journal_dir: str = "journal") -> list[str]:
     if rejects:
         out += ["", "  REJECTED"]
         for r in rejects[:20]:
-            p = r.get("payload", r)
+            p = r
             out.append(f"    {p.get('strategy', '?'):<18} {p.get('reason', '')} "
                        f"- {p.get('detail', '')}")
 

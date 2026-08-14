@@ -108,6 +108,31 @@ def test_kill_switch_alert_is_never_suppressed():
     assert n.count == 3
 
 
+def test_suppression_is_distinguishable_from_having_no_channels():
+    """
+    Both cases used to return {}, and the engine could not tell them apart, so
+    with every channel switched off it dropped genuine alerts from the UI feed
+    and labelled them 'duplicate or within cooldown' - which was a lie about
+    what had happened.
+    """
+    cfg = Config()
+    n = CountingNotifier()
+    d = AlertDispatcher([n], cfg)
+    ts = datetime(2026, 3, 10, 10, 30)
+
+    first = d.dispatch(entry_alert(ts))
+    assert first == {"inapp": (True, "ok")}
+
+    assert d.dispatch(entry_alert(ts)) is None, \
+        "a suppressed alert must be distinguishable from a delivered one"
+
+    cfg.alerts.enable_inapp = False
+    d.reset_suppression()
+    assert d.dispatch(entry_alert(ts)) == {}, \
+        "no enabled channel is not the same thing as suppression"
+    assert d.enabled_names() == []
+
+
 def test_a_broken_channel_cannot_break_dispatch():
     cfg = Config()
     cfg.alerts.enable_telegram = True

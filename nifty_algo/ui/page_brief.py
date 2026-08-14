@@ -7,14 +7,14 @@ Everything rendered here comes from `nifty_algo.brief`, which is also the CLI
 from __future__ import annotations
 from datetime import date
 
-import pandas as pd
 import streamlit as st
 
+from . import refresh
 from .theme import get_palette
 from .components import banner
-from .state import get_config, get_engine, engine_error
-from ..brief import build_chain_view, build_preopen, review
-from ..data.chain import ChainProvider
+from .entry_radar import entry_gate, entry_ticket
+from .state import get_config, get_engine, engine_error, cached_chain_view
+from ..brief import build_preopen, review
 from .. import signals as sig
 
 
@@ -35,7 +35,7 @@ def render() -> None:
         _preopen(engine, cfg, p)
 
     with tab_chain:
-        _chain(engine, cfg, p)
+        refresh.live(_chain, engine, cfg, p)
 
     with tab_review:
         _review(p)
@@ -91,17 +91,26 @@ def _preopen(engine, cfg, p) -> None:
 
     if pre.expiry:
         st.caption(f"Expiry {pre.expiry:%d %b} ({pre.days_to_expiry} days). "
-                   f"Source: {'broker instrument dump' if engine.chain_provider._broker_chain else 'weekday guess — VERIFY'}.")
+                   f"Source: {'broker instrument dump' if engine.chain_provider.expiry_is_verified else 'weekday guess — VERIFY'}.")
 
 
 # ---------------------------------------------------------------- the chain
 
 def _chain(engine, cfg, p) -> None:
+    refresh.mark_tick()
+
     st.caption(
-        "Every strike near the money, and **which gate each one fails**. The "
-        "verdicts come from `RiskEngine.gate_failures()` and the entry/target/"
-        "stop from `RiskEngine.approve()` — the same calls the live engine "
-        "makes, not a parallel calculation that could drift."
+        "**Nothing on this tab is a signal.** It answers a different question: "
+        "if a CE or a PE setup appeared right now, at the stop width below, "
+        "which strike would the engine buy and what would that cost you. "
+        "Both sides are always shown, because the chain does not have an "
+        "opinion about direction — the strategies do, and they speak on the "
+        "**Live alerts** page."
+    )
+    st.caption(
+        "Gate verdicts come from `RiskEngine.gate_failures()` and every "
+        "entry/target/stop from `RiskEngine.approve()` — the same calls the "
+        "live engine makes, not a parallel calculation that could drift."
     )
 
     bars = engine.state.bars
@@ -120,45 +129,71 @@ def _chain(engine, cfg, p) -> None:
         help="1R. Wider stops force a lower delta ceiling, and past a point "
              "no strike survives at two lots — which disables the runner.")
 
+    permitted, gate_detail = entry_gate(engine)
+    if not permitted:
+        banner(f"<b>Entries are blocked</b> — {gate_detail}. The tickets below "
+               f"are priced correctly and cannot be acted on today.",
+               p.warning, "⏸")
+
+    day = bars.index[-1].date()
+    session = engine.risk.session
+    open_lots = sum(pos.state.lots_remaining for pos in engine.state.open_positions)
+
     for option_type in ("CE", "PE"):
         st.subheader(f"{option_type} — spot {spot:,.1f}")
         try:
-            view = build_chain_view(spot, option_type, stop_points, cfg,
-                                    chain_provider=engine.chain_provider,
-                                    risk=engine.risk)
+            view = cached_chain_view(
+                spot, option_type, stop_points, day,
+                session.entries_taken, open_lots, permitted,
+                "" if permitted else gate_detail,
+                cfg, engine.chain_provider, engine.risk,
+            )
         except Exception as e:
             st.error(f"Could not build the {option_type} chain: {e}")
             continue
 
-        st.caption(f"expiry {view.expiry:%d %b} · source **{view.source}** · "
-                   f"{view.lots} lot(s) → delta ceiling {view.delta_ceiling:.3f}")
+        entry_ticket(view, p, cfg)
+
+        verified = engine.chain_provider.expiry_is_verified
+        st.caption(
+            f"expiry {view.expiry:%d %b} ({view.days_to_expiry}d, "
+            f"{'broker instrument dump' if verified else 'weekday guess — VERIFY'})"
+            f" · source **{view.source}** · {view.lots} lot(s) → delta ceiling "
+            f"{view.delta_ceiling:.3f}")
         if view.is_synthetic:
             banner(view.note, p.warning, "⚠")
 
-        frame = view.to_frame()
         st.dataframe(
-            frame.style.map(
-                lambda v: (f"color:{p.good};font-weight:600"
-                           if v == "SELECTED" else
-                           (f"color:{p.muted}" if v != "ok" else "")),
-                subset=["Verdict"]),
-            width="stretch", hide_index=True)
+            view.to_frame(), width="stretch", hide_index=True,
+            column_config={
+                "Strike": st.column_config.NumberColumn(format="%d"),
+                "Action": st.column_config.TextColumn(
+                    width="medium",
+                    help="What buying this row would mean."),
+                "Spread%": st.column_config.NumberColumn(format="percent"),
+                "IV": st.column_config.NumberColumn(format="percent"),
+                "OI": st.column_config.NumberColumn(format="localized"),
+                "Entry": st.column_config.NumberColumn(format="%.2f"),
+                "Target": st.column_config.NumberColumn(format="%.2f"),
+                "Stop": st.column_config.NumberColumn(format="%.2f"),
+                "Risk": st.column_config.NumberColumn("Risk ₹", format="%d"),
+                "Reward": st.column_config.NumberColumn("Reward ₹", format="%d"),
+                "Outlay": st.column_config.NumberColumn("Outlay ₹", format="%d"),
+                "Why not": st.column_config.TextColumn(
+                    width="large",
+                    help="The gate this strike fails, and by how much. Blank "
+                         "means it is buyable."),
+            })
 
-        failed = sum(1 for r in view.rows if r.gates)
-        st.caption(f"{len(view.rows) - failed} of {len(view.rows)} strikes pass "
-                   f"every gate.")
-
-        from ..risk import ApprovedOrder
-        if isinstance(view.decision, ApprovedOrder):
-            d = view.decision
-            banner(f"<b>If entered now:</b> BUY {d.lots} lot(s) × "
-                   f"{d.quote.strike}{d.quote.option_type} = {d.quantity} qty · "
-                   f"entry {d.entry_premium:.2f} · target {d.premium_target:.2f} · "
-                   f"stop {d.premium_stop:.2f} · {d.sizing_note}",
-                   p.good if d.runner_enabled else p.warning, "▣")
-        else:
-            banner(f"<b>No tradeable strike:</b> {view.decision.reason.value} — "
-                   f"{view.decision.detail}", p.warning, "⏸")
+        buyable = sum(1 for r in view.rows if r.viable)
+        st.caption(
+            f"{buyable} of {len(view.rows)} strikes are actually buyable — "
+            f"every row with an Entry is a trade you could take, at the size "
+            f"and risk shown."
+            + ("  These are synthetic quotes whose OI and spread were "
+               "fabricated inside the gates they are tested against, so "
+               "'passes' here means very little."
+               if view.is_synthetic else ""))
 
 
 # ---------------------------------------------------------------- review

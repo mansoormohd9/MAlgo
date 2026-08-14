@@ -35,6 +35,7 @@ from nifty_algo.ui.theme import CSS, get_palette          # noqa: E402
 from nifty_algo.ui import (page_live, page_brief, page_strategies,   # noqa: E402
                            page_backtest, page_journal, page_settings)
 from nifty_algo.ui.state import get_config                # noqa: E402
+from nifty_algo.ui import refresh                         # noqa: E402
 
 st.markdown(CSS, unsafe_allow_html=True)
 
@@ -56,6 +57,12 @@ def main() -> None:
         st.markdown("### Nifty Algo")
         st.caption("Intraday option-buying alert console")
         choice = st.radio("Page", list(PAGES), label_visibility="collapsed")
+
+        st.divider()
+        # In the sidebar, not on the Live page: polling used to exist only
+        # there, so reading the Daily brief meant the engine was never
+        # evaluated at all for as long as you stayed on it.
+        refresh.sidebar_controls(cfg)
 
         st.divider()
         st.caption(

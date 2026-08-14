@@ -4,7 +4,9 @@ numpy>=1.26
 scipy>=1.13          # Black-Scholes normal CDF
 
 # UI
-streamlit>=1.40
+# 1.49+ for st.fragment(run_every=...), which replaced the third-party
+# streamlit-autorefresh, and for width="stretch".
+streamlit>=1.49
 plotly>=5.22
 
 # Data

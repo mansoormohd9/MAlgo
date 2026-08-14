@@ -298,22 +298,21 @@ class TradingEngine:
             "runner": o.runner_enabled, "sizing": o.sizing_note,
         } for k, (o, _, _) in self._pending.items()]
 
-        results = self.dispatcher.dispatch(alert)
+        results = self._emit(alert, st)
 
-        if results:
-            st.alerts.append(alert)
-            del st.alerts[:-50]
-            delivered = ", ".join(f"{k}{'' if v[0] else ' (FAILED)'}"
-                                  for k, v in results.items())
+        if results is None:
+            st.evaluations.append({
+                "strategy": label, "outcome": "suppressed",
+                "detail": "duplicate or within cooldown",
+            })
+        else:
+            delivered = (", ".join(f"{k}{'' if v[0] else ' (FAILED)'}"
+                                   for k, v in results.items())
+                         or "no channel enabled — shown here only")
             st.evaluations.append({
                 "strategy": label, "outcome": "ALERT",
                 "detail": f"{signal.direction} {decision.quote.strike}"
                           f"{signal.option_type} -> {delivered}",
-            })
-        else:
-            st.evaluations.append({
-                "strategy": label, "outcome": "suppressed",
-                "detail": "duplicate or within cooldown",
             })
 
     def _build_alert(self, key: str, label: str, signal: Signal,
@@ -382,11 +381,11 @@ class TradingEngine:
         if verdict.action is GovernorAction.CLOSE_ALL and self.positions.positions:
             for action in self.positions.close_all(premiums, verdict.detail):
                 self._handle_exit_action(action, bar_time, st)
-            self.dispatcher.dispatch(TradeAlert(
+            self._emit(TradeAlert(
                 kind=AlertKind.CLOSE_ALL, timestamp=bar_time,
                 message=(f"DAY OVER — {verdict.reason.value}. {verdict.detail}. "
                          f"All positions flattened."),
-            ))
+            ), st, always=True)
 
     def _handle_exit_action(self, action: ExitAction, bar_time: datetime,
                             st: EngineState) -> None:
@@ -440,9 +439,7 @@ class TradingEngine:
             feed_latency_note=(self.feed.latency_note
                                if self.feed.is_delayed else ""),
         )
-        self.dispatcher.dispatch(alert)
-        st.alerts.append(alert)
-        del st.alerts[:-50]
+        self._emit(alert, st, always=True)
         self.journal.write("position_action", {
             "kind": action.kind.value,
             "strike": pos.quote.strike,
@@ -526,6 +523,28 @@ class TradingEngine:
 
     # ---------------- operational alerts ----------------
 
+    def _emit(self, alert: TradeAlert, st: EngineState,
+              *, always: bool = False) -> dict | None:
+        """
+        Dispatch an alert AND record it in the state the UI renders.
+
+        These were separate before, and four alert kinds - FORCE_EXIT, HALT,
+        KILL_SWITCH and the aggregate CLOSE_ALL - dispatched without ever
+        appending. The four most urgent notifications in the system were the
+        four that never reached the alert feed and never rang the chime.
+
+        `always=True` records the alert even when no channel is enabled, which
+        is right for operational alerts: whether you happen to have Telegram
+        switched on has nothing to do with whether the kill switch tripped.
+        Entries pass always=False so de-duplication still keeps one setup from
+        filling the feed with twenty copies of itself inside one bar.
+        """
+        results = self.dispatcher.dispatch(alert)
+        if results is not None or always:
+            st.alerts.append(alert)
+            del st.alerts[:-50]
+        return results
+
     def _maybe_force_exit(self, bar_time: datetime, trading_day: date) -> None:
         if not self.cfg.alerts.force_exit_reminder:
             return
@@ -536,13 +555,13 @@ class TradingEngine:
 
         self._force_exit_sent_for = trading_day
         open_count = len(self.risk.session.open_positions)
-        self.dispatcher.dispatch(TradeAlert(
+        self._emit(TradeAlert(
             kind=AlertKind.FORCE_EXIT,
             timestamp=bar_time,
             message=(f"{self.cfg.session.force_exit:%H:%M} force-exit time. "
                      f"{open_count} position(s) tracked as open. Flat before close - "
                      f"never carry an intraday option overnight."),
-        ))
+        ), self.state, always=True)
 
     def _not_configured(self, detail: str) -> EngineState:
         """
@@ -558,11 +577,11 @@ class TradingEngine:
         if self._last_config_error != detail:
             self._last_config_error = detail
             self.journal.write("not_configured", {"detail": detail})
-            self.dispatcher.dispatch(TradeAlert(
+            self._emit(TradeAlert(
                 kind=AlertKind.HALT, timestamp=datetime.now(),
                 message=f"NOT CONFIGURED — no evaluations until this is fixed. "
                         f"{detail.splitlines()[0]}",
-            ))
+            ), st, always=True)
         return st
 
     def _trip_kill_switch(self, detail: str) -> EngineState:
@@ -572,11 +591,11 @@ class TradingEngine:
         st.last_error = detail
         st.halt_reason = HaltReason.KILL_SWITCH.value
         self.journal.write("kill_switch", {"detail": detail})
-        self.dispatcher.dispatch(TradeAlert(
+        self._emit(TradeAlert(
             kind=AlertKind.KILL_SWITCH,
             timestamp=datetime.now(),
             message=f"KILL SWITCH TRIPPED — no further alerts until re-armed. {detail}",
-        ))
+        ), st, always=True)
         return st
 
     def _is_expiry_day(self, day: date) -> bool:

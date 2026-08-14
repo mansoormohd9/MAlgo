@@ -19,14 +19,17 @@ import io
 import math
 import struct
 import wave
+from datetime import date
 
 import streamlit as st
 
+from ..alerts.base import TradeAlert
 from ..config import Config, DEFAULT
 from ..data.factory import build_feed
 from ..alerts.channels import (InAppNotifier, TelegramNotifier,
                                DesktopNotifier, EmailNotifier)
 from ..alerts.dispatcher import AlertDispatcher
+from ..brief import ChainView, build_chain_view
 from ..engine import TradingEngine
 from ..journal import Journal
 from ..strategies.registry import default_enabled_keys
@@ -53,6 +56,10 @@ def get_engine(rebuild: bool = False) -> TradingEngine | None:
     if rebuild:
         st.session_state.pop("engine", None)
         st.session_state.pop("engine_error", None)
+        # Deliberately NOT ui_alerts. Rebuilding resets the risk session
+        # because a different data source is a different session - but the
+        # record of what you were told today is yours, and losing it because
+        # you reconnected a feed is just losing information.
 
     if "engine" in st.session_state:
         return st.session_state.engine
@@ -65,7 +72,10 @@ def get_engine(rebuild: bool = False) -> TradingEngine | None:
         st.session_state.engine_error = str(e)
         return None
 
-    notifiers = [InAppNotifier(), TelegramNotifier(),
+    # The sink is the whole point of the in-app channel and it was never
+    # supplied, so `InAppNotifier` pushed into a list nobody read. Settings ->
+    # Send test reported success while nothing appeared anywhere.
+    notifiers = [InAppNotifier(sink=push_ui_alert), TelegramNotifier(),
                  DesktopNotifier(), EmailNotifier()]
     dispatcher = AlertDispatcher(notifiers, cfg, journal_fn=journal.write)
 
@@ -112,6 +122,87 @@ def engine_error() -> str | None:
     return st.session_state.get("engine_error")
 
 
+# ---------------------------------------------------------------- alert feed
+
+MAX_FEED = 200
+
+
+def _feed() -> list[TradeAlert]:
+    return st.session_state.setdefault("ui_alerts", [])
+
+
+def push_ui_alert(alert: TradeAlert) -> None:
+    """
+    The one front door to the alert feed the UI renders.
+
+    Two things arrive here: alerts the engine produced (copied across by
+    `sync_ui_alerts`) and alerts pushed straight through the in-app channel,
+    which is how the Settings test button gets to be honest about having
+    worked. De-duplication is on (dedupe_key, timestamp) so the same setup
+    re-read from the engine on the next refresh does not stack up, while two
+    genuine test sends a minute apart both show.
+    """
+    seen = st.session_state.setdefault("ui_alert_keys", set())
+    token = (alert.dedupe_key, alert.timestamp)
+    if token in seen:
+        return
+    seen.add(token)
+    feed = _feed()
+    feed.append(alert)
+    del feed[:-MAX_FEED]
+
+
+def sync_ui_alerts(engine) -> list[TradeAlert]:
+    """Copy anything new out of `engine.state.alerts` into the session feed."""
+    if engine is not None:
+        for alert in engine.state.alerts:
+            push_ui_alert(alert)
+    return _feed()
+
+
+def unannounced_alerts() -> list[TradeAlert]:
+    """
+    Everything added to the feed since the last time we announced.
+
+    A high-water mark rather than a before/after length comparison, because
+    alerts arrive by two routes at two different moments: the in-app channel's
+    sink fires deep inside `engine.run_once()`, while `sync_ui_alerts()` runs
+    after it. Measuring the length around the run therefore always saw zero
+    new alerts and the toast never fired - the notification bug reappearing
+    one level up from where it was fixed.
+    """
+    feed = _feed()
+    seen = st.session_state.get("ui_alerts_announced", 0)
+    st.session_state.ui_alerts_announced = len(feed)
+    return feed[seen:]
+
+
+# ---------------------------------------------------------------- chain cache
+
+@st.cache_data(ttl=10, show_spinner=False)
+def cached_chain_view(spot: float, option_type: str, stop_points: float,
+                      day: date, entries_taken: int, open_lots: int,
+                      entry_permitted: bool, halt_reason: str,
+                      _cfg: Config, _provider, _risk) -> ChainView:
+    """
+    `build_chain_view` behind a short TTL.
+
+    Each call is one broker round trip and the radar wants both sides, so an
+    uncached panel on a 5-second refresh would be 24 chain fetches a minute on
+    top of the per-position premium refetch the engine already does.
+
+    Underscore-prefixed arguments are excluded from the cache key by
+    convention. `entries_taken` and `open_lots` are in the key on purpose:
+    `approve()` consults the session for free capital and the correlation cap,
+    so its verdict changes when they do, and a stale "you can buy this" after
+    you have already taken the trade is exactly the wrong answer to cache.
+    """
+    return build_chain_view(spot, option_type, stop_points, _cfg,
+                            chain_provider=_provider, risk=_risk, today=day,
+                            entry_permitted=entry_permitted,
+                            halt_reason=halt_reason)
+
+
 # ---------------------------------------------------------------- alert sound
 
 @st.cache_data
@@ -142,8 +233,20 @@ def alert_sound_b64() -> str:
 
 
 def play_alert_sound() -> None:
-    st.markdown(
+    """
+    Ring the chime.
+
+    Browsers block autoplaying audio until the page has seen a user gesture,
+    so this only reliably fires once you have pressed **Enable sound** (the
+    click is the gesture). Even then a browser may refuse, which is why the
+    chime is never the only notification - `st.toast` and the desktop toast
+    carry the same alert on paths that cannot be blocked.
+    """
+    st.html(
         f'<audio autoplay><source src="data:audio/wav;base64,{alert_sound_b64()}" '
-        f'type="audio/wav"></audio>',
-        unsafe_allow_html=True,
+        f'type="audio/wav"></audio>'
     )
+
+
+def sound_armed() -> bool:
+    return bool(st.session_state.get("sound_armed"))

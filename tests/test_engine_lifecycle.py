@@ -296,6 +296,69 @@ def test_a_configuration_error_is_announced_once_not_every_poll(tmp_path):
     assert len(collector.sent) == 1
 
 
+# ------------------------------------------------- alerts reaching the feed
+
+def test_operational_alerts_reach_the_feed_the_ui_renders(tmp_path):
+    """
+    HALT, KILL_SWITCH, FORCE_EXIT and the aggregate CLOSE_ALL used to dispatch
+    without ever appending to `state.alerts`. The four most urgent alerts in
+    the system were the four that never appeared in the alert feed and never
+    rang the chime - visible only as a banner, if you happened to be looking.
+    """
+    from nifty_algo.data.base import FeedError, NotConfigured
+
+    halted = _engine_with(
+        _BrokenFeed(flat_bars(40), NotConfigured("no credentials")), tmp_path)
+    state = halted.run_once()
+    assert [a.kind for a in state.alerts] == [AlertKind.HALT]
+
+    killed = _engine_with(
+        _BrokenFeed(flat_bars(40), FeedError("connection reset")), tmp_path)
+    state = killed.run_once()
+    assert AlertKind.KILL_SWITCH in [a.kind for a in state.alerts]
+
+
+def test_the_feed_survives_having_every_channel_switched_off(tmp_path):
+    """
+    Whether you happen to have Telegram enabled has nothing to do with whether
+    the kill switch tripped. With no channel enabled the alert was previously
+    dropped from the UI feed entirely.
+    """
+    from nifty_algo.data.base import FeedError
+
+    cfg = Config()
+    cfg.alerts.enable_inapp = False
+    engine = TradingEngine(
+        _BrokenFeed(flat_bars(40), FeedError("connection reset")),
+        AlertDispatcher([_Collector()], cfg), cfg,
+        journal=Journal(directory=str(tmp_path)))
+
+    state = engine.run_once()
+    assert AlertKind.KILL_SWITCH in [a.kind for a in state.alerts]
+
+
+def test_force_exit_reminder_reaches_the_feed(rig):
+    engine, collector, cfg = rig
+    engine._maybe_force_exit(datetime(2026, 3, 10, 15, 10), date(2026, 3, 10))
+
+    kinds = [a.kind for a in engine.state.alerts]
+    assert AlertKind.FORCE_EXIT in kinds
+    assert [a.kind for a in collector.sent] == [AlertKind.FORCE_EXIT]
+
+
+def test_a_duplicate_entry_is_not_stacked_into_the_feed(rig):
+    """Dedupe still has to hold, or one setup fills the feed with itself."""
+    engine, _, cfg = rig
+    alert = TradeAlert(kind=AlertKind.ENTRY,
+                       timestamp=datetime(2026, 3, 10, 10, 0),
+                       strategy_key="level_break", direction="long",
+                       option_type="CE", strike=26_000, entry_premium=120.0)
+
+    for _ in range(20):                      # 20 refreshes inside one bar
+        engine._emit(alert, engine.state)
+    assert len(engine.state.alerts) == 1
+
+
 def test_a_new_day_clears_positions_and_pending_orders(rig):
     engine, _, cfg = rig
     alert, _ = _park(engine, cfg)
