@@ -1,0 +1,104 @@
+# Nifty 100 constituents (Nifty 50 + Nifty Next 50).
+# Snapshot maintained by hand; refresh from NSE via the Daily picks page.
+# `industry` is what the halal activity screen reads - keep it specific.
+symbol,name,sector,industry,yf_ticker
+ADANIENT,Adani Enterprises,Metals & Mining,Trading & Distributors,ADANIENT.NS
+ADANIPORTS,Adani Ports and Special Economic Zone,Services,Port & Port services,ADANIPORTS.NS
+APOLLOHOSP,Apollo Hospitals Enterprise,Healthcare,Hospital,APOLLOHOSP.NS
+ASIANPAINT,Asian Paints,Consumer Durables,Paints,ASIANPAINT.NS
+AXISBANK,Axis Bank,Financial Services,Private Sector Bank,AXISBANK.NS
+BAJAJ-AUTO,Bajaj Auto,Automobile and Auto Components,2/3 Wheelers,BAJAJ-AUTO.NS
+BAJFINANCE,Bajaj Finance,Financial Services,Non Banking Financial Company (NBFC),BAJFINANCE.NS
+BAJAJFINSV,Bajaj Finserv,Financial Services,Insurance and NBFC holding company,BAJAJFINSV.NS
+BEL,Bharat Electronics,Capital Goods,Aerospace & Defence,BEL.NS
+BHARTIARTL,Bharti Airtel,Telecommunication,Telecom - Cellular & Fixed line services,BHARTIARTL.NS
+CIPLA,Cipla,Healthcare,Pharmaceuticals,CIPLA.NS
+COALINDIA,Coal India,Oil Gas & Consumable Fuels,Coal,COALINDIA.NS
+DRREDDY,Dr Reddys Laboratories,Healthcare,Pharmaceuticals,DRREDDY.NS
+EICHERMOT,Eicher Motors,Automobile and Auto Components,2/3 Wheelers,EICHERMOT.NS
+ETERNAL,Eternal (Zomato),Consumer Services,E-Retail/E-Commerce,ETERNAL.NS
+GRASIM,Grasim Industries,Construction Materials,Cement & Cement Products,GRASIM.NS
+HCLTECH,HCL Technologies,Information Technology,Computers - Software & Consulting,HCLTECH.NS
+HDFCBANK,HDFC Bank,Financial Services,Private Sector Bank,HDFCBANK.NS
+HDFCLIFE,HDFC Life Insurance Company,Financial Services,Life Insurance,HDFCLIFE.NS
+HEROMOTOCO,Hero MotoCorp,Automobile and Auto Components,2/3 Wheelers,HEROMOTOCO.NS
+HINDALCO,Hindalco Industries,Metals & Mining,Aluminium,HINDALCO.NS
+HINDUNILVR,Hindustan Unilever,Fast Moving Consumer Goods,Diversified FMCG,HINDUNILVR.NS
+ICICIBANK,ICICI Bank,Financial Services,Private Sector Bank,ICICIBANK.NS
+INDUSINDBK,IndusInd Bank,Financial Services,Private Sector Bank,INDUSINDBK.NS
+INFY,Infosys,Information Technology,Computers - Software & Consulting,INFY.NS
+ITC,ITC,Fast Moving Consumer Goods,Diversified FMCG and Cigarettes & Tobacco Products,ITC.NS
+JIOFIN,Jio Financial Services,Financial Services,Non Banking Financial Company (NBFC),JIOFIN.NS
+JSWSTEEL,JSW Steel,Metals & Mining,Iron & Steel,JSWSTEEL.NS
+KOTAKBANK,Kotak Mahindra Bank,Financial Services,Private Sector Bank,KOTAKBANK.NS
+LT,Larsen & Toubro,Construction,Civil Construction,LT.NS
+M&M,Mahindra & Mahindra,Automobile and Auto Components,Passenger Cars & Utility Vehicles,M&M.NS
+MARUTI,Maruti Suzuki India,Automobile and Auto Components,Passenger Cars & Utility Vehicles,MARUTI.NS
+NESTLEIND,Nestle India,Fast Moving Consumer Goods,Packaged Foods,NESTLEIND.NS
+NTPC,NTPC,Power,Power Generation,NTPC.NS
+ONGC,Oil & Natural Gas Corporation,Oil Gas & Consumable Fuels,Oil Exploration & Production,ONGC.NS
+POWERGRID,Power Grid Corporation of India,Power,Power - Transmission,POWERGRID.NS
+RELIANCE,Reliance Industries,Oil Gas & Consumable Fuels,Refineries & Marketing,RELIANCE.NS
+SBILIFE,SBI Life Insurance Company,Financial Services,Life Insurance,SBILIFE.NS
+SBIN,State Bank of India,Financial Services,Public Sector Bank,SBIN.NS
+SHRIRAMFIN,Shriram Finance,Financial Services,Non Banking Financial Company (NBFC),SHRIRAMFIN.NS
+SUNPHARMA,Sun Pharmaceutical Industries,Healthcare,Pharmaceuticals,SUNPHARMA.NS
+TATACONSUM,Tata Consumer Products,Fast Moving Consumer Goods,Tea & Coffee,TATACONSUM.NS
+TATAMOTORS,Tata Motors,Automobile and Auto Components,Passenger Cars & Utility Vehicles,TATAMOTORS.NS
+TATASTEEL,Tata Steel,Metals & Mining,Iron & Steel,TATASTEEL.NS
+TCS,Tata Consultancy Services,Information Technology,Computers - Software & Consulting,TCS.NS
+TECHM,Tech Mahindra,Information Technology,Computers - Software & Consulting,TECHM.NS
+TITAN,Titan Company,Consumer Durables,Gems Jewellery And Watches,TITAN.NS
+TRENT,Trent,Consumer Services,Retailing,TRENT.NS
+ULTRACEMCO,UltraTech Cement,Construction Materials,Cement & Cement Products,ULTRACEMCO.NS
+WIPRO,Wipro,Information Technology,Computers - Software & Consulting,WIPRO.NS
+INDIGO,InterGlobe Aviation,Services,Airline,INDIGO.NS
+MAXHEALTH,Max Healthcare Institute,Healthcare,Hospital,MAXHEALTH.NS
+ABB,ABB India,Capital Goods,Heavy Electrical Equipment,ABB.NS
+ADANIENSOL,Adani Energy Solutions,Power,Power - Transmission,ADANIENSOL.NS
+ADANIGREEN,Adani Green Energy,Power,Power Generation,ADANIGREEN.NS
+ADANIPOWER,Adani Power,Power,Power Generation,ADANIPOWER.NS
+AMBUJACEM,Ambuja Cements,Construction Materials,Cement & Cement Products,AMBUJACEM.NS
+DMART,Avenue Supermarts,Consumer Services,Retailing,DMART.NS
+BAJAJHLDNG,Bajaj Holdings & Investment,Financial Services,Investment Company,BAJAJHLDNG.NS
+BANKBARODA,Bank of Baroda,Financial Services,Public Sector Bank,BANKBARODA.NS
+BPCL,Bharat Petroleum Corporation,Oil Gas & Consumable Fuels,Refineries & Marketing,BPCL.NS
+BOSCHLTD,Bosch,Automobile and Auto Components,Auto Components,BOSCHLTD.NS
+BRITANNIA,Britannia Industries,Fast Moving Consumer Goods,Packaged Foods,BRITANNIA.NS
+CANBK,Canara Bank,Financial Services,Public Sector Bank,CANBK.NS
+CGPOWER,CG Power and Industrial Solutions,Capital Goods,Heavy Electrical Equipment,CGPOWER.NS
+CHOLAFIN,Cholamandalam Investment and Finance Company,Financial Services,Non Banking Financial Company (NBFC),CHOLAFIN.NS
+DABUR,Dabur India,Fast Moving Consumer Goods,Personal Care,DABUR.NS
+DIVISLAB,Divis Laboratories,Healthcare,Pharmaceuticals,DIVISLAB.NS
+DLF,DLF,Realty,Residential Commercial Projects,DLF.NS
+GAIL,GAIL (India),Oil Gas & Consumable Fuels,Gas Transmission/Marketing,GAIL.NS
+GODREJCP,Godrej Consumer Products,Fast Moving Consumer Goods,Personal Care,GODREJCP.NS
+HAVELLS,Havells India,Consumer Durables,Consumer Electronics,HAVELLS.NS
+HAL,Hindustan Aeronautics,Capital Goods,Aerospace & Defence,HAL.NS
+HYUNDAI,Hyundai Motor India,Automobile and Auto Components,Passenger Cars & Utility Vehicles,HYUNDAI.NS
+ICICIGI,ICICI Lombard General Insurance Company,Financial Services,General Insurance,ICICIGI.NS
+ICICIPRULI,ICICI Prudential Life Insurance Company,Financial Services,Life Insurance,ICICIPRULI.NS
+INDHOTEL,The Indian Hotels Company,Consumer Services,Hotels & Resorts,INDHOTEL.NS
+IOC,Indian Oil Corporation,Oil Gas & Consumable Fuels,Refineries & Marketing,IOC.NS
+IRFC,Indian Railway Finance Corporation,Financial Services,Non Banking Financial Company (NBFC),IRFC.NS
+JINDALSTEL,Jindal Steel & Power,Metals & Mining,Iron & Steel,JINDALSTEL.NS
+JSWENERGY,JSW Energy,Power,Power Generation,JSWENERGY.NS
+LICI,Life Insurance Corporation of India,Financial Services,Life Insurance,LICI.NS
+LODHA,Lodha Developers,Realty,Residential Commercial Projects,LODHA.NS
+LTIM,LTIMindtree,Information Technology,Computers - Software & Consulting,LTIM.NS
+MOTHERSON,Samvardhana Motherson International,Automobile and Auto Components,Auto Components,MOTHERSON.NS
+NAUKRI,Info Edge (India),Consumer Services,Internet & Catalogue Retail,NAUKRI.NS
+PFC,Power Finance Corporation,Financial Services,Non Banking Financial Company (NBFC),PFC.NS
+PIDILITIND,Pidilite Industries,Chemicals,Specialty Chemicals,PIDILITIND.NS
+PNB,Punjab National Bank,Financial Services,Public Sector Bank,PNB.NS
+RECLTD,REC,Financial Services,Non Banking Financial Company (NBFC),RECLTD.NS
+SIEMENS,Siemens,Capital Goods,Heavy Electrical Equipment,SIEMENS.NS
+SWIGGY,Swiggy,Consumer Services,E-Retail/E-Commerce,SWIGGY.NS
+TATAPOWER,Tata Power Company,Power,Integrated Power Utilities,TATAPOWER.NS
+TORNTPHARM,Torrent Pharmaceuticals,Healthcare,Pharmaceuticals,TORNTPHARM.NS
+TVSMOTOR,TVS Motor Company,Automobile and Auto Components,2/3 Wheelers,TVSMOTOR.NS
+UNITDSPR,United Spirits,Fast Moving Consumer Goods,Breweries & Distilleries,UNITDSPR.NS
+VBL,Varun Beverages,Fast Moving Consumer Goods,Other Beverages,VBL.NS
+VEDL,Vedanta,Metals & Mining,Diversified Metals,VEDL.NS
+ZYDUSLIFE,Zydus Lifesciences,Healthcare,Pharmaceuticals,ZYDUSLIFE.NS
+SHREECEM,Shree Cement,Construction Materials,Cement & Cement Products,SHREECEM.NS

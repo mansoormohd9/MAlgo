@@ -14,6 +14,11 @@ data/*.csv
 data/*.parquet
 data/*.feather
 !data/sample_*.csv
+# The swing scanner's universe and your halal rulings are SOURCE, not
+# downloaded data - the scan cannot run without them.
+!data/nifty100.csv
+!data/halal_overrides.csv
+data/cache/
 
 # --- Python ---
 __pycache__/

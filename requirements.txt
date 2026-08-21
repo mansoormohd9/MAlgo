@@ -15,6 +15,7 @@ yfinance>=0.2.40     # delayed fallback feed
 pyarrow>=16.0        # parquet
 requests>=2.32
 python-dotenv>=1.0
+feedparser>=6.0     # swing scanner: news RSS, no API key needed
 
 # Alerts
 plyer>=2.1           # Windows desktop toast

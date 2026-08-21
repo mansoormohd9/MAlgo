@@ -1,0 +1,10 @@
+# Your final word on the halal screen. Anything listed here wins over both the
+# activity screen and the computed ratios.
+#
+#   verdict     : compliant | non_compliant
+#   note        : why - this is the audit trail for a decision you made
+#   reviewed_on : YYYY-MM-DD, so a stale ruling is visible as stale
+#
+# Example:
+# WIPRO,compliant,Checked FY25 annual report - interest income 0.4% of revenue,2026-04-11
+symbol,verdict,note,reviewed_on

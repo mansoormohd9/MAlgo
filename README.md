@@ -47,12 +47,13 @@ run identical code. Note that `run_live` attaches **no broker**: it will use a
 real chain when Kite is authenticated, but it can never place an order, because
 reading quotes and sending orders are separate permissions.
 
-### The six pages
+### The seven pages
 
 | Page | What it does |
 |---|---|
 | **Live alerts** | Session governors with the live ratcheting floor, open positions and where their stops actually sit, alert cards with a **Place order** button, candlestick chart with the levels/trendlines/VWAP the strategies used, and a *why nothing fired* table |
 | **Daily brief** | Pre-open frame (gap, ATR, VIX, expiry, the day's rupee budget); the option chain with **which gate each strike fails**; and a journal-driven review of any past day |
+| **Daily picks** | A different book: once a day it sweeps the **Nifty 100** constituents, applies a **halal (Shariah) screen**, and returns at most three cash-equity LONG **swing** tickets — entry, stop, target, quantity — sized off the same risk budget, with the news read, the metrics, the halal working, and a ledger accounting for all hundred symbols |
 | **Strategies** | Toggle each of the ten setups, tune every parameter, control the regime gate |
 | **Backtest** | Walk-forward run, metrics, equity curve, per-strategy expectancy, **and how the day rules behaved** — target hits, floor hits, ratchets, entries used |
 | **Journal** | The append-only record, filterable, CSV/JSONL export |

@@ -267,6 +267,131 @@ class BacktestConfig:
 
 
 @dataclass
+class HalalConfig:
+    """
+    Shariah screening thresholds.
+
+    Denominator is TOTAL ASSETS, not market cap. Both are defensible - AAOIFI
+    and Dow Jones use market cap - but a market-cap denominator makes the
+    verdict move with the share price, so a stock can be compliant on Monday
+    and non-compliant on Friday having filed nothing. For a screen that reruns
+    every day that is noise, not information. Total assets only moves when a
+    new balance sheet lands, which is when the answer should actually change.
+
+    WHAT THIS CANNOT DO: the non-compliant-revenue test (haram income <= 5% of
+    total revenue) and the purification amount need a line-item read of the
+    annual report. Neither is derivable from any free data source, so neither
+    is attempted here. Every verdict this module produces says so.
+    """
+    debt_to_assets_max: float = 0.33
+    cash_and_interest_to_assets_max: float = 0.33
+    receivables_to_assets_max: float = 0.49
+
+    # Fail closed. A missing balance sheet is not evidence of compliance, and
+    # the cost of the two errors is not symmetric: wrongly excluding a halal
+    # stock costs you one candidate out of a hundred, wrongly including a
+    # haram one defeats the entire purpose of the screen.
+    exclude_on_missing_data: bool = True
+
+    overrides_csv: str = "data/halal_overrides.csv"
+
+
+@dataclass
+class SwingConfig:
+    """
+    Daily Nifty 100 swing scanner.
+
+    A DIFFERENT BOOK FROM THE REST OF THIS SYSTEM. Everything else here is
+    intraday NIFTY options, flat by 15:10. This is cash equity held for days.
+
+    Capital and reward:risk are deliberately ABSENT - they are read from
+    CapitalConfig, so both books size off one set of governors and cannot
+    drift apart. `top_n` is 3 because `max_entries_per_session` is 3.
+    """
+    universe_csv: str = "data/nifty100.csv"
+    cache_dir: str = "data/cache"
+    benchmark_ticker: str = "^NSEI"
+    top_n: int = 3
+    history_days: int = 400            # ~1 trading year plus the 200d warm-up
+
+    # --- trend / setup, on DAILY bars ---
+    # 20/50 rather than the intraday 9/21: a 9-day EMA on daily bars is a
+    # two-week average, which is noise at this horizon.
+    ema_fast: int = 20
+    ema_slow: int = 50
+    atr_period: int = 14
+    # The stop is placed at structure and then CLAMPED into this band, so it
+    # is never tighter than daily noise nor wider than the risk budget can
+    # size. A stop is only a real stop if it sits where the idea is wrong.
+    swing_atr_stop_min_multiple: float = 1.0
+    swing_atr_stop_multiple: float = 1.5   # wider than intraday - overnight gaps
+    stop_structure_bars: int = 10          # swing low searched over this window
+    measured_move_bars: int = 40           # base height, when there is no
+                                           # resistance left overhead
+    target_min_atr: float = 1.0            # a target closer than this is noise
+    # ...and a target further than this is not reachable inside the holding
+    # window. Over ~10 sessions a stock covers roughly sqrt(10) ATR, so a
+    # level 8 ATR away is a real level and a fictional target. The ticket
+    # shows the reachable figure and says when it has been capped.
+    target_max_atr: float = 4.0
+    max_entry_distance_atr: float = 1.0    # trigger further away than this is
+                                           # not today's trade
+    breakout_buffer_atr_frac: float = 0.15
+    pivot_lookback: int = 5
+    level_cluster_atr_frac: float = 0.5
+    min_level_touches: int = 2
+    volume_surge_multiple: float = 1.5
+    squeeze_lookback: int = 7
+    pullback_max_distance_atr: float = 1.0
+    sweep_min_wick_atr: float = 0.35
+    sweep_max_close_back_atr: float = 0.20
+
+    # --- tradeability ---
+    min_price: float = 50.0
+    min_avg_turnover_cr: float = 25.0   # 20-day average traded value, rupees crore
+    min_atr_pct: float = 0.008          # below this there is no move to catch
+    max_atr_pct: float = 0.070          # above this the 1.5-ATR stop is unaffordable
+
+    # --- relative strength ---
+    rs_short_days: int = 21
+    rs_long_days: int = 63
+
+    # --- gates ---
+    earnings_blackout_days: int = 5     # results due within N sessions -> stand aside
+    max_per_sector: int = 1             # three picks in one sector is one bet
+    news_finalists: int = 15            # only fetch news for this many candidates
+    news_lookback_hours: int = 72
+    news_max_items: int = 25            # newest N vote; an unbounded
+                                        # count lets one widely-covered
+                                        # name outweigh a quiet one
+    valid_for_days: int = 5             # an untriggered entry expires after this
+
+    # --- composite score weights (must sum to 1.0) ---
+    w_setup: float = 0.30
+    w_relative_strength: float = 0.25
+    w_reward_risk: float = 0.15
+    w_volume: float = 0.10
+    w_position_52w: float = 0.10
+    w_news: float = 0.10
+
+    # --- cache lifetimes ---
+    price_cache_hours: int = 12         # daily bars change once a day
+    fundamentals_cache_days: int = 7    # balance sheets change once a quarter
+
+    halal: HalalConfig = field(default_factory=HalalConfig)
+
+    def score_weights(self) -> dict[str, float]:
+        return {
+            "setup": self.w_setup,
+            "relative_strength": self.w_relative_strength,
+            "reward_risk": self.w_reward_risk,
+            "volume": self.w_volume,
+            "position_52w": self.w_position_52w,
+            "news": self.w_news,
+        }
+
+
+@dataclass
 class Config:
     capital: CapitalConfig = field(default_factory=CapitalConfig)
     instrument: InstrumentConfig = field(default_factory=InstrumentConfig)
@@ -279,6 +404,7 @@ class Config:
     data: DataConfig = field(default_factory=DataConfig)
     alerts: AlertConfig = field(default_factory=AlertConfig)
     backtest: BacktestConfig = field(default_factory=BacktestConfig)
+    swing: SwingConfig = field(default_factory=SwingConfig)
 
 
 DEFAULT = Config()

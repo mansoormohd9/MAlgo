@@ -71,3 +71,32 @@ def cfg() -> Config:
 @pytest.fixture
 def calm() -> pd.DataFrame:
     return flat_bars()
+
+
+# ---------------------------------------------------------------- daily bars
+#
+# The swing scanner reads DAILY bars, not 5-minute ones, so it needs its own
+# builders. Same idea as the intraday ones above: a series a test can reason
+# about, rather than a fixture file nobody can check by eye.
+
+DAILY_START = datetime(2026, 1, 5)
+
+
+def daily_bars(closes, volume: float = 1_000_000.0,
+               start: datetime = DAILY_START) -> pd.DataFrame:
+    """Daily OHLCV from a close series, with plausible wicks around it."""
+    idx = [start + timedelta(days=i) for i in range(len(closes))]
+    rows, prev = [], closes[0]
+    for c in closes:
+        o = prev
+        rows.append({"open": o, "high": max(o, c) * 1.004,
+                     "low": min(o, c) * 0.996, "close": c, "volume": volume})
+        prev = c
+    return pd.DataFrame(rows, index=pd.DatetimeIndex(idx))
+
+
+def trending(n: int = 140, drift: float = 0.0035, vol: float = 0.010,
+             seed: int = 7, start_price: float = 100.0) -> list[float]:
+    """A geometric random walk with drift - an uptrend you can seed."""
+    rng = np.random.default_rng(seed)
+    return list(start_price * np.exp(np.cumsum(rng.normal(drift, vol, n))))

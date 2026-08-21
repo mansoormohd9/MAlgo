@@ -204,3 +204,70 @@ def build_overlays(bars: pd.DataFrame, cfg):
         except Exception:
             pass
     return levels, trendlines, vwap_series
+
+
+def swing_chart(bars: pd.DataFrame, palette: Palette, pick,
+                sessions: int = 120) -> go.Figure:
+    """
+    Daily candles for one swing pick, with its ticket drawn on.
+
+    Same construction as `price_chart` - two rows, volume in its own subplot
+    rather than on a second y-axis - but the overlays are the EMAs that
+    defined the setup and the three levels of the ticket, so what you see is
+    what the scanner reasoned about. The entry/target/stop lines are dashed
+    because they are thresholds, and each is direct-labelled so colour is
+    never carrying the meaning by itself.
+    """
+    p = palette
+    window = bars.iloc[-sessions:] if len(bars) > sessions else bars
+    setup = pick.setup
+
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
+                        row_heights=[0.78, 0.22], vertical_spacing=0.04)
+
+    fig.add_trace(go.Candlestick(
+        x=window.index, open=window["open"], high=window["high"],
+        low=window["low"], close=window["close"], name="Price",
+        increasing=dict(line=dict(color=p.good, width=1), fillcolor=p.good),
+        decreasing=dict(line=dict(color=p.critical, width=1), fillcolor=p.critical),
+        showlegend=False,
+    ), row=1, col=1)
+
+    for period, colour in ((pick.metrics.get("ema_fast_period", 20), p.series_1),
+                           (pick.metrics.get("ema_slow_period", 50), p.series_2)):
+        line = sig.ema(window["close"], period)
+        fig.add_trace(go.Scatter(
+            x=line.index, y=line, name=f"{period}-day EMA", mode="lines",
+            line=dict(color=colour, width=2),
+        ), row=1, col=1)
+
+    for y, label, colour in (
+        (setup.entry, "ENTRY", p.series_1),
+        (setup.target, "TARGET", p.good),
+        (setup.stop, "STOP", p.critical),
+    ):
+        fig.add_hline(
+            y=y, line=dict(color=colour, width=2, dash="dash"),
+            annotation_text=f"{label} {y:,.1f}",
+            annotation_position="left",
+            annotation_font=dict(size=11, color=colour),
+            row=1, col=1,
+        )
+
+    fig.add_trace(go.Bar(
+        x=window.index, y=window["volume"], name="Volume",
+        marker=dict(color=p.muted, line=dict(width=0)),
+        opacity=0.55, showlegend=False,
+    ), row=2, col=1)
+
+    layout = layout_defaults(p, height=420)
+    legend = layout.pop("legend")
+    xaxis = layout.pop("xaxis")
+    yaxis = layout.pop("yaxis")
+    fig.update_layout(**layout, legend=legend, title=None,
+                      xaxis_rangeslider_visible=False, bargap=0.15)
+    fig.update_xaxes(**xaxis, row=1, col=1)
+    fig.update_xaxes(**xaxis, row=2, col=1)
+    fig.update_yaxes(**yaxis, title_text="Price", row=1, col=1)
+    fig.update_yaxes(**yaxis, title_text="Volume", row=2, col=1)
+    return fig
