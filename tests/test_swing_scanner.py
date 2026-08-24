@@ -47,8 +47,9 @@ def cfg() -> Config:
     c = Config()
     # The synthetic series start at 100 and drift up; the shipped turnover and
     # price floors are calibrated for real Nifty 100 names, not for them.
-    c.swing.min_price = 1.0
-    c.swing.min_avg_turnover_cr = 0.0
+    # They live on the market now - they are denominated in its currency.
+    c.swing.markets["india"].min_price = 1.0
+    c.swing.markets["india"].min_avg_turnover = 0.0
     return c
 
 
@@ -62,11 +63,14 @@ def world(monkeypatch):
     handed - that is how the "halal runs before the download" claim is tested.
     """
     state = {"stocks": [], "bars": {}, "funds": {}, "news": {},
-             "asked_for": None, "news_asked_for": None}
+             "asked_for": None, "news_asked_for": None,
+             "priced_market": None, "funds_market": None, "divisors": {}}
 
-    def fake_prices(tickers, cfg, benchmark=None, force_refresh=False,
-                    progress=None):
+    def fake_prices(tickers, cfg, market, benchmark=None, force_refresh=False,
+                    divisors=None, progress=None):
         state["asked_for"] = set(tickers)
+        state["priced_market"] = market.key
+        state["divisors"] = dict(divisors or {})
         bars = {s: state["bars"][s] for s in tickers if s in state["bars"]}
         return PriceSet(
             bars=bars,
@@ -75,7 +79,9 @@ def world(monkeypatch):
             missing=[s for s in tickers if s not in state["bars"]],
         )
 
-    def fake_fundamentals(stocks, cfg, force_refresh=False, progress=None):
+    def fake_fundamentals(stocks, cfg, market, force_refresh=False,
+                          progress=None):
+        state["funds_market"] = market.key
         return {s.symbol: state["funds"].get(s.symbol,
                                              clean_fundamentals(s.symbol))
                 for s in stocks}
@@ -244,7 +250,7 @@ def test_a_news_veto_kills_a_technically_perfect_candidate(cfg, world):
 
 
 def test_illiquid_names_are_rejected_for_tradeability(cfg, world):
-    cfg.swing.min_avg_turnover_cr = 1e9
+    cfg.swing.markets["india"].min_avg_turnover = 1e9
     populate(world, ["THIN"])
     result = run(cfg, world)
     assert result.rejections_for(scanner.STAGE_TRADEABILITY)
@@ -341,7 +347,7 @@ def test_quantity_comes_off_the_risk_budget_not_the_capital(cfg, world):
         expected = int(budget // pick.setup.risk_points)
         if not pick.capital_note:
             assert pick.quantity == expected
-            assert pick.rupee_risk <= budget + 1e-6
+            assert pick.risk_amount <= budget + 1e-6
             # ...and it is the LARGEST whole size that fits, not a timid one.
             assert (pick.quantity + 1) * pick.setup.risk_points > budget
 
@@ -349,7 +355,7 @@ def test_quantity_comes_off_the_risk_budget_not_the_capital(cfg, world):
 def test_reward_follows_the_same_quantity(cfg, world):
     populate(world, [f"SYM{i}" for i in range(8)])
     for pick in run(cfg, world).picks:
-        assert pick.rupee_reward == pytest.approx(
+        assert pick.reward_amount == pytest.approx(
             pick.quantity * pick.setup.reward_points)
         assert pick.deployed == pytest.approx(pick.quantity * pick.setup.entry)
 
@@ -384,7 +390,10 @@ def test_the_combined_capital_note_flags_over_deployment(cfg, world):
         assert "All 3 together" in result.capital_note
         total = sum(p.deployed for p in result.picks)
         if total > cfg.capital.starting_capital:
-            assert "more than your" in result.capital_note
+            # "your capital" became ambiguous once there are two pools, so the
+            # note names the pool and its size instead.
+            assert "more than the" in result.capital_note
+            assert "without margin" in result.capital_note
 
 
 # ---------------------------------------------------------------- records

@@ -47,13 +47,14 @@ run identical code. Note that `run_live` attaches **no broker**: it will use a
 real chain when Kite is authenticated, but it can never place an order, because
 reading quotes and sending orders are separate permissions.
 
-### The seven pages
+### The eight pages
 
 | Page | What it does |
 |---|---|
 | **Live alerts** | Session governors with the live ratcheting floor, open positions and where their stops actually sit, alert cards with a **Place order** button, candlestick chart with the levels/trendlines/VWAP the strategies used, and a *why nothing fired* table |
 | **Daily brief** | Pre-open frame (gap, ATR, VIX, expiry, the day's rupee budget); the option chain with **which gate each strike fails**; and a journal-driven review of any past day |
-| **Daily picks** | A different book: once a day it sweeps the **Nifty 100** constituents, applies a **halal (Shariah) screen**, and returns at most three cash-equity LONG **swing** tickets — entry, stop, target, quantity — sized off the same risk budget, with the news read, the metrics, the halal working, and a ledger accounting for all hundred symbols |
+| **Daily picks** | A different book: once a day it sweeps one market's universe — **India** (Nifty 100), **US** (the union of SPUS + HLAL constituents) or **UK** (FTSE 100) — applies a **halal (Shariah) screen** under both the FTSE/Yasaar and AAOIFI standards, and returns at most three cash-equity LONG **swing** tickets, priced in that market's currency and in rupees, with an overlap check against the Shariah ETFs you already hold and a ledger accounting for every symbol |
+| **Portfolio** | The cross-border picture no single ticket can show: the **US estate-tax meter** ($60,000 non-resident exemption, and which of your holdings count toward it), US-vs-Ireland domicile comparison, what your funds actually own, and LRS/TCS arithmetic. Arithmetic with citations, not advice |
 | **Strategies** | Toggle each of the ten setups, tune every parameter, control the regime gate |
 | **Backtest** | Walk-forward run, metrics, equity curve, per-strategy expectancy, **and how the day rules behaved** — target hits, floor hits, ratchets, entries used |
 | **Journal** | The append-only record, filterable, CSV/JSONL export |
@@ -190,6 +191,11 @@ intend to trade.
 | `regime.py` | Day classifier — decides which strategies may speak today. |
 | `pricing.py` | Black-Scholes, plus `implied_vol()` — premium → IV → delta, per strike, which is how skew becomes visible. |
 | `data/` | `DataFeed` ABC, CSV replay + `BarReplayer`, **Kite**, yfinance, Fyers/Dhan, chain provider. |
+| `swing/markets.py` | The market registry — universe file, benchmark, currency, quote divisor, taxonomy, capital pool. Add an exchange here, not with an `if`. |
+| `swing/fx.py` | Rupees per foreign unit, for sizing. **Fails closed** — no trusted rate, no scan. |
+| `swing/halal_taxonomy.py` | Two activity tables: NSE labels and Yahoo/GICS ones. They share almost no strings. |
+| `swing/holdings.py` | What SPUS and HLAL hold, so a "new" position that you already own says so. |
+| `swing/crossborder.py` | LRS/TCS, US estate-tax exposure, withholding by domicile, UK SDRT. Every rate date-stamped. |
 | `broker/` | **The only package that can spend money.** Kite auth, real chain, order placement. |
 | `alerts/` | `TradeAlert`, four channels, and the de-duplicating dispatcher. |
 | `engine.py` | The decision loop. Headless; driven by both the UI and `run_live`. |

@@ -42,14 +42,34 @@ class PickOutcome:
     entry: float
     stop: float
     target: float
-    quantity: int
+    # Float, not int: a US ticket can be 17.0034 shares, and truncating it
+    # silently understates the position it is meant to be following.
+    quantity: float
     outcome: str
     triggered_on: date | None = None
     closed_on: date | None = None
     last_price: float | None = None
     r_multiple: float | None = None
-    rupees: float | None = None
+    # In the MARKET's currency, not necessarily rupees - hence the name. A
+    # field called `rupees` holding dollars is the bug this rename prevents.
+    amount: float | None = None
+    amount_inr: float | None = None
+    market: str = "india"
+    currency: str = "INR"
+    currency_symbol: str = "₹"
     note: str = ""
+
+    @property
+    def rupees(self) -> float | None:
+        """
+        Deprecated alias. Returns the rupee figure, which for India is the
+        same number `amount` holds and for a foreign pick is the converted
+        one - never the raw foreign amount under a rupee name.
+        """
+        return self.amount_inr
+
+    def money(self, value: float | None) -> str:
+        return "—" if value is None else f"{self.currency_symbol}{value:+,.0f}"
 
     @property
     def is_closed(self) -> bool:
@@ -108,12 +128,19 @@ def record_scan(journal, result) -> None:
 
 def open_picks(journal, bars: dict[str, pd.DataFrame],
                lookback_days: int = 30,
-               today: date | None = None) -> TrackerSummary:
+               today: date | None = None,
+               market: str | None = None) -> TrackerSummary:
     """
     Replay past scans against the bars that have arrived since.
 
     `bars` is the {symbol: daily DataFrame} map the scan already downloaded,
     so this costs no network calls.
+
+    `market` filters to one exchange. The journal holds every market's picks
+    in one file and `bars` only ever covers one of them, so without this a US
+    pick would be replayed against India's bar map, find nothing, and be
+    reported as "no bars available" forever. Records written before markets
+    existed carry no key and are treated as India, which is what they were.
     """
     today = today or date.today()
     cutoff = today - timedelta(days=lookback_days)
@@ -132,9 +159,12 @@ def open_picks(journal, bars: dict[str, pd.DataFrame],
                 symbol = pick.get("symbol")
                 if not symbol:
                     continue
+                pick_market = str(pick.get("market") or "india")
+                if market is not None and pick_market != market:
+                    continue
                 # The same scan re-run twice in a day would otherwise be
                 # counted as two positions in the same name.
-                token = (symbol, scanned_on.isoformat())
+                token = (f"{pick_market}:{symbol}", scanned_on.isoformat())
                 if token in seen:
                     continue
                 seen.add(token)
@@ -153,7 +183,7 @@ def _evaluate(pick: dict, scanned_on: date, df: pd.DataFrame | None,
     entry = float(pick.get("entry", 0.0))
     stop = float(pick.get("stop", 0.0))
     target = float(pick.get("target", 0.0))
-    quantity = int(pick.get("quantity", 0) or 0)
+    quantity = float(pick.get("quantity", 0) or 0)
     valid_until = _parse_date(pick.get("valid_until")) or (
         scanned_on + timedelta(days=5))
 
@@ -162,6 +192,9 @@ def _evaluate(pick: dict, scanned_on: date, df: pd.DataFrame | None,
         setup=str(pick.get("setup_label") or pick.get("setup") or ""),
         entry=entry, stop=stop, target=target, quantity=quantity,
         outcome=OUTCOME_UNKNOWN,
+        market=str(pick.get("market") or "india"),
+        currency=str(pick.get("currency") or "INR"),
+        currency_symbol=_SYMBOLS.get(str(pick.get("currency") or "INR"), "₹"),
     )
 
     if df is None or df.empty or entry <= stop:
@@ -229,8 +262,19 @@ def _evaluate(pick: dict, scanned_on: date, df: pd.DataFrame | None,
         out.note = f"open since {out.triggered_on:%d %b}"
 
     if out.r_multiple is not None and quantity:
-        out.rupees = out.r_multiple * risk * quantity
+        out.amount = out.r_multiple * risk * quantity
+        # The rate the ticket was sized at, not today's. This is what that
+        # trade actually risked in rupees; re-converting at a later rate would
+        # mix an FX move into a strategy result.
+        rate = float(pick.get("fx_inr_per_unit") or 1.0) or 1.0
+        out.amount_inr = out.amount * rate
     return out
+
+
+#: Currency symbols for rendering a past pick. Kept here rather than imported
+#: from `markets.py` so the tracker can read a journal record for a market
+#: that has since been de-registered.
+_SYMBOLS = {"INR": "₹", "USD": "$", "GBP": "£", "EUR": "€"}
 
 
 def _parse_date(value) -> date | None:

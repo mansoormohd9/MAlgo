@@ -5,6 +5,8 @@ a parameter inside strategy logic, or you cannot sweep it in a backtest.
 from dataclasses import dataclass, field
 from datetime import time
 
+from .swing.markets import default_markets as _default_markets
+
 
 @dataclass
 class CapitalConfig:
@@ -67,6 +69,31 @@ class CapitalConfig:
     @property
     def reward_risk_ratio(self) -> float:
         return self.reward_per_trade_pct / self.risk_per_trade_pct
+
+    # --- the foreign pot ---
+    # Money remitted under LRS lives in a different broker and is not
+    # available to a domestic trade, so it is a second POOL - never a second
+    # formula. `risk_per_trade_pct` above is still the only place the governors
+    # are turned into a per-trade number; this just applies it to the other
+    # balance. Left at 0 until you fund it, and a foreign scan with an unfunded
+    # pool stands down rather than sizing off the domestic account.
+    foreign_capital_inr: float = 0.0
+
+    @property
+    def foreign_risk_per_trade_inr(self) -> float:
+        return self.foreign_capital_inr * self.risk_per_trade_pct
+
+    @property
+    def foreign_reward_per_trade_inr(self) -> float:
+        return self.foreign_capital_inr * self.reward_per_trade_pct
+
+    def capital_inr(self, pool: str) -> float:
+        return self.foreign_capital_inr if pool == "foreign" else self.starting_capital
+
+    def risk_inr(self, pool: str) -> float:
+        """Per-trade risk budget in rupees for either pool."""
+        return (self.foreign_risk_per_trade_inr if pool == "foreign"
+                else self.risk_per_trade_rupees)
 
 
 @dataclass
@@ -283,9 +310,47 @@ class HalalConfig:
     annual report. Neither is derivable from any free data source, so neither
     is attempted here. Every verdict this module produces says so.
     """
+    # --- FTSE / Yasaar: denominator is TOTAL ASSETS. This is what HLAL tracks,
+    # and it is the primary screen for the reason in the docstring above.
     debt_to_assets_max: float = 0.33
     cash_and_interest_to_assets_max: float = 0.33
     receivables_to_assets_max: float = 0.49
+
+    # --- AAOIFI / S&P: denominator is MARKET CAP. This is what SPUS tracks.
+    # Computed alongside the primary screen and reported, never gating, so
+    # that "compliant on FTSE, fails AAOIFI" is visible as the real state of
+    # affairs rather than resolved silently in one standard's favour. It is
+    # nearly free - fundamentals.py already reads market cap.
+    aaoifi_debt_max: float = 0.30
+    aaoifi_cash_and_interest_max: float = 0.30
+    aaoifi_receivables_max: float = 0.49
+
+    #: Which standard decides `eligible`. Changing this changes which stocks
+    #: are tradeable, so it is one field in one place rather than a flag
+    #: threaded through the scan.
+    primary_method: str = "ftse"
+    #: Which standards are computed at all. Both, by default: the second one
+    #: costs no extra request and its disagreements are the useful output.
+    compute_methods: tuple = ("ftse", "aaoifi")
+
+    # --- contested activity categories (GICS/Yahoo vocabulary only) ---
+    # Each names the standard it comes from. SPUS (AAOIFI/S&P) excludes the
+    # first two; HLAL (FTSE/Yasaar) does not. Neither is a mistake, so neither
+    # is hardcoded.
+    exclude_defence: bool = True             # aerospace & defence
+    exclude_exchanges_and_data: bool = True  # SPGI, MSCI, ICE, CME
+    exclude_shell_companies: bool = True     # no operating business to screen
+
+    def methods(self) -> tuple:
+        """
+        The methodologies to compute, primary first.
+
+        Primary first so a reader of `verdicts` sees the gating standard at
+        the top, and so a misconfigured `compute_methods` that omits the
+        primary still computes it.
+        """
+        rest = [m for m in self.compute_methods if m != self.primary_method]
+        return (self.primary_method, *rest)
 
     # Fail closed. A missing balance sheet is not evidence of compliance, and
     # the cost of the two errors is not symmetric: wrongly excluding a halal
@@ -308,9 +373,13 @@ class SwingConfig:
     CapitalConfig, so both books size off one set of governors and cannot
     drift apart. `top_n` is 3 because `max_entries_per_session` is 3.
     """
-    universe_csv: str = "data/nifty100.csv"
+    # The universe file, benchmark, price floor and turnover floor were the
+    # four numbers in here that were secretly India-only. They now live per
+    # market in `markets.py`; everything remaining in this class is genuinely
+    # market-agnostic and applies unchanged to a New York or London bar.
+    markets: dict = field(default_factory=_default_markets)
+    default_market: str = "india"
     cache_dir: str = "data/cache"
-    benchmark_ticker: str = "^NSEI"
     top_n: int = 3
     history_days: int = 400            # ~1 trading year plus the 200d warm-up
 
@@ -347,8 +416,9 @@ class SwingConfig:
     sweep_max_close_back_atr: float = 0.20
 
     # --- tradeability ---
-    min_price: float = 50.0
-    min_avg_turnover_cr: float = 25.0   # 20-day average traded value, rupees crore
+    # `min_price` and the turnover floor are per-market (see markets.py) - they
+    # are denominated in the exchange's own currency and cannot be one number.
+    # These two are ratios, so they travel.
     min_atr_pct: float = 0.008          # below this there is no move to catch
     max_atr_pct: float = 0.070          # above this the 1.5-ATR stop is unaffordable
 

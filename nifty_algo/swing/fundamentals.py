@@ -18,6 +18,17 @@ of candidate names and may legitimately come back None.
 None is not zero. A missing "Total Debt" does not mean a debt-free company,
 and the halal screen treats absent data as a failure to verify rather than as
 a pass - see `halal.py`.
+
+THE CACHE IS KEYED `{market}:{SYMBOL}`, NOT BY SYMBOL. Bare tickers collide
+across exchanges, and a collision here is not a crash - it is one company
+screened against another company's balance sheet, which reads as a perfectly
+ordinary verdict. The returned dict is still keyed by bare symbol because the
+caller is already scoped to one market.
+
+`currency` is recorded because the LSE quotes most of its shares in pence and
+a few in pounds. `prices.py` has to divide the first group by 100 and must not
+divide the second; the `info` call that happens here anyway is the only free
+place to learn which is which.
 """
 from __future__ import annotations
 
@@ -59,6 +70,7 @@ class Fundamentals:
     next_earnings_date: str | None = None      # ISO date, if Yahoo knows one
     yahoo_sector: str | None = None
     yahoo_industry: str | None = None
+    currency: str | None = None                # as Yahoo reports it: GBp != GBP
     fetched_at: str | None = None
     error: str | None = None
 
@@ -79,6 +91,17 @@ class Fundamentals:
             return None
         return (when - (today or date.today())).days
 
+    @property
+    def price_divisor(self) -> float | None:
+        """
+        What `prices.py` must divide this symbol's quotes by, or None if Yahoo
+        did not say. "GBp" is pence and "GBP" is pounds - one character apart,
+        two orders of magnitude apart.
+        """
+        if not self.currency:
+            return None
+        return 100.0 if self.currency == "GBp" else 1.0
+
     def age_days(self, now: datetime | None = None) -> int | None:
         if not self.fetched_at:
             return None
@@ -89,23 +112,34 @@ class Fundamentals:
         return ((now or datetime.now()) - then).days
 
 
-def load_fundamentals(stocks: Iterable, cfg, force_refresh: bool = False,
+def load_fundamentals(stocks: Iterable, cfg, market, force_refresh: bool = False,
                       progress=None) -> dict[str, Fundamentals]:
     """
     Fundamentals for every stock, fetching only what is missing or stale.
 
-    `stocks` is an iterable of `universe.Stock`. `progress` is an optional
-    callable (done, total, label) so a UI can show progress without this
-    module knowing what Streamlit is.
+    `stocks` is an iterable of `universe.Stock`; `market` is a `markets.Market`
+    and scopes the cache keys. `progress` is an optional callable
+    (done, total, label) so a UI can show progress without this module knowing
+    what Streamlit is.
+
+    Keyed `{market}:{SYMBOL}` on disk, bare symbol in the return value - see
+    the module docstring for why the first half of that matters.
     """
     stocks = list(stocks)
     cache_path = Path(cfg.swing.cache_dir) / CACHE_NAME
-    cache = {} if force_refresh else _read_cache(cache_path)
+    cache = _read_cache(cache_path)
     max_age = timedelta(days=cfg.swing.fundamentals_cache_days)
 
-    stale = [s for s in stocks if _is_stale(cache.get(s.symbol), max_age)]
+    keyed = {s.symbol: market.qualified(s.symbol) for s in stocks}
+
+    if force_refresh:
+        stale = list(stocks)
+    else:
+        stale = [s for s in stocks if _is_stale(cache.get(keyed[s.symbol]), max_age)]
+
     out: dict[str, Fundamentals] = {
-        s.symbol: cache[s.symbol] for s in stocks if s.symbol in cache
+        s.symbol: cache[keyed[s.symbol]]
+        for s in stocks if keyed[s.symbol] in cache
     }
 
     for i, stock in enumerate(stale):
@@ -117,7 +151,10 @@ def load_fundamentals(stocks: Iterable, cfg, force_refresh: bool = False,
         progress(len(stale), len(stale), "fundamentals complete")
 
     if stale:
-        _write_cache(cache_path, out)
+        # Merge back into the whole cache rather than replacing it: another
+        # market's entries live in the same file and must survive this write.
+        cache.update({keyed[sym]: f for sym, f in out.items()})
+        _write_cache(cache_path, cache)
     return out
 
 
@@ -248,6 +285,9 @@ def _read_classification(t, f: Fundamentals) -> None:
     if isinstance(info, dict):
         f.yahoo_sector = info.get("sector")
         f.yahoo_industry = info.get("industry")
+        currency = info.get("currency")
+        # Kept verbatim, case included: "GBp" and "GBP" are different units.
+        f.currency = str(currency) if currency else None
 
 
 # ---------------- helpers ----------------
@@ -295,14 +335,16 @@ def _read_cache(path: Path) -> dict[str, Fundamentals]:
     except Exception:
         return {}
     out: dict[str, Fundamentals] = {}
-    for symbol, payload in raw.items():
+    for key, payload in raw.items():
         if not isinstance(payload, dict):
             continue
         known = {k: v for k, v in payload.items()
                  if k in Fundamentals.__dataclass_fields__}
-        known["symbol"] = symbol
+        # The dict key may be qualified (`us:AAPL`); the dataclass wants the
+        # bare symbol, and the stored payload is the authority on it.
+        known["symbol"] = payload.get("symbol") or key.rsplit(":", 1)[-1]
         try:
-            out[symbol] = Fundamentals(**known)
+            out[key] = Fundamentals(**known)
         except TypeError:
             continue
     return out

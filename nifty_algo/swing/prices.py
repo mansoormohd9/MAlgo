@@ -15,6 +15,22 @@ The bars are split-adjusted (`auto_adjust=False` still back-adjusts splits,
 it only leaves dividends alone). That matters: unadjusted history across a
 1:5 split shows an 80% crash that no level-detection code can tell from a
 real one.
+
+TWO THINGS HERE ARE ABOUT MORE THAN ONE MARKET.
+
+THE CACHE IS PER MARKET, AND THE BENCHMARK IS KEYED BY ITS TICKER. It used to
+be one file with the benchmark under a fixed `__BENCHMARK__` key, and the cache
+was accepted whenever it held every symbol asked for. Scan the US and then
+India and that key is present, so India's relative strength would be computed
+against the S&P 500 - a wrong answer with no error anywhere. Both halves of the
+fix are needed: separate files stop the collision, and keying the benchmark by
+ticker means a changed benchmark invalidates rather than silently persists.
+
+PRICES ARE NORMALISED TO MAJOR UNITS AT INGEST. The LSE quotes most shares in
+PENCE and yfinance passes that straight through, so SHEL.L arrives as 2500
+meaning GBP 25.00. Dividing once, here, is the only safe place: every floor,
+stop distance, turnover figure and position size downstream then reads the same
+units, and nothing has to remember to divide again.
 """
 from __future__ import annotations
 
@@ -27,7 +43,19 @@ import pandas as pd
 
 from ..data.base import DataFeed, FeedError
 
-CACHE_NAME = "daily_prices.parquet"
+def cache_name(market_key: str) -> str:
+    """One parquet per market. See the docstring - this is not tidiness."""
+    return f"daily_prices_{market_key}.parquet"
+
+
+def benchmark_key(ticker: str) -> str:
+    """
+    The benchmark's row label inside the cache.
+
+    Carries the ticker so that a cache built against one index cannot satisfy
+    a request for another.
+    """
+    return f"__BENCHMARK__:{ticker}"
 
 #: yfinance accepts an arbitrary list but a very long one is a single point of
 #: failure - one bad ticker can empty the whole response. Batches keep a
@@ -57,37 +85,50 @@ class PriceSet:
         return " · ".join(bits)
 
 
-def load_prices(tickers: dict[str, str], cfg, benchmark: str | None = None,
-                force_refresh: bool = False,
+def load_prices(tickers: dict[str, str], cfg, market, benchmark: str | None = None,
+                force_refresh: bool = False, divisors: dict[str, float] | None = None,
                 progress=None) -> PriceSet:
     """
     Daily bars for `tickers` (a {symbol: yf_ticker} map), cached to disk.
+
+    `market` is a `markets.Market`; it supplies the benchmark, the cache file
+    and the default quote divisor.
+
+    `divisors` optionally overrides `market.price_divisor` per symbol. Not
+    every LSE line is quoted in pence - a handful report in GBP or USD - and
+    `fundamentals.py` already knows each symbol's real currency from the `info`
+    call it makes anyway, so the caller can pass the truth instead of this
+    module assuming it.
 
     `progress` is an optional callable taking (done, total, label) so a UI can
     show a bar without this module importing Streamlit.
     """
     swing = cfg.swing
-    benchmark = benchmark or swing.benchmark_ticker
-    cache_path = Path(swing.cache_dir) / CACHE_NAME
+    benchmark = benchmark or market.benchmark_ticker
+    bench_key = benchmark_key(benchmark)
+    cache_path = Path(swing.cache_dir) / cache_name(market.cache_suffix)
+    divisors = divisors or {}
 
     if not force_refresh:
         cached = _read_cache(cache_path, swing.price_cache_hours)
         if cached is not None:
             frame, fetched_at = cached
             have = set(frame["symbol"].unique())
-            wanted = set(tickers) | {"__BENCHMARK__"}
+            wanted = set(tickers) | {bench_key}
             # A cache built before you refreshed the universe is missing the
-            # new names. Falling through to a download is cheaper than
-            # scanning an incomplete universe and never saying so.
+            # new names, and one built against a different benchmark is missing
+            # this benchmark's key. Falling through to a download is cheaper
+            # than scanning an incomplete universe and never saying so.
             if wanted <= have:
-                return _unpack(frame, tickers, fetched_at, from_cache=True)
+                return _unpack(frame, tickers, bench_key, fetched_at,
+                               from_cache=True)
 
     period_days = max(swing.history_days, 120)
     frames: list[pd.DataFrame] = []
     missing: list[str] = []
 
     symbols = list(tickers)
-    jobs = [("__BENCHMARK__", benchmark)] + [(s, tickers[s]) for s in symbols]
+    jobs = [(bench_key, benchmark)] + [(s, tickers[s]) for s in symbols]
     batches = [jobs[i:i + BATCH_SIZE] for i in range(0, len(jobs), BATCH_SIZE)]
 
     done = 0
@@ -96,7 +137,11 @@ def load_prices(tickers: dict[str, str], cfg, benchmark: str | None = None,
             progress(done, len(jobs), "downloading daily bars")
         raw = _download([t for _, t in batch], period_days)
         for symbol, ticker in batch:
-            df = _extract(raw, ticker)
+            # An index is quoted in points, never in the minor unit its
+            # constituents use, so the benchmark is never divided.
+            divisor = (1.0 if symbol == bench_key
+                       else divisors.get(symbol, market.price_divisor))
+            df = _extract(raw, ticker, divisor)
             if df is None or df.empty:
                 missing.append(symbol)
             else:
@@ -123,7 +168,7 @@ def load_prices(tickers: dict[str, str], cfg, benchmark: str | None = None,
     fetched_at = datetime.now()
     _write_cache(cache_path, combined, fetched_at)
 
-    result = _unpack(combined, tickers, fetched_at, from_cache=False)
+    result = _unpack(combined, tickers, bench_key, fetched_at, from_cache=False)
     result.missing = missing
     return result
 
@@ -148,8 +193,15 @@ def _download(tickers: list[str], period_days: int) -> pd.DataFrame | None:
         return None
 
 
-def _extract(raw: pd.DataFrame | None, ticker: str) -> pd.DataFrame | None:
-    """Pull one ticker out of a yfinance response and normalise it."""
+def _extract(raw: pd.DataFrame | None, ticker: str,
+             divisor: float = 1.0) -> pd.DataFrame | None:
+    """
+    Pull one ticker out of a yfinance response and normalise it.
+
+    `divisor` converts a minor-unit quote to major units (LSE pence -> pounds).
+    Prices only: volume is a share count and turnover is recomputed from the
+    normalised close, so dividing volume too would undo the correction.
+    """
     if raw is None or raw.empty:
         return None
 
@@ -166,6 +218,11 @@ def _extract(raw: pd.DataFrame | None, ticker: str) -> pd.DataFrame | None:
     if getattr(df.index, "tz", None) is not None:
         df.index = df.index.tz_localize(None)
     df.index = pd.to_datetime(df.index).normalize()
+
+    if divisor and divisor != 1.0:
+        for col in ("open", "high", "low", "close"):
+            if col in df.columns:
+                df[col] = df[col] / divisor
 
     try:
         # Reuse the DataFeed contract rather than a second cleaning routine -
@@ -201,14 +258,14 @@ def _write_cache(path: Path, frame: pd.DataFrame, fetched_at: datetime) -> None:
         pass   # Caching is an optimisation; failing to cache is not an error.
 
 
-def _unpack(frame: pd.DataFrame, tickers: dict[str, str],
+def _unpack(frame: pd.DataFrame, tickers: dict[str, str], bench_key: str,
             fetched_at: datetime, from_cache: bool) -> PriceSet:
     out = PriceSet(fetched_at=fetched_at, from_cache=from_cache)
     missing: list[str] = []
 
     for symbol, group in frame.groupby("symbol", sort=False):
         df = group.drop(columns=["symbol"]).sort_index()
-        if symbol == "__BENCHMARK__":
+        if symbol == bench_key:
             out.benchmark = df
         elif symbol in tickers:
             out.bars[symbol] = df
@@ -225,13 +282,19 @@ def _unpack(frame: pd.DataFrame, tickers: dict[str, str],
 
 # ---------------- derived series every stage wants ----------------
 
-def turnover_crore(df: pd.DataFrame, lookback: int = 20) -> float:
+def avg_turnover(df: pd.DataFrame, divisor: float = 1e7,
+                 lookback: int = 20) -> float:
     """
-    Average daily traded value over `lookback` sessions, in rupees crore.
+    Average daily traded value over `lookback` sessions, in units of `divisor`.
 
     Volume alone is the wrong liquidity test across a universe whose share
     prices span two orders of magnitude - ten lakh shares of a Rs 40 stock and
     ten lakh of a Rs 4,000 stock are not comparable positions.
+
+    `divisor` is the market's unit: 1e7 renders rupees as crore, 1e6 renders
+    dollars or pounds as millions. The close is already in major units by the
+    time it gets here (see `_extract`), so this figure is in the market's own
+    currency and must be compared against that market's floor, never a shared one.
     """
     if len(df) < lookback:
         lookback = len(df)
@@ -239,7 +302,12 @@ def turnover_crore(df: pd.DataFrame, lookback: int = 20) -> float:
         return 0.0
     window = df.iloc[-lookback:]
     value = (window["close"] * window["volume"]).mean()
-    return float(value) / 1e7
+    return float(value) / float(divisor or 1.0)
+
+
+def turnover_crore(df: pd.DataFrame, lookback: int = 20) -> float:
+    """Rupees crore. Retained for the India-only call sites and tests."""
+    return avg_turnover(df, 1e7, lookback)
 
 
 def position_in_52w(df: pd.DataFrame) -> float:

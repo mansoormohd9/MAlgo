@@ -33,7 +33,7 @@ st.set_page_config(
 
 from nifty_algo.ui.theme import CSS, get_palette          # noqa: E402
 from nifty_algo.ui import (page_live, page_brief, page_swing,        # noqa: E402
-                           page_strategies, page_backtest,
+                           page_portfolio, page_strategies, page_backtest,
                            page_journal, page_settings)
 from nifty_algo.ui.state import get_config                # noqa: E402
 from nifty_algo.ui import refresh                         # noqa: E402
@@ -44,6 +44,7 @@ PAGES = {
     "Live alerts": page_live.render,
     "Daily brief": page_brief.render,
     "Daily picks": page_swing.render,
+    "Portfolio": page_portfolio.render,
     "Strategies": page_strategies.render,
     "Backtest": page_backtest.render,
     "Journal": page_journal.render,

@@ -1,0 +1,102 @@
+# UK · FTSE 100
+# Built by scripts/build_universe.py. `sector` and `industry` are Yahoo's own
+# labels, verbatim - the halal activity screen matches against these strings,
+# so they must be spelled the way the screen will see them at scan time.
+# 94 of these are quoted in pence (GBp); prices.py divides them by 100.
+symbol,name,sector,industry,yf_ticker
+AAF,Airtel Africa Plc,Communication Services,Telecom Services,AAF.L
+AAL,Anglo American plc,Basic Materials,Other Industrial Metals & Mining,AAL.L
+ABF,Associated British Foods plc,Consumer Defensive,Packaged Foods,ABF.L
+ADM,Admiral Group plc,Financial Services,Insurance - Property & Casualty,ADM.L
+ANTO,Antofagasta plc,Basic Materials,Copper,ANTO.L
+AUTO,Autotrader Group plc,Communication Services,Internet Content & Information,AUTO.L
+AV,Aviva plc,Financial Services,Insurance - Diversified,AV.L
+AZN,AstraZeneca PLC,Healthcare,Drug Manufacturers - General,AZN.L
+BA,BAE Systems plc,Industrials,Aerospace & Defense,BA.L
+BARC,Barclays PLC,Financial Services,Banks - Diversified,BARC.L
+BATS,British American Tobacco p.l.c.,Consumer Defensive,Tobacco,BATS.L
+BEZ,Beazley plc,Financial Services,Insurance - Specialty,BEZ.L
+BKG,The Berkeley Group Holdings plc,Consumer Cyclical,Residential Construction,BKG.L
+BNZL,Bunzl plc,Consumer Defensive,Food Distribution,BNZL.L
+BP,BP p.l.c.,Energy,Oil & Gas Integrated,BP.L
+BRBY,Burberry Group plc,Consumer Cyclical,Luxury Goods,BRBY.L
+BT-A,BT Group plc,Communication Services,Telecom Services,BT-A.L
+BTRW,Barratt Redrow plc,Consumer Cyclical,Residential Construction,BTRW.L
+CCH,Coca-Cola HBC AG,Consumer Defensive,Beverages - Non-Alcoholic,CCH.L
+CNA,Centrica plc,Utilities,Utilities - Independent Power Producers,CNA.L
+CPG,Compass Group PLC,Consumer Cyclical,Restaurants,CPG.L
+CRDA,Croda International Plc,Basic Materials,Specialty Chemicals,CRDA.L
+CTEC,Convatec Group PLC,Healthcare,Medical Instruments & Supplies,CTEC.L
+DCC,DCC Energy plc,Energy,Oil & Gas Refining & Marketing,DCC.L
+DGE,Diageo plc,Consumer Defensive,Beverages - Wineries & Distilleries,DGE.L
+DPLM,Diploma PLC,Industrials,Industrial Distribution,DPLM.L
+EDV,Endeavour Mining plc,Basic Materials,Gold,EDV.L
+ENT,Entain Plc,Consumer Cyclical,Gambling,ENT.L
+EXPN,Experian plc,Industrials,Consulting Services,EXPN.L
+EZJ,easyJet plc,Industrials,Airlines,EZJ.L
+FCIT,F&C Investment Trust Ord,Unclassified,Unclassified,FCIT.L
+FRAS,Frasers Group Plc,Consumer Cyclical,Specialty Retail,FRAS.L
+FRES,Fresnillo plc,Basic Materials,Other Precious Metals & Mining,FRES.L
+GAW,Games Workshop Group PLC,Consumer Cyclical,Leisure,GAW.L
+GLEN,Glencore plc,Basic Materials,Other Industrial Metals & Mining,GLEN.L
+GSK,GSK plc,Healthcare,Drug Manufacturers - General,GSK.L
+HIK,Hikma Pharmaceuticals PLC,Healthcare,Drug Manufacturers - Specialty & Generic,HIK.L
+HLMA,Halma plc,Industrials,Conglomerates,HLMA.L
+HLN,Haleon plc,Healthcare,Drug Manufacturers - Specialty & Generic,HLN.L
+HSBA,HSBC Holdings plc,Financial Services,Banks - Diversified,HSBA.L
+HSX,Hiscox Ltd,Financial Services,Insurance - Property & Casualty,HSX.L
+HWDN,Howden Joinery Group Plc,Consumer Cyclical,"Furnishings, Fixtures & Appliances",HWDN.L
+IAG,International Consolidated Airlines Group S.A.,Industrials,Airlines,IAG.L
+ICG,ICG plc,Financial Services,Asset Management,ICG.L
+IHG,InterContinental Hotels Group PLC,Consumer Cyclical,Lodging,IHG.L
+III,3i Group Ord,Financial Services,Asset Management,III.L
+IMB,Imperial Brands PLC,Consumer Defensive,Tobacco,IMB.L
+IMI,IMI plc,Industrials,Specialty Industrial Machinery,IMI.L
+INF,Informa plc,Communication Services,Publishing,INF.L
+ITRK,Intertek Group plc,Industrials,Specialty Business Services,ITRK.L
+JD,JD Sports Fashion Plc,Consumer Cyclical,Apparel Retail,JD.L
+KGF,Kingfisher plc,Consumer Cyclical,Home Improvement Retail,KGF.L
+LAND,Land Securities Group Plc,Real Estate,REIT - Diversified,LAND.L
+LGEN,Legal & General Group Plc,Financial Services,Asset Management,LGEN.L
+LLOY,Lloyds Banking Group plc,Financial Services,Banks - Regional,LLOY.L
+LMP,LondonMetric Property Plc,Real Estate,REIT - Industrial,LMP.L
+LSEG,London Stock Exchange Group plc,Financial Services,Financial Data & Stock Exchanges,LSEG.L
+MKS,Marks and Spencer Group plc,Consumer Cyclical,Department Stores,MKS.L
+MNDI,Mondi plc,Basic Materials,Paper & Paper Products,MNDI.L
+MNG,M&G plc,Financial Services,Asset Management,MNG.L
+MRO,Melrose Industries PLC,Industrials,Specialty Industrial Machinery,MRO.L
+NG,National Grid plc,Utilities,Utilities - Regulated Electric,NG.L
+NWG,NatWest Group plc,Financial Services,Banks - Regional,NWG.L
+NXT,NEXT plc,Consumer Cyclical,Apparel Retail,NXT.L
+PRU,Prudential plc,Financial Services,Insurance - Life,PRU.L
+PSH,"Pershing Square Holdings, Ltd.",Financial Services,Asset Management,PSH.L
+PSN,Persimmon Plc,Consumer Cyclical,Residential Construction,PSN.L
+PSON,Pearson plc,Communication Services,Publishing,PSON.L
+REL,RELX PLC,Industrials,Specialty Business Services,REL.L
+RIO,Rio Tinto Group,Basic Materials,Other Industrial Metals & Mining,RIO.L
+RKT,Reckitt Benckiser Group plc,Consumer Defensive,Household & Personal Products,RKT.L
+RMV,Rightmove plc,Communication Services,Internet Content & Information,RMV.L
+RR,Rolls-Royce Holdings plc,Industrials,Aerospace & Defense,RR.L
+RTO,Rentokil Initial plc,Industrials,Specialty Business Services,RTO.L
+SBRY,J Sainsbury plc,Consumer Defensive,Grocery Stores,SBRY.L
+SDR,Schroders plc,Financial Services,Asset Management,SDR.L
+SGE,The Sage Group plc,Technology,Software - Application,SGE.L
+SGRO,SEGRO Plc,Real Estate,REIT - Industrial,SGRO.L
+SHEL,Shell plc,Energy,Oil & Gas Integrated,SHEL.L
+SMIN,Smiths Group plc,Industrials,Specialty Industrial Machinery,SMIN.L
+SMT,Scottish Mortgage Ord,Unclassified,Unclassified,SMT.L
+SN,Smith & Nephew plc,Healthcare,Medical Devices,SN.L
+SPX,Spirax Group plc,Industrials,Specialty Industrial Machinery,SPX.L
+SSE,SSE plc,Utilities,Utilities - Diversified,SSE.L
+STAN,Standard Chartered PLC,Financial Services,Banks - Diversified,STAN.L
+STJ,St. James's Place plc,Financial Services,Asset Management,STJ.L
+SVT,Severn Trent PLC,Utilities,Utilities - Regulated Water,SVT.L
+TSCO,Tesco PLC,Consumer Defensive,Grocery Stores,TSCO.L
+TW,Taylor Wimpey plc,Consumer Cyclical,Residential Construction,TW.L
+ULVR,Unilever PLC,Consumer Defensive,Household & Personal Products,ULVR.L
+UTG,Unite Group PLC,Real Estate,REIT - Diversified,UTG.L
+UU,United Utilities Group PLC,Utilities,Utilities - Regulated Water,UU.L
+VOD,Vodafone Group Public Limited Company,Communication Services,Telecom Services,VOD.L
+WEIR,The Weir Group PLC,Industrials,Specialty Industrial Machinery,WEIR.L
+WPP,WPP plc,Communication Services,Advertising Agencies,WPP.L
+WTB,Whitbread plc,Consumer Cyclical,Lodging,WTB.L

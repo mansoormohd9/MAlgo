@@ -41,60 +41,24 @@ import csv
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import halal_taxonomy
+from . import markets as markets_mod
+
+# The two ratio methodologies this module can apply. Both are mainstream and
+# they disagree; see `_METHODS` below and the note on HalalConfig.
+METHOD_FTSE = "ftse"
+METHOD_AAOIFI = "aaoifi"
+
 # ---------------- layer 1: business activity ----------------
 #
 # Matched case-insensitively as substrings against the universe file's
 # `industry` first and `sector` second. Ordered most specific first so the
 # reason a stock was excluded is the useful one.
 
-PROHIBITED_ACTIVITIES: tuple[tuple[str, str], ...] = (
-    # Interest-based finance - the largest single block in the Nifty 100.
-    ("private sector bank", "conventional banking (interest-based)"),
-    ("public sector bank", "conventional banking (interest-based)"),
-    ("non banking financial company", "interest-based lending (NBFC)"),
-    ("nbfc", "interest-based lending (NBFC)"),
-    ("housing finance", "interest-based lending"),
-    ("financial institution", "interest-based finance"),
-    ("investment company", "conventional investment holding"),
-    ("holding company", "conventional financial holding"),
-    ("asset management", "conventional asset management"),
-    ("stockbroking", "conventional brokerage"),
-    ("depositories", "conventional financial services"),
-    ("bank", "conventional banking (interest-based)"),
-
-    # Insurance.
-    ("life insurance", "conventional insurance"),
-    ("general insurance", "conventional insurance"),
-    ("insurance", "conventional insurance"),
-
-    # Intoxicants and tobacco.
-    ("breweries", "alcohol"),
-    ("distilleries", "alcohol"),
-    ("alcohol", "alcohol"),
-    ("liquor", "alcohol"),
-    ("tobacco", "tobacco"),
-    ("cigarette", "tobacco"),
-
-    # Gambling and conventional entertainment.
-    ("gambling", "gambling"),
-    ("casino", "gambling"),
-    ("lottery", "gambling"),
-    ("gaming", "gambling / conventional gaming"),
-    ("film production", "conventional entertainment"),
-    ("movies & entertainment", "conventional entertainment"),
-    ("cinema", "conventional entertainment"),
-    ("multiplex", "conventional entertainment"),
-
-    # Pork and non-halal meat.
-    ("pork", "pork products"),
-
-    # Hotels: the objection is the bar and banquet revenue, which for Indian
-    # listed hotel groups is material and is not separately disclosed in any
-    # free feed. Excluded here, and an obvious candidate for an override if
-    # you check a specific company's accounts and disagree.
-    ("hotels & resorts", "hotel bar/banquet revenue not separable"),
-    ("hotels", "hotel bar/banquet revenue not separable"),
-)
+#: The Indian table, re-exported so existing callers and tests keep working.
+#: The definitive copy - and the GICS table beside it - live in
+#: `halal_taxonomy.py`, because one vocabulary cannot serve two exchanges.
+PROHIBITED_ACTIVITIES = halal_taxonomy.NSE_ACTIVITIES
 
 #: Substrings that mark a business as financial for the purposes of the
 #: ratio screen - the balance sheet of a lender is not comparable to that of
@@ -114,6 +78,31 @@ SOURCE_NO_DATA = "no_data"
 
 
 @dataclass
+class MethodVerdict:
+    """
+    One methodology's ratio result.
+
+    Kept separate from `HalalVerdict` because two standards can reach opposite
+    conclusions on the same balance sheet and both answers are worth seeing.
+    """
+    method: str
+    label: str
+    denominator_label: str
+    passed: bool
+    checks: dict[str, dict] = field(default_factory=dict)
+    failures: list[str] = field(default_factory=list)
+    available: bool = True          # False when the denominator was missing
+
+    @property
+    def summary(self) -> str:
+        if not self.available:
+            return f"{self.label}: not computed - {self.denominator_label} unavailable"
+        if self.failures:
+            return f"{self.label}: " + "; ".join(self.failures)
+        return f"{self.label}: passes"
+
+
+@dataclass
 class HalalVerdict:
     """
     One stock's screening result, with every number it was decided on.
@@ -130,6 +119,28 @@ class HalalVerdict:
     balance_sheet_date: str | None = None
     haram_revenue_verified: bool = False           # always False - see module docstring
 
+    #: Every methodology that was computed, keyed by METHOD_*. `eligible` and
+    #: `checks` follow the PRIMARY one; the others are here so a disagreement
+    #: is visible rather than resolved silently in this module's favour.
+    verdicts: dict = field(default_factory=dict)
+    primary_method: str = METHOD_FTSE
+    market: str = markets_mod.INDIA
+
+    @property
+    def disagreement(self) -> bool:
+        """
+        Whether the computed methodologies reached different conclusions.
+
+        Worth surfacing: it is exactly the SPUS-vs-HLAL split, and it means
+        the answer depends on which standard you follow rather than on the
+        company being clearly one thing or the other.
+        """
+        outcomes = {v.passed for v in self.verdicts.values() if v.available}
+        return len(outcomes) > 1
+
+    def other_methods(self) -> list:
+        return [v for k, v in self.verdicts.items() if k != self.primary_method]
+
     @property
     def summary(self) -> str:
         if self.source == SOURCE_OVERRIDE:
@@ -143,12 +154,18 @@ class HalalVerdict:
 
 
 def screen(stock, fundamentals, cfg,
-           overrides: dict[str, dict] | None = None) -> HalalVerdict:
+           overrides: dict[str, dict] | None = None, market=None) -> HalalVerdict:
     """
     Screen one stock. `fundamentals` may be None - that is a failure, not a pass.
+
+    `market` selects the activity vocabulary (NSE labels or Yahoo/GICS ones)
+    and is recorded on the verdict. It defaults to India so every existing
+    caller keeps its behaviour exactly.
     """
     hcfg = cfg.swing.halal
     overrides = overrides or {}
+    market = market or cfg.swing.markets[cfg.swing.default_market]
+    mkey = getattr(market, "key", markets_mod.INDIA)
 
     # --- layer 3 runs first as a short circuit, but it is the LAST word ---
     ov = overrides.get(stock.symbol.upper())
@@ -158,21 +175,45 @@ def screen(stock, fundamentals, cfg,
         reviewed = str(ov.get("reviewed_on", "")).strip()
         detail = f"{note}" + (f" (reviewed {reviewed})" if reviewed else "")
         if verdict == VERDICT_COMPLIANT:
-            return HalalVerdict(stock.symbol, True, detail, source=SOURCE_OVERRIDE)
+            return HalalVerdict(stock.symbol, True, detail,
+                                source=SOURCE_OVERRIDE, market=mkey,
+                                primary_method=hcfg.primary_method)
         if verdict == VERDICT_NON_COMPLIANT:
             return HalalVerdict(stock.symbol, False, detail,
                                 failures=[f"override: {detail}"],
-                                source=SOURCE_OVERRIDE)
+                                source=SOURCE_OVERRIDE, market=mkey,
+                                primary_method=hcfg.primary_method)
         # An unrecognised verdict is a typo in your file. Fall through to the
         # automatic screen rather than guessing which way you meant it, and
         # let the loader's warning surface the bad row.
 
     # --- layer 1: activity ---
-    hit = activity_failure(stock)
+    #
+    # FAIL CLOSED ON AN UNCLASSIFIED STOCK. If neither `sector` nor `industry`
+    # says anything, the activity table has nothing to match and the screen
+    # silently reports "activity permissible" - a fail-OPEN in a module whose
+    # entire contract is the opposite. It is not hypothetical: Yahoo returns
+    # no classification at all for UK closed-end investment trusts, so FCIT
+    # and Scottish Mortgage sailed through a screen that correctly excludes
+    # III and Pershing Square, which it happens to label "Asset Management".
+    # Absent data is a failure to verify here exactly as it is for a missing
+    # balance sheet.
+    if not _is_classified(stock):
+        return HalalVerdict(
+            stock.symbol, False,
+            "cannot verify - no sector or industry classification, so the "
+            "business activity screen could not be run",
+            failures=["insufficient data: unclassified business activity"],
+            source=SOURCE_NO_DATA, market=mkey,
+            primary_method=hcfg.primary_method,
+        )
+
+    hit = activity_failure(stock, market=market, cfg=cfg)
     if hit:
         return HalalVerdict(
             stock.symbol, False, f"business activity: {hit}",
             failures=[f"activity: {hit}"], source=SOURCE_ACTIVITY,
+            market=mkey, primary_method=hcfg.primary_method,
         )
 
     # --- layer 2: ratios ---
@@ -188,59 +229,140 @@ def screen(stock, fundamentals, cfg,
                 stock.symbol, False,
                 f"cannot verify - no usable balance sheet ({missing})",
                 failures=[f"insufficient data: {missing}"],
-                source=SOURCE_NO_DATA,
+                source=SOURCE_NO_DATA, market=mkey,
+                primary_method=hcfg.primary_method,
                 balance_sheet_date=getattr(fundamentals, "balance_sheet_date", None),
             )
         return HalalVerdict(stock.symbol, True,
-                            f"ratios not checked - {missing}", source=SOURCE_RATIO)
+                            f"ratios not checked - {missing}",
+                            source=SOURCE_RATIO, market=mkey,
+                            primary_method=hcfg.primary_method)
 
-    assets = float(fundamentals.total_assets)
-    checks = {
-        "debt_to_assets": _check(
-            "Debt / total assets", fundamentals.total_debt, assets,
-            hcfg.debt_to_assets_max),
-        "cash_to_assets": _check(
-            "Cash + interest-bearing / total assets",
-            fundamentals.cash_and_investments, assets,
-            hcfg.cash_and_interest_to_assets_max),
-        "receivables_to_assets": _check(
-            "Receivables / total assets", fundamentals.receivables, assets,
-            hcfg.receivables_to_assets_max),
+    # --- layer 2: ratios, under every configured methodology ---
+    computed = {
+        method: _run_method(method, fundamentals, hcfg)
+        for method in hcfg.methods()
     }
-
-    failures = [f"{c['label']} {c['value']:.1%} > {c['limit']:.0%}"
-                for c in checks.values() if not c["passed"]]
-
-    if failures:
+    primary = computed.get(hcfg.primary_method)
+    if primary is None or not primary.available:
+        # The primary standard could not be computed - most often AAOIFI with
+        # no market cap. That is a failure to verify, not a pass, and it is
+        # reported as such even if the other standard happened to succeed.
+        detail = (primary.denominator_label if primary
+                  else hcfg.primary_method)
         return HalalVerdict(
-            stock.symbol, False, "; ".join(failures), failures=failures,
-            checks=checks, source=SOURCE_RATIO,
+            stock.symbol, False,
+            f"cannot verify - {detail} unavailable for the "
+            f"{hcfg.primary_method.upper()} screen",
+            failures=[f"insufficient data: {detail}"],
+            source=SOURCE_NO_DATA, verdicts=computed, market=mkey,
+            primary_method=hcfg.primary_method,
+            balance_sheet_date=fundamentals.balance_sheet_date,
+        )
+
+    if primary.failures:
+        return HalalVerdict(
+            stock.symbol, False, "; ".join(primary.failures),
+            failures=list(primary.failures), checks=primary.checks,
+            source=SOURCE_RATIO, verdicts=computed, market=mkey,
+            primary_method=hcfg.primary_method,
             balance_sheet_date=fundamentals.balance_sheet_date,
         )
 
     passed = ", ".join(f"{c['label'].split(' /')[0].lower()} {c['value']:.1%}"
-                       for c in checks.values())
+                       for c in primary.checks.values())
     return HalalVerdict(
         stock.symbol, True, f"activity permissible; {passed}",
-        checks=checks, source=SOURCE_RATIO,
+        checks=primary.checks, source=SOURCE_RATIO, verdicts=computed,
+        market=mkey, primary_method=hcfg.primary_method,
         balance_sheet_date=fundamentals.balance_sheet_date,
     )
 
 
-def activity_failure(stock) -> str | None:
+#: method -> (label, denominator attribute, denominator label, threshold attrs).
+#: The check KEYS are deliberately identical across methods so the page can
+#: render either one with the same table.
+_METHODS = {
+    METHOD_FTSE: (
+        "FTSE / Yasaar", "total_assets", "total assets",
+        ("debt_to_assets_max", "cash_and_interest_to_assets_max",
+         "receivables_to_assets_max"),
+    ),
+    METHOD_AAOIFI: (
+        "AAOIFI / S&P", "market_cap", "market capitalisation",
+        ("aaoifi_debt_max", "aaoifi_cash_and_interest_max",
+         "aaoifi_receivables_max"),
+    ),
+}
+
+
+def _run_method(method: str, f, hcfg) -> MethodVerdict:
+    """
+    Apply one methodology's three ratios.
+
+    The only difference between them is the denominator and the limits, which
+    is why this is one function and not two screens.
+    """
+    label, denom_attr, denom_label, attrs = _METHODS[method]
+    denominator = getattr(f, denom_attr, None)
+
+    if denominator is None or float(denominator) <= 0:
+        return MethodVerdict(method, label, denom_label, passed=False,
+                             available=False)
+
+    denominator = float(denominator)
+    limits = [getattr(hcfg, a) for a in attrs]
+    checks = {
+        "debt_to_assets": _check(
+            f"Debt / {denom_label}", f.total_debt, denominator, limits[0]),
+        "cash_to_assets": _check(
+            f"Cash + interest-bearing / {denom_label}",
+            f.cash_and_investments, denominator, limits[1]),
+        "receivables_to_assets": _check(
+            f"Receivables / {denom_label}", f.receivables, denominator,
+            limits[2]),
+    }
+    failures = [f"{c['label']} {c['value']:.1%} > {c['limit']:.0%}"
+                for c in checks.values() if not c["passed"]]
+    return MethodVerdict(method, label, denom_label, passed=not failures,
+                         checks=checks, failures=failures)
+
+
+def activity_failure(stock, market=None, cfg=None) -> str | None:
     """
     The prohibited activity this stock's classification matches, or None.
 
     Reads `industry` before `sector` because the industry label is the
     specific one: ITC's sector is FMCG, which is fine, and its industry names
     tobacco, which is not.
+
+    `market` chooses the vocabulary. Defaults to the Indian table so that
+    every pre-existing caller behaves identically.
     """
+    taxonomy = getattr(market, "taxonomy", markets_mod.TAXONOMY_NSE)
+    table = halal_taxonomy.table_for(taxonomy)
+    if cfg is not None:
+        table = table + halal_taxonomy.toggled_for(taxonomy, cfg.swing.halal)
+
     haystacks = (f"{stock.industry}".lower(), f"{stock.sector}".lower())
-    for needle, label in PROHIBITED_ACTIVITIES:
+    for needle, label in table:
         for hay in haystacks:
             if needle in hay:
                 return label
     return None
+
+
+#: Placeholders that mean "we do not know", not "none of the above". Written
+#: by `scripts/build_universe.py` when Yahoo returns nothing.
+_UNCLASSIFIED = ("", "unclassified", "none", "n/a", "-", "unknown")
+
+
+def _is_classified(stock) -> bool:
+    """Whether there is anything for the activity table to match against."""
+    return not all(
+        str(getattr(stock, field, "") or "").strip().lower() in _UNCLASSIFIED
+        for field in ("industry", "sector")
+    )
 
 
 def is_financial(stock) -> bool:

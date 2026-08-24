@@ -1,5 +1,17 @@
 """
-The scan: a hundred stocks in, at most three tickets out.
+The scan: a universe in, at most three tickets out.
+
+ONE PIPELINE, THREE MARKETS. Which exchange is being scanned is a `Market`
+(see markets.py) threaded through this function - it supplies the universe
+file, the benchmark, the price and turnover floors, the halal taxonomy and the
+currency. Nothing below branches on a market key; if you find yourself writing
+`if market.key == "us"`, the thing you want belongs on the dataclass.
+
+SIZING CROSSES A CURRENCY BOUNDARY AND MUST SAY SO. The risk budget is in
+rupees because that is where the governors live. A US stop distance is in
+dollars. `_size()` converts explicitly through `fx.py`, and when no trusted
+rate exists the whole foreign market stands down rather than sizing off a
+guess - see `_resolve_fx`.
 
 EVERY STAGE RECORDS WHAT IT DROPPED AND WHY. That is not bookkeeping, it is
 the point. "No picks today" and "eleven setups fired and every one of them had
@@ -15,7 +27,7 @@ qualify never costs an HTTP request:
     universe -> halal -> prices -> tradeability -> setup -> R:R
              -> earnings -> news (finalists only) -> rank -> sector cap -> size
 
-RUN IT HEADLESS:  python -m nifty_algo.swing.scanner
+RUN IT HEADLESS:  python -m nifty_algo.swing.scanner --market india|us|uk
 """
 from __future__ import annotations
 
@@ -27,6 +39,8 @@ from . import fundamentals as fundamentals_mod
 from . import halal as halal_mod
 from . import news as news_mod
 from . import prices as prices_mod
+from . import fx as fx_mod
+from . import markets as markets_mod
 from . import setup as setup_mod
 from .universe import Stock, load_universe
 
@@ -53,11 +67,28 @@ class SwingPick:
     sector: str
     direction: str
     setup: setup_mod.SwingSetup
-    quantity: int
-    rupee_risk: float
-    rupee_reward: float
+    quantity: float                  # float, not int: IBKR fills fractional
+                                     # US shares and rounding a $900 stock down
+                                     # to one share is a risk error, not a
+                                     # tidy-up. Whole-share markets floor it.
+    # Amounts in the MARKET's currency. Renamed from rupee_risk/rupee_reward:
+    # a field called `rupee_risk` holding dollars is the kind of thing that is
+    # read a hundred times and questioned never. The intraday book keeps its
+    # own `rupee_risk` - that one really is always rupees.
+    risk_amount: float
+    reward_amount: float
     deployed: float
-    score: float
+    # ...and the same three in rupees, because the risk budget is denominated
+    # in rupees even when the trade is not, and the portfolio view has to add
+    # a Mumbai ticket to a New York one.
+    risk_inr: float = 0.0
+    reward_inr: float = 0.0
+    deployed_inr: float = 0.0
+    market: str = markets_mod.INDIA
+    currency: str = "INR"
+    currency_symbol: str = "₹"
+    fx_inr_per_unit: float = 1.0
+    score: float = 0.0
     score_parts: dict[str, dict] = field(default_factory=dict)
     metrics: dict = field(default_factory=dict)
     news: news_mod.NewsResult | None = None
@@ -71,14 +102,26 @@ class SwingPick:
     def reward_risk(self) -> float:
         return self.setup.reward_risk
 
+    @property
+    def is_fractional(self) -> bool:
+        return abs(self.quantity - round(self.quantity)) > 1e-9
+
+    def qty_text(self) -> str:
+        return (f"{self.quantity:,.4f}".rstrip("0").rstrip(".")
+                if self.is_fractional else f"{self.quantity:,.0f}")
+
+    def money(self, amount: float, dp: int = 0) -> str:
+        return f"{self.currency_symbol}{amount:,.{dp}f}"
+
     def why(self) -> list[str]:
         """The full case for this trade, in the order a person would make it."""
         out = list(self.setup.reasons)
         rs = self.metrics.get("rs_short")
         if rs is not None:
             direction = "outperforming" if rs > 0 else "lagging"
+            bench = self.metrics.get("benchmark_label", "the index")
             out.append(
-                f"Relative strength: {direction} the Nifty by {rs:+.1%} over "
+                f"Relative strength: {direction} {bench} by {rs:+.1%} over "
                 f"the last month ({self.metrics.get('rs_long', 0):+.1%} over "
                 f"three)."
             )
@@ -98,14 +141,25 @@ class SwingPick:
         """A flat, JSON-safe snapshot for the journal."""
         return {
             "symbol": self.symbol, "name": self.name, "sector": self.sector,
+            "market": self.market, "currency": self.currency,
+            "fx_inr_per_unit": round(self.fx_inr_per_unit, 6),
             "direction": self.direction, "setup": self.setup.key,
             "setup_label": self.setup.label,
             "entry": round(self.setup.entry, 2),
             "stop": round(self.setup.stop, 2),
             "target": round(self.setup.target, 2),
-            "quantity": self.quantity,
-            "rupee_risk": round(self.rupee_risk, 2),
-            "rupee_reward": round(self.rupee_reward, 2),
+            "quantity": round(self.quantity, 4),
+            "risk_amount": round(self.risk_amount, 2),
+            "reward_amount": round(self.reward_amount, 2),
+            "risk_inr": round(self.risk_inr, 2),
+            "reward_inr": round(self.reward_inr, 2),
+            "deployed_inr": round(self.deployed_inr, 2),
+            # Legacy keys. The journal is append-only and every record written
+            # before this change spells them this way, so the tracker has to
+            # read both; emitting both keeps one reader working on both eras.
+            # For India they are identical to the new fields by construction.
+            "rupee_risk": round(self.risk_inr, 2),
+            "rupee_reward": round(self.reward_inr, 2),
             "deployed": round(self.deployed, 2),
             "reward_risk": round(self.reward_risk, 2),
             "score": round(self.score, 4),
@@ -129,6 +183,8 @@ class ExcludedStock:
 
 @dataclass
 class ScanResult:
+    market: str = markets_mod.INDIA
+    market_label: str = ""
     picks: list[SwingPick] = field(default_factory=list)
     excluded_halal: list[ExcludedStock] = field(default_factory=list)
     rejections: list[dict] = field(default_factory=list)
@@ -140,6 +196,8 @@ class ScanResult:
     fundamentals_age_days: int | None = None
     news_note: str = ""
     capital_note: str = ""
+    fx_note: str = ""
+    stood_down: str = ""      # non-empty means the scan did not run, and why
 
     def rejections_for(self, stage: str) -> list[dict]:
         return [r for r in self.rejections if r["stage"] == stage]
@@ -156,21 +214,47 @@ class ScanResult:
                 + len(self.rejections)) == self.universe_size
 
 
-def scan(cfg, universe: list[Stock] | None = None,
+def scan(cfg, market=None, universe: list[Stock] | None = None,
          force_prices: bool = False, force_fundamentals: bool = False,
          skip_news: bool = False, progress=None,
          today: date | None = None) -> ScanResult:
     """
-    Run the whole pipeline.
+    Run the whole pipeline for one market.
 
-    `progress` is an optional callable (done, total, label). Nothing in here
-    imports Streamlit; the page passes a closure over its own progress bar.
+    `market` is a `markets.Market`, a market key, or None for the configured
+    default. `progress` is an optional callable (done, total, label). Nothing
+    in here imports Streamlit; the page passes a closure over its own progress
+    bar.
     """
     swing = cfg.swing
     today = today or date.today()
-    result = ScanResult(scanned_on=today)
+    market = _resolve_market(cfg, market)
+    result = ScanResult(scanned_on=today, market=market.key,
+                        market_label=market.label)
 
-    stocks = universe if universe is not None else load_universe(swing.universe_csv)
+    # The rate is settled BEFORE any work, because a foreign market with no
+    # trusted rate produces no tickets at all - and finding that out after
+    # three hundred HTTP requests would be an odd way to learn it.
+    try:
+        rate = fx_mod.rate_for_market(market, cfg)
+    except fx_mod.FxUnavailable as e:
+        result.stood_down = str(e)
+        result.warnings.append(str(e))
+        return result
+    result.fx_note = rate.note() if not market.is_home else ""
+
+    if not market.is_home and cfg.capital.capital_inr(market.capital_pool) <= 0:
+        result.stood_down = (
+            f"{market.label} sizes off the foreign capital pool, which is set "
+            f"to ₹0. Set it on the Portfolio page (or "
+            f"capital.foreign_capital_inr) - the alternative is sizing a "
+            f"foreign trade off the domestic account, which would claim money "
+            f"that is not in that broker. The Indian book is unaffected."
+        )
+        result.warnings.append(result.stood_down)
+        return result
+
+    stocks = universe if universe is not None else load_universe(market.universe_csv)
     result.universe_size = len(stocks)
 
     # ---- 1. halal screen (offline, so it runs before anything is fetched) ----
@@ -180,13 +264,14 @@ def scan(cfg, universe: list[Stock] | None = None,
     if progress:
         progress(0, 1, "fundamentals for the halal screen")
     funds = fundamentals_mod.load_fundamentals(
-        stocks, cfg, force_refresh=force_fundamentals, progress=progress)
+        stocks, cfg, market, force_refresh=force_fundamentals, progress=progress)
     result.fundamentals_age_days = fundamentals_mod.cache_age_days(cfg)
 
     eligible: list[Stock] = []
     verdicts: dict[str, halal_mod.HalalVerdict] = {}
     for stock in stocks:
-        verdict = halal_mod.screen(stock, funds.get(stock.symbol), cfg, overrides)
+        verdict = halal_mod.screen(stock, funds.get(stock.symbol), cfg, overrides,
+                                   market=market)
         verdicts[stock.symbol] = verdict
         if verdict.eligible:
             eligible.append(stock)
@@ -205,8 +290,18 @@ def scan(cfg, universe: list[Stock] | None = None,
 
     # ---- 2. prices ----
     tickers = {s.symbol: s.yf_ticker for s in eligible}
-    price_set = prices_mod.load_prices(tickers, cfg, force_refresh=force_prices,
-                                       progress=progress)
+    # Yahoo already told us each symbol's quote currency while we were
+    # fetching balance sheets, so the pence/pounds question is answered from
+    # data rather than assumed from the exchange.
+    divisors = {}
+    for s in eligible:
+        f = funds.get(s.symbol)
+        d = f.price_divisor if f is not None else None
+        if d is not None:
+            divisors[s.symbol] = d
+    price_set = prices_mod.load_prices(tickers, cfg, market,
+                                       force_refresh=force_prices,
+                                       divisors=divisors, progress=progress)
     result.prices_note = price_set.note()
 
     for symbol in price_set.missing:
@@ -222,7 +317,7 @@ def scan(cfg, universe: list[Stock] | None = None,
         if stock is None:
             continue
 
-        metrics, why_not = _metrics(df, price_set.benchmark, cfg)
+        metrics, why_not = _metrics(df, price_set.benchmark, cfg, market)
         if why_not:
             _reject(result, symbol, STAGE_TRADEABILITY, why_not)
             continue
@@ -305,36 +400,58 @@ def scan(cfg, universe: list[Stock] | None = None,
             continue
 
         pick = _size(stock, found, metrics, n, total, parts,
-                     verdicts.get(stock.symbol), cfg, today)
+                     verdicts.get(stock.symbol), cfg, today, market, rate)
         if pick is None:
+            budget = cfg.capital.risk_inr(market.capital_pool)
             _reject(result, stock.symbol, STAGE_SIZING,
-                    f"stop is {found.risk_points:,.2f} points wide - one share "
-                    f"risks more than the ₹{cfg.capital.risk_per_trade_rupees:,.0f} budget")
+                    f"stop is {found.risk_points:,.2f} points wide - the "
+                    f"smallest tradeable size risks more than the "
+                    f"₹{budget:,.0f} budget")
             continue
 
         per_sector[stock.sector] = taken + 1
         picks.append(pick)
 
     result.picks = picks
-    result.capital_note = _capital_note(picks, cfg)
+    result.capital_note = _capital_note(picks, cfg, market)
     return result
+
+
+def _resolve_market(cfg, market):
+    """Accept a Market, a key, or None. Never guess on a bad key."""
+    if market is None:
+        return markets_mod.get(cfg, cfg.swing.default_market)
+    if isinstance(market, str):
+        return markets_mod.get(cfg, market)
+    return market
 
 
 # ---------------- metrics, scoring, sizing ----------------
 
-def _metrics(df, benchmark, cfg) -> tuple[dict, str]:
-    """Public metrics plus the tradeability verdict."""
+def _metrics(df, benchmark, cfg, market) -> tuple[dict, str]:
+    """
+    Public metrics plus the tradeability verdict.
+
+    The price and turnover floors come from `market` and are denominated in
+    that market's currency: $10m of tape and Rs 25 crore of tape are both
+    "liquid enough to size into" and neither number means anything applied to
+    the other exchange.
+    """
     swing = cfg.swing
     close = float(df["close"].iloc[-1])
     a = float(setup_mod.atr(df, swing.atr_period).iloc[-1])
     atr_pct = a / close if close > 0 else 0.0
-    turnover = prices_mod.turnover_crore(df)
+    turnover = prices_mod.avg_turnover(df, market.turnover_divisor)
 
     metrics = {
         "last_close": close,
         "atr": a,
         "atr_pct": atr_pct,
-        "turnover_cr": turnover,
+        "turnover": turnover,
+        "turnover_unit": market.turnover_unit,
+        "turnover_cr": turnover,          # legacy alias; India reads the same
+        "currency_symbol": market.symbol,
+        "benchmark_label": market.benchmark_label,
         "pos_52w": prices_mod.position_in_52w(df),
         "rs_short": prices_mod.relative_strength(df, benchmark, swing.rs_short_days),
         "rs_long": prices_mod.relative_strength(df, benchmark, swing.rs_long_days),
@@ -343,11 +460,13 @@ def _metrics(df, benchmark, cfg) -> tuple[dict, str]:
         "ema_slow_period": swing.ema_slow,
     }
 
-    if close < swing.min_price:
-        return metrics, f"trades at ₹{close:,.1f}, below the ₹{swing.min_price:,.0f} floor"
-    if turnover < swing.min_avg_turnover_cr:
-        return metrics, (f"20-day average turnover ₹{turnover:,.1f} cr is below "
-                         f"₹{swing.min_avg_turnover_cr:,.0f} cr - too thin to size into")
+    if close < market.min_price:
+        return metrics, (f"trades at {market.money(close, 1)}, below the "
+                         f"{market.money(market.min_price)} floor")
+    if turnover < market.min_avg_turnover:
+        return metrics, (f"20-day average turnover {market.turnover(turnover)} "
+                         f"is below {market.turnover(market.min_avg_turnover)} "
+                         f"- too thin to size into")
     if atr_pct < swing.min_atr_pct:
         return metrics, (f"ATR is {atr_pct:.2%} of price - there is no move here "
                          f"to catch")
@@ -428,41 +547,63 @@ def _clip(x: float) -> float:
 
 
 def _size(stock, found, metrics, n, total, parts, verdict, cfg,
-          today: date) -> SwingPick | None:
+          today: date, market, rate) -> SwingPick | None:
     """
     Turn a setup into a position.
 
     Quantity comes from the risk budget, not from the capital: you size so
     that the distance to the stop costs exactly one unit of risk. Capital only
     ever reduces the number, never increases it.
+
+    THE CURRENCY CONVERSION IS THE ONE THING TO GET RIGHT HERE. `risk_points`
+    is in the exchange's currency; the budget is in rupees. Dividing one by
+    the other without `rate` is not a rounding error - on a US name it returns
+    a size about 88x too large, and the ticket it prints looks entirely normal.
     """
     cap = cfg.capital
     risk_points = found.risk_points
     if risk_points <= 0:
         return None
 
-    quantity = math.floor(cap.risk_per_trade_rupees / risk_points)
-    note = ""
-
-    if quantity < 1:
+    inr_per_unit = rate.inr_per_unit
+    if inr_per_unit <= 0:
         return None
 
-    affordable = math.floor(cap.starting_capital / found.entry)
+    # Budget, moved from rupees into the currency the stop is measured in.
+    budget_local = cap.risk_inr(market.capital_pool) / inr_per_unit
+    capital_local = cap.capital_inr(market.capital_pool) / inr_per_unit
+
+    raw = budget_local / risk_points
+    quantity = _round_quantity(raw, market)
+    note = ""
+    if quantity <= 0:
+        return None
+
+    affordable = _round_quantity(capital_local / found.entry, market)
     if quantity > affordable:
-        if affordable < 1:
+        if affordable <= 0:
             return None
         quantity = affordable
-        note = (f"Capped at {quantity} shares by capital, not by risk - the "
-                f"full risk-based size would need more than "
-                f"₹{cap.starting_capital:,.0f}. Risk on this trade is therefore "
-                f"below the usual budget.")
+        note = (f"Capped at {affordable:,.4f} shares by capital, not by risk - "
+                f"the full risk-based size would need more than "
+                f"{market.money(capital_local)}. Risk on this trade is "
+                f"therefore below the usual budget.")
+
+    risk_amount = quantity * risk_points
+    reward_amount = quantity * found.reward_points
+    deployed = quantity * found.entry
 
     return SwingPick(
         symbol=stock.symbol, name=stock.name, sector=stock.sector,
         direction=setup_mod.LONG, setup=found, quantity=quantity,
-        rupee_risk=quantity * risk_points,
-        rupee_reward=quantity * found.reward_points,
-        deployed=quantity * found.entry,
+        risk_amount=risk_amount,
+        reward_amount=reward_amount,
+        deployed=deployed,
+        risk_inr=risk_amount * inr_per_unit,
+        reward_inr=reward_amount * inr_per_unit,
+        deployed_inr=deployed * inr_per_unit,
+        market=market.key, currency=market.currency,
+        currency_symbol=market.symbol, fx_inr_per_unit=inr_per_unit,
         score=total, score_parts=parts, metrics=metrics, news=n,
         halal=verdict, last_close=metrics.get("last_close", 0.0),
         scanned_on=today,
@@ -471,20 +612,45 @@ def _size(stock, found, metrics, n, total, parts, verdict, cfg,
     )
 
 
-def _capital_note(picks: list[SwingPick], cfg) -> str:
+def _round_quantity(raw: float, market) -> float:
+    """
+    Whole shares, unless the market fills fractions.
+
+    Rounding a $900 stock down to one share does not make the position safe -
+    it silently changes the risk on the ticket, usually downward, sometimes to
+    zero, and the reason never appears anywhere. Where the broker supports
+    fractions the honest answer is the fraction.
+    """
+    if raw <= 0:
+        return 0.0
+    if not market.allow_fractional:
+        return float(math.floor(raw))
+    # Four decimals is finer than any broker's minimum increment and keeps the
+    # arithmetic from carrying float noise into the ticket.
+    return float(math.floor(raw * 10_000) / 10_000)
+
+
+def _capital_note(picks: list[SwingPick], cfg, market) -> str:
     if not picks:
         return ""
     total_deployed = sum(p.deployed for p in picks)
-    total_risk = sum(p.rupee_risk for p in picks)
-    cap = cfg.capital
-    note = (f"All {len(picks)} together: ₹{total_deployed:,.0f} deployed, "
-            f"₹{total_risk:,.0f} at risk "
-            f"({total_risk / cap.starting_capital:.1%} of capital).")
-    if total_deployed > cap.starting_capital:
-        note += (f" That is more than your ₹{cap.starting_capital:,.0f} - you "
-                 f"cannot take all three at full size without margin. Each "
-                 f"ticket is sized correctly on its own; choosing between them "
-                 f"is yours.")
+    total_risk = sum(p.risk_amount for p in picks)
+    capital_inr = cfg.capital.capital_inr(market.capital_pool)
+    rate = picks[0].fx_inr_per_unit or 1.0
+    capital_local = capital_inr / rate
+
+    note = (f"All {len(picks)} together: {market.money(total_deployed)} "
+            f"deployed, {market.money(total_risk)} at risk "
+            f"({(total_risk / capital_local if capital_local else 0):.1%} of "
+            f"this market's capital).")
+    if not market.is_home:
+        note += (f" In rupees: ₹{sum(p.deployed_inr for p in picks):,.0f} "
+                 f"deployed, ₹{sum(p.risk_inr for p in picks):,.0f} at risk.")
+    if total_deployed > capital_local:
+        note += (f" That is more than the {market.money(capital_local)} in "
+                 f"this pool - you cannot take all of them at full size "
+                 f"without margin. Each ticket is sized correctly on its own; "
+                 f"choosing between them is yours.")
     return note
 
 
@@ -495,6 +661,7 @@ def _reject(result: ScanResult, symbol: str, stage: str, reason: str) -> None:
 # ---------------- headless entry point ----------------
 
 def _main() -> None:                                      # pragma: no cover
+    import argparse
     import sys
 
     from ..config import DEFAULT
@@ -507,16 +674,36 @@ def _main() -> None:                                      # pragma: no cover
         pass
 
     cfg = DEFAULT
-    print("Scanning the Nifty 100 ...")
+
+    parser = argparse.ArgumentParser(description="The daily swing scan.")
+    parser.add_argument("--market", default=cfg.swing.default_market,
+                        choices=markets_mod.keys(cfg),
+                        help="which exchange to scan")
+    parser.add_argument("--skip-news", action="store_true",
+                        help="do not fetch news for the finalists")
+    args = parser.parse_args()
+
+    market = markets_mod.get(cfg, args.market)
+    print(f"Scanning {market.label} ...")
 
     def progress(done, total, label):
         print(f"  [{done}/{total}] {label}", end="\r")
 
-    result = scan(cfg, progress=progress)
+    result = scan(cfg, market=market, skip_news=args.skip_news,
+                  progress=progress)
     print(" " * 70, end="\r")
+
+    if result.stood_down:
+        # Not "no picks today". The scan did not run, and saying which is the
+        # entire reason this branch exists.
+        print(f"\n{market.label} STOOD DOWN — no scan was run.")
+        print(f"  {result.stood_down}")
+        return
 
     print(f"\nUniverse {result.universe_size} · halal-eligible "
           f"{result.eligible_size} · {result.prices_note}")
+    if result.fx_note:
+        print(f"FX: {result.fx_note}")
     if result.news_note:
         print(result.news_note)
     for w in result.warnings:
@@ -540,9 +727,16 @@ def _main() -> None:                                      # pragma: no cover
         print(f"   {s.label} · score {p.score:.3f}")
         print(f"   Entry {s.entry:,.2f}  Stop {s.stop:,.2f} "
               f"({s.stop_pct:.1%})  Target {s.target:,.2f} ({s.target_pct:.1%})")
-        print(f"   Qty {p.quantity}  Risk ₹{p.rupee_risk:,.0f}  "
-              f"Reward ₹{p.rupee_reward:,.0f}  R:R {p.reward_risk:.2f}  "
-              f"Deployed ₹{p.deployed:,.0f}")
+        print(f"   Qty {p.qty_text()}  Risk {p.money(p.risk_amount)}  "
+              f"Reward {p.money(p.reward_amount)}  R:R {p.reward_risk:.2f}  "
+              f"Deployed {p.money(p.deployed)}")
+        if p.currency != "INR":
+            print(f"   In rupees: risk ₹{p.risk_inr:,.0f}  "
+                  f"deployed ₹{p.deployed_inr:,.0f}")
+        if p.halal is not None and p.halal.disagreement:
+            print("   ! Shariah standards disagree on this name:")
+            for mv in p.halal.verdicts.values():
+                print(f"       {mv.summary}")
         print(f"   {s.trigger_note}")
         for line in p.why():
             print(f"   - {line}")
