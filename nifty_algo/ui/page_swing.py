@@ -33,7 +33,8 @@ import streamlit as st
 
 from . import charts
 from .components import banner
-from .state import get_config, get_journal
+from .state import (get_book, get_config, get_equity_broker,
+                    get_journal)
 from .theme import get_palette
 from ..swing import crossborder as crossborder_mod
 from ..swing import halal as halal_mod
@@ -42,6 +43,8 @@ from ..swing import markets as markets_mod
 from ..swing import prices as prices_mod
 from ..swing import scanner as scanner_mod
 from ..swing import tracker as tracker_mod
+from ..swing import daily as daily_mod
+from ..swing.costs_equity import DEFAULT_EQUITY_COSTS
 from ..swing import universe as universe_mod
 
 MARKET_KEY = "swing_market"
@@ -377,13 +380,90 @@ def _pick_card(pick, cfg, market, p, index: int, overlap_book=None) -> None:
         with st.expander("Halal screen"):
             _halal_panel(pick, p)
 
-    bars = (st.session_state.get(BARS_KEY) or {}).get(pick.symbol)
+    bars = (st.session_state.get(_bars_key(market.key)) or {}).get(pick.symbol)
     if bars is not None and not bars.empty:
         with st.expander("Chart", expanded=(index == 0)):
+            # The market is in the key because a keyed chart carries selection
+            # state across reruns, and a symbol listed on two exchanges would
+            # otherwise share one key when you switch markets.
             st.plotly_chart(charts.swing_chart(bars, p, pick),
                             width="stretch",
-                            key=f"swing_chart_{pick.symbol}")
+                            key=f"swing_chart_{market.key}_{pick.symbol}")
+
+    _arm_panel(pick, cfg, market, p, index)
     st.divider()
+
+
+def _arm_panel(pick, cfg, market, p, index: int) -> None:
+    """
+    One click arms a resting BUY trigger at Zerodha. It does not buy now.
+
+    Every entry in this book sits ABOVE the last close, because each setup
+    demands the stock prove itself before you pay for it. So the order has to
+    WAIT - and Zerodha does the waiting, not this app. That is what makes a
+    once-a-day routine sufficient: between the click and the fill, nothing of
+    yours needs to be running.
+
+    Only India for now. The US and UK books are IBKR-shaped (fractional
+    shares, a different broker entirely) and arming them through Kite would
+    place an order on an exchange that does not list them.
+    """
+    if market.key != markets_mod.INDIA:
+        st.caption(
+            f"Order placement is wired for India only. {market.label} tickets "
+            f"are for you to place with whichever broker holds the foreign "
+            f"pool."
+        )
+        return
+
+    broker = get_equity_broker()
+    book = get_book(market.key)
+    existing = book.for_symbol(pick.symbol)
+
+    st.markdown("**Place this trade**")
+    st.caption(DEFAULT_EQUITY_COSTS.note(pick.setup.entry, pick.setup.stop,
+                                         pick.quantity))
+
+    if existing is not None:
+        st.info(
+            f"Already {existing.state.value} in {pick.symbol} — see the "
+            f"**Trade book** page. Two positions in one name is one bet at "
+            f"twice the size."
+        )
+        return
+
+    check = daily_mod.can_arm(pick, book, broker, cfg,
+                             free_cash=broker.free_cash())
+    for w in check.warnings:
+        st.warning(w)
+    for b in check.blockers:
+        st.error(b)
+
+    if not check.ok:
+        return
+
+    label = ("Arm buy trigger (dry run)" if broker.dry_run
+             else f"ARM: buy {pick.qty_text()} {pick.symbol} at "
+                  f"{pick.setup.entry:,.2f}")
+    if st.button(label, key=f"arm_{market.key}_{pick.symbol}",
+                 type="primary", width="stretch"):
+        ok, msg = daily_mod.arm_pick(pick, book, broker, cfg,
+                                     last_price=pick.last_close)
+        if not ok:
+            # Deliberately NO rerun. A rerun repaints the page and throws the
+            # message away, so a rejected order looks exactly like a click
+            # that did nothing.
+            st.error(msg)
+            return
+        get_book(market.key, rebuild=True)
+        st.success(msg)
+        st.rerun()
+
+    st.caption(
+        f"Zerodha holds the trigger until {pick.valid_until:%d %b}. It fires "
+        f"with your laptop shut. The stop is armed on the **Trade book** page "
+        f"once it fills — a buy trigger cannot chain into a sell trigger."
+    )
 
 
 def _score_table(pick) -> None:

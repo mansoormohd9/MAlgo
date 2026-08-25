@@ -21,9 +21,12 @@ and yfinance passes that through untouched. SHEL.L comes back as 2500 meaning
 GBP 25.00. Unhandled, every UK price floor, turnover figure, stop distance and
 position size is wrong by 100x, and none of it looks wrong.
 
-`capital_pool` - money remitted under LRS is a different pot from the domestic
-account. Sizing a US trade off the Indian balance would claim capital that is
-not in that broker.
+`capital_pool` - three separate pots of money, and none of them can spend
+another's balance: the intraday option account, the Indian swing account, and
+whatever has been remitted under LRS. Sizing a US trade off the Indian balance
+would claim capital that is not in that broker; sizing an Indian swing trade
+off the option account would let two books draw down the same rupees twice.
+Note this is NOT the same question as `domestic` - see the field comment.
 
 `taxonomy` - the halal activity screen matches on classification labels, and
 NSE's vocabulary ("Non Banking Financial Company (NBFC)") shares nothing with
@@ -38,9 +41,18 @@ INDIA = "india"
 US = "us"
 UK = "uk"
 
-#: Which pot of money sizes a trade. `home` is the domestic account; `foreign`
-#: is whatever you have remitted under the Liberalised Remittance Scheme.
+#: Which pot of money sizes a trade. `home` is the intraday option account;
+#: `swing_india` is the separate pot this book buys Indian shares from; and
+#: `foreign` is whatever you have remitted under the Liberalised Remittance
+#: Scheme.
+#:
+#: THREE POOLS, ONE FORMULA. `CapitalConfig.risk_inr(pool)` is still the only
+#: place the session governors become a per-trade number - this just points it
+#: at a different balance. Splitting India's swing money out of `home` matters
+#: because that account is also sizing intraday option trades: one balance
+#: funding two books means a drawdown in one silently shrinks the other.
 POOL_HOME = "home"
+POOL_SWING_IN = "swing_india"
 POOL_FOREIGN = "foreign"
 
 #: Which classification vocabulary the halal activity screen should match on.
@@ -74,6 +86,13 @@ class Market:
     fx_pair: str | None               # yfinance pair quoting INR per unit;
                                       # None for the home currency itself
     capital_pool: str = POOL_HOME
+    # Which POT pays, and whether the trade is DOMESTIC, are two different
+    # facts that happened to coincide while there were only two pools. India's
+    # swing money is its own pot but is still rupees in a Mumbai account - no
+    # LRS, no TCS, no estate-tax exposure, no FX conversion. Deriving
+    # `is_home` from `capital_pool` welded the two together, so giving India
+    # its own pool would have switched on the whole cross-border panel.
+    domestic: bool = True
     allow_fractional: bool = False    # IBKR fills fractional US shares; NSE
                                       # and the LSE order book do not
 
@@ -93,7 +112,11 @@ class Market:
 
     @property
     def is_home(self) -> bool:
-        return self.capital_pool == POOL_HOME
+        """Domestic currency: no FX conversion, no LRS, no cross-border tax.
+
+        Deliberately NOT `capital_pool == POOL_HOME` - see the field comment.
+        """
+        return self.domestic
 
     @property
     def cache_suffix(self) -> str:
@@ -127,7 +150,7 @@ def default_markets() -> dict[str, Market]:
             universe_csv="data/nifty100.csv",
             benchmark_ticker="^NSEI", benchmark_label="Nifty 50",
             currency="INR", symbol="\u20b9", fx_pair=None,
-            capital_pool=POOL_HOME, allow_fractional=False,
+            capital_pool=POOL_SWING_IN, domestic=True, allow_fractional=False,
             price_divisor=1.0,
             min_price=50.0,
             # 20-day average traded value. Rupees crore, as every Indian
@@ -140,7 +163,7 @@ def default_markets() -> dict[str, Market]:
             universe_csv="data/us_halal.csv",
             benchmark_ticker="^GSPC", benchmark_label="S&P 500",
             currency="USD", symbol="$", fx_pair="USDINR=X",
-            capital_pool=POOL_FOREIGN, allow_fractional=True,
+            capital_pool=POOL_FOREIGN, domestic=False, allow_fractional=True,
             price_divisor=1.0,
             # A US large cap under $5 has usually been left for dead; the
             # universe is S&P 500 constituents, so this floor rarely bites and
@@ -154,7 +177,7 @@ def default_markets() -> dict[str, Market]:
             universe_csv="data/ftse100.csv",
             benchmark_ticker="^FTSE", benchmark_label="FTSE 100",
             currency="GBP", symbol="\u00a3", fx_pair="GBPINR=X",
-            capital_pool=POOL_FOREIGN, allow_fractional=False,
+            capital_pool=POOL_FOREIGN, domestic=False, allow_fractional=False,
             # THE PENCE TRAP. See the module docstring.
             price_divisor=100.0,
             min_price=1.0,

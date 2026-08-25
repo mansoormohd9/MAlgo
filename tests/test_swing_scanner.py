@@ -45,6 +45,10 @@ def clean_fundamentals(symbol, **kw) -> Fundamentals:
 @pytest.fixture
 def cfg() -> Config:
     c = Config()
+    # The Indian swing pot ships at Rs 0 so an unfunded account stands the
+    # market down rather than sizing off the option book. Fund it here or
+    # every scan in this file returns `stood_down` and asserts nothing.
+    c.capital.swing_capital_inr = 100_000.0
     # The synthetic series start at 100 and drift up; the shipped turnover and
     # price floors are calibrated for real Nifty 100 names, not for them.
     # They live on the market now - they are denominated in its currency.
@@ -362,17 +366,17 @@ def test_reward_follows_the_same_quantity(cfg, world):
 
 def test_capital_caps_the_size_and_says_so(cfg, world):
     """A tight stop on an expensive share can ask for more than you have."""
-    cfg.capital.starting_capital = 4_000.0
+    cfg.capital.swing_capital_inr = 4_000.0
     populate(world, [f"SYM{i}" for i in range(8)])
     result = run(cfg, world)
     for pick in result.picks:
-        assert pick.deployed <= cfg.capital.starting_capital + 1e-6
+        assert pick.deployed <= cfg.capital.swing_capital_inr + 1e-6
         if pick.capital_note:
             assert "Capped at" in pick.capital_note
 
 
 def test_a_stop_wider_than_the_whole_budget_is_refused(cfg, world):
-    cfg.capital.starting_capital = 100.0        # risk/trade = Rs 1.67
+    cfg.capital.swing_capital_inr = 100.0       # risk/trade = Rs 1.67
     populate(world, [f"SYM{i}" for i in range(6)])
     result = run(cfg, world)
     assert result.picks == []

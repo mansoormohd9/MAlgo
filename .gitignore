@@ -26,6 +26,11 @@ data/*.feather
 !data/halal_overrides.csv
 data/cache/
 
+# Your capital pots and broker flags. Numbers about YOUR account, not about
+# the strategy - the strategy's tunables all live in config.py, in version
+# control, where changing one is a diff somebody can read.
+data/settings.json
+
 # --- Python ---
 __pycache__/
 *.py[cod]

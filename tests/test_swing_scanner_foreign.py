@@ -36,6 +36,7 @@ QUALIFYING_SEEDS = (2, 3, 5, 6, 7, 8, 10, 11, 12, 15, 17)
 @pytest.fixture
 def cfg() -> Config:
     c = Config()
+    c.capital.swing_capital_inr = 100_000.0
     c.capital.foreign_capital_inr = 800_000.0
     for m in c.swing.markets.values():
         m.min_price = 1.0
@@ -148,6 +149,45 @@ def test_an_unfunded_foreign_pool_stands_the_market_down(cfg, world):
 
     assert result.stood_down
     assert "foreign_capital_inr" in result.stood_down
+
+
+def test_an_unfunded_swing_pot_stands_india_down(cfg, world):
+    """
+    India is domestic but is NOT the option account's pot any more.
+
+    An unfunded swing pot must stand the Indian scan down for the same reason
+    an unfunded LRS pool stands the US one down: the alternative is sizing off
+    a balance that is committed to the other book, and both halves being in
+    rupees makes that error invisible rather than harmless.
+    """
+    populate(world, ["AAA", "BBB"], price=200.0)
+    cfg.capital.swing_capital_inr = 0.0
+    result = run(cfg, world, key="india")
+
+    assert result.stood_down
+    assert "swing_capital_inr" in result.stood_down
+    # ...and it must not have quietly used the option account instead.
+    assert result.picks == []
+
+
+def test_a_funded_swing_pot_does_not_size_off_the_option_account(cfg, world):
+    """The two pots are separate balances, not two names for one."""
+    populate(world, ["AAA", "BBB"], price=200.0)
+    cfg.capital.starting_capital = 1_000_000.0     # the option book, untouched
+    cfg.capital.swing_capital_inr = 50_000.0
+    result = run(cfg, world, key="india")
+
+    assert not result.stood_down
+    assert result.picks
+    budget = cfg.capital.risk_inr("swing_india")           # Rs 833
+    option_budget = cfg.capital.risk_inr("home")           # Rs 16,667
+    for pick in result.picks:
+        # At or just under 1R of the SWING pot - whole shares round the
+        # quantity down, so the realised risk lands below the budget rather
+        # than on it - and nowhere near the option account's figure.
+        assert pick.risk_inr <= budget + 1e-6
+        assert pick.risk_inr > budget * 0.5
+        assert pick.risk_inr < option_budget * 0.1
 
 
 def test_no_fx_failure_can_stand_india_down(cfg, world):

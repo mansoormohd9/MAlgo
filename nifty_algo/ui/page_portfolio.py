@@ -26,7 +26,7 @@ import pandas as pd
 import streamlit as st
 
 from .components import banner
-from .state import get_config
+from .state import get_config, save_settings
 from .theme import get_palette
 from ..swing import crossborder as crossborder_mod
 from ..swing import fx as fx_mod
@@ -100,8 +100,22 @@ def _capital_pool(cfg, rate, p) -> None:
         "Remitted and available abroad (₹)", min_value=0.0, step=50_000.0,
         value=current, key="foreign_capital_inr_input",
         help="What is actually in the IBKR account, in rupees. The US and UK "
-             "scans size off this pool; the Indian book is unaffected.")
+             "scans size off this pool; the Indian book is unaffected. Saved "
+             "as soon as you change it - unlike the capital boxes on "
+             "Settings, which wait for their Save button.")
     cfg.capital.foreign_capital_inr = entered
+    # Persist it, or this widget's value silently overwrites whatever was
+    # saved on the Settings page the next time this page renders - two
+    # editors for one number, one of which forgets.
+    #
+    # Note this is the OPPOSITE of Settings, which holds a typed value back
+    # until Save is pressed. Both are right for their page: there is one
+    # field here and no Save button to press. Assigning BEFORE reading is
+    # also what keeps `risk_inr("foreign")` below consistent with the box
+    # above - the split between those two is exactly what made the Settings
+    # page divide by zero.
+    if entered != current:
+        save_settings()
 
     per_trade = cfg.capital.risk_inr("foreign")
     if entered <= 0:

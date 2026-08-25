@@ -34,12 +34,13 @@ from typing import Optional
 from ..config import Config, DEFAULT
 from ..positions import ExitAction, ManagedPosition
 from ..risk import ApprovedOrder
-from .kite_auth import KiteSession, NotAuthenticated
+from ._transport import BrokerTransport
+from .kite_auth import KiteSession
 
 log = logging.getLogger(__name__)
 
 
-class KiteOrders:
+class KiteOrders(BrokerTransport):
     def __init__(self, session: KiteSession | None = None, cfg: Config = DEFAULT,
                  chain=None, journal=None):
         self.session = session or KiteSession()
@@ -114,7 +115,8 @@ class KiteOrders:
             "price": round(limit / tick) * tick,
             "tag": "niftyalgo",
         }
-        return symbol if self._send(payload, "entry") else None
+        return symbol if self._call("entry", payload,
+                                    lambda k: k.place_order(**payload)) else None
 
     # ---------------- exit ----------------
 
@@ -149,7 +151,8 @@ class KiteOrders:
             "price": round(limit / tick) * tick,
             "tag": "niftyalgo",
         }
-        return self._send(payload, f"exit:{action.kind.value}")
+        return self._call(f"exit:{action.kind.value}", payload,
+                          lambda k: k.place_order(**payload)) is not None
 
     def modify_stop(self, pos: ManagedPosition, new_stop_premium: float) -> bool:
         """
@@ -172,37 +175,14 @@ class KiteOrders:
         return True
 
     # ---------------- transport ----------------
-
-    def _send(self, payload: dict, what: str) -> bool:
-        self.placed.append({"what": what, **payload})
-
-        if self.dry_run:
-            log.info("DRY RUN %s: %s", what, payload)
-            self._log("order_dry_run", {"what": what, "payload": payload})
-            return True
-
-        try:
-            kite = self.session.client()
-            order_id = kite.place_order(**payload)
-        except NotAuthenticated as e:
-            log.error("%s NOT placed - not authenticated: %s", what, e)
-            self._log("order_failed", {"what": what, "payload": payload,
-                                       "error": str(e)})
-            return False
-        except Exception as e:
-            log.error("%s NOT placed: %s", what, e)
-            self._log("order_failed", {"what": what, "payload": payload,
-                                       "error": f"{type(e).__name__}: {e}"})
-            return False
-
-        log.info("%s placed, order_id=%s", what, order_id)
-        self._log("order_placed", {"what": what, "payload": payload,
-                                   "order_id": order_id})
-        return True
-
-    def _log(self, event: str, payload: dict) -> None:
-        if self.journal is not None:
-            try:
-                self.journal.write(event, payload)
-            except Exception:
-                pass          # journalling must never break an order path
+    #
+    # `_send` and `_log` used to live here. They are now
+    # `BrokerTransport._call` / `._log`, shared with `kite_equity.py`, so the
+    # dry-run gate, the auth-vs-rejection distinction and the journalling are
+    # written once rather than twice. The two order modules disagree about
+    # product, exchange and where the stop lives; they must not disagree about
+    # any of that.
+    #
+    # One behaviour changed in the move, deliberately: `_call` RETURNS the
+    # broker's order id instead of a bare bool. An id you did not keep is an
+    # order you cannot cancel, poll or reconcile.

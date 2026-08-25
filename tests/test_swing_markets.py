@@ -36,7 +36,12 @@ def test_every_registered_market_is_complete(cfg):
         assert m.universe_csv and m.benchmark_ticker and m.currency
         assert m.symbol and m.turnover_divisor > 0
         assert m.taxonomy in (markets_mod.TAXONOMY_NSE, markets_mod.TAXONOMY_GICS)
-        assert m.capital_pool in (markets_mod.POOL_HOME, markets_mod.POOL_FOREIGN)
+        assert m.capital_pool in (markets_mod.POOL_HOME,
+                                  markets_mod.POOL_SWING_IN,
+                                  markets_mod.POOL_FOREIGN)
+        # Every registered pool must be one CapitalConfig can actually price,
+        # or the market is scannable and unsizeable at the same time.
+        cfg.capital.capital_inr(m.capital_pool)
 
 
 def test_an_unknown_market_raises_rather_than_defaulting(cfg):

@@ -19,6 +19,23 @@ EVENT_HELP = {
     "paper_fill": "You logged a simulated entry.",
     "paper_exit": "You logged a simulated exit.",
     "session_start": "A new trading day began.",
+    # --- the swing book ---
+    "swing_scan": "A daily scan ran. Holds every pick it proposed.",
+    "swing_armed": "A buy trigger was placed at Zerodha for a pick.",
+    "swing_rearmed": "An unfilled entry was re-priced onto a fresh scan.",
+    "swing_filled": "A buy trigger fired. Carries the fill price AND the "
+                    "slippage against the ticket.",
+    "swing_exit_armed": "A stop/target OCO was placed or replaced.",
+    "swing_ladder": "The exit ladder moved - breakeven shift or a trail.",
+    "swing_exit": "Part or all of a position was released by the ladder.",
+    "swing_closed": "A position finished. Carries the realised R.",
+    "swing_cancelled": "A ticket was retired without ever being filled.",
+    "holdings_authorised": "You recorded a CDSL TPIN authorisation. Valid "
+                           "for that trading day only.",
+    # --- orders, either book ---
+    "order_dry_run": "The exact payload an order WOULD have sent.",
+    "order_placed": "An order or trigger the broker accepted.",
+    "order_failed": "The broker refused it, or was unreachable.",
 }
 
 

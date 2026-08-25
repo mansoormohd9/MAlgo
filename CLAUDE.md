@@ -14,6 +14,8 @@ streamlit run app.py                    # the console (7 pages)
 python -m nifty_algo.run_live --provider kite --telegram   # headless alerts, never places an order
 python -m nifty_algo.brief              # the day's frame + scored chain, CLI form of the Daily brief page
 python -m nifty_algo.swing.scanner --market india|us|uk   # the swing book, headless
+python -m nifty_algo.swing.backtest --market india --years 3   # does the swing book work?
+python scripts/fetch_swing_history.py --market india --years 6  # deep daily bars for it
 python scripts/build_universe.py --market us   # rebuild data/us_halal.csv from SPUS+HLAL
 python scripts/build_universe.py --market uk   # rebuild data/ftse100.csv
 python -m nifty_algo.broker.kite_login  # once per trading morning; token dies overnight
@@ -21,7 +23,7 @@ python scripts/fetch_history.py         # real 5m NIFTY history (resumable)
 python scripts/fetch_vix.py             # India VIX, for SYNTHETIC_PREMIUM backtests
 ```
 
-Tests (385, pytest; `pythonpath = . tests` so `nifty_algo` and the conftest helpers both import without an install step):
+Tests (540, pytest; `pythonpath = . tests` so `nifty_algo` and the conftest helpers both import without an install step):
 
 ```bash
 pytest
@@ -41,6 +43,53 @@ This repo holds two unrelated trading systems that share indicators, risk sizing
 **Daily multi-market swing** (`nifty_algo/swing/`) - once a day, sweeps one market's universe, applies a Shariah screen, returns at most three cash-equity LONG tickets held for days. Three markets are registered in [markets.py](nifty_algo/swing/markets.py): India (Nifty 100), US (the union of SPUS and HLAL constituents) and UK (FTSE 100). It reuses `signals.py` (pure `bars in, values out`, so daily bars work unchanged), `CapitalConfig`, and `Journal`. It deliberately does **not** use the engine, the option-strike machinery, or the session governors - those encode "intraday, three entries, flat by close".
 
 Never re-declare risk numbers inside `swing/`. Two books sizing off two copies of the same governor is how they drift apart.
+
+**The swing book can place orders; the option book still cannot.** `swing/` is
+wired to Kite for NSE cash equity ([kite_equity.py](nifty_algo/broker/kite_equity.py),
+[book.py](nifty_algo/swing/book.py), [daily.py](nifty_algo/swing/daily.py)),
+under its own `EquityBrokerConfig.dry_run` which defaults `True`. The option
+path in `kite_orders.py` is untouched and stays dry-run under the separate
+`BrokerConfig.dry_run`. Two switches, deliberately - going live on a
+multi-day equity book is a different decision from going live on an intraday
+option book, and one flag would make it one decision.
+
+## Where the stop lives, and why the two books disagree
+
+The intraday stop trails on the underlying's ATR and is recomputed every
+5-minute bar, so `kite_orders.modify_stop()` rests **no** order at the broker:
+a resting SL would need modifying on every bar, and each modify can fail, be
+rejected, or race the fill. Consequence - the stop exists only while the
+engine runs.
+
+A swing stop moves at most **once a day**, so `kite_equity` does the opposite
+and rests a two-leg OCO GTT at Zerodha. That stop survives the laptop being
+shut, which is the entire point of a book you check once a day. Same
+reasoning, opposite conclusion, two files - not one file with a flag.
+
+**One OCO per position, and the +2R partial is NOT at the broker.** Zerodha's
+two-leg GTT sells one quantity at one of two triggers; it cannot express "bank
+half here, run the rest to there". So the resting OCO carries the stop and the
+structural target, and the partial is taken by `daily.run()`. The split
+follows the risk: a stop prevents a loss and must never depend on the app
+being open, a partial banks a profit and can wait a day.
+
+## The constraint that shapes the whole equity path: CDSL TPIN
+
+Unless **DDPI** (or the older POA) is active, every delivery sell at Zerodha
+needs a CDSL TPIN authorisation - not just GTT, *any* CNC sell - and it is
+valid for **one trading day**. A stop GTT placed on Monday is rejected on
+Wednesday unless the account was re-authorised that morning after 07:00, and
+**Kite still displays it as active either way**.
+
+That is the "looks armed and is not" failure this repo refuses to tolerate
+elsewhere, so: `kite_equity.protection_state()` returns three states, never
+two, and can only reach `PROTECTED` with DDPI on. A recorded authorisation
+reaches `UNVERIFIED` and no further, because Kite Connect exposes no endpoint
+to confirm it. `app.py._protection_banner` puts the warning on **every** page
+while a ticket is live - a warning confined to the Trade book page is one you
+see only when you were already looking.
+
+Buys are unaffected. Only sells need TPIN.
 
 ## Architecture: the invariants
 
@@ -93,6 +142,63 @@ The setup detection, the scoring and the whole of `signals.py` are currency-blin
 - **The US universe is the union of two professionally screened funds**, which makes the local screen a re-verification rather than the only line of defence. Expect disagreements and treat them as findings: the largest class is the debt test, because Yahoo's "Total Debt" includes capitalised operating leases while FTSE/Yasaar screens interest-bearing debt only. Lease-heavy names therefore fail here and pass there. The excluded table flags every name the funds hold. **Do not tune the threshold to make the numbers agree** - that is fitting the screen to the answer.
 - **[holdings.py](nifty_algo/swing/holdings.py) is a badge, never a rejection.** If you hold SPUS and HLAL, a "new" NVDA position is not new. Concentration is your decision; what the code refuses to do is let it be made silently.
 - **[crossborder.py](nifty_algo/swing/crossborder.py) is arithmetic with citations, not advice.** Every rate carries `VERIFIED_ON`. The one that matters most is not a cost but an exposure: US-domiciled ETFs and direct US shares are US-situs assets against a $60,000 non-resident estate tax exemption, with no India-US estate treaty; an Ireland-domiciled UCITS holding the same companies is outside the regime entirely.
+
+## Three capital pools, one formula
+
+`CapitalConfig` holds three balances - `starting_capital` (the option
+account), `swing_capital_inr` (Indian cash equity) and `foreign_capital_inr`
+(LRS money in another broker) - reached through `capital_inr(pool)` and
+`risk_inr(pool)`. The **formula** is still in exactly one place:
+`risk_per_trade_pct = session_stop_pct / max_entries_per_session`, applied to
+whichever balance is paying. Adding a second formula is how two books end up
+with two versions of the same rule.
+
+An unfunded pool **stands the market down** rather than sizing off another
+pot, and `_pool()` now **raises** on an unknown key - it used to return the
+domestic balance for any typo, which sized a trade off the wrong account and
+produced an entirely plausible ticket.
+
+`Market.is_home` means *domestic currency* and is now a stored `domestic`
+field, **not** `capital_pool == POOL_HOME`. Those were two ideas that happened
+to coincide while there were only two pools; India needed its own pot while
+staying rupee-denominated, and deriving one from the other would have switched
+on the whole LRS/estate-tax panel for a Mumbai trade.
+
+The pot must be **big enough for `top_n` positions**. Cash per ticket is
+`risk / stop%`, so at a 4% stop one position is over 40% of the pot and three
+will not fit. The scan proposes them anyway and the broker refuses the third
+when its trigger fires; `page_settings._pot_note` does that arithmetic for
+you, and the backtest counts the refusals in `capital_blocks`.
+
+## The swing backtest, and what it cannot measure
+
+`swing/backtest.py` calls `scanner.evaluate_symbol()` and
+`scanner.rank_and_size()` - the same functions `scan()` calls, extracted for
+exactly this reason. `setup.detect()` is handed a progressively truncated
+frame **unchanged**; there is no `if backtest:` in the path, and
+`test_swing_backtest.py::test_truncating_the_future_changes_nothing` asserts
+that cutting the data short leaves every already-finished trade byte-identical.
+
+Three distortions are structural and are printed above **every** result rather
+than living here: survivorship (the universe file is today's index),
+point-in-time fundamentals (today's balance sheets applied to all history),
+and news (not replayable - its weight is redistributed through `_score`'s
+existing unavailable path). Treat them the way `SYNTHETIC_PREMIUM` is treated.
+
+Two things it *does* enforce that are easy to leave out: the entry never fills
+below the next session's **open** (a gap through the trigger fills at the
+open), and total deployment never exceeds the pot - checked against the
+**fill**, not the planned entry, because a gap-up otherwise deploys money the
+account does not have.
+
+## Delivery charges are not option charges
+
+`costs.py` is options. `swing/costs_equity.py` is delivery, and two
+differences are large enough to change whether a trade was worth taking: STT
+is charged on **both** legs, and there is a **flat Rs 15.34 DP charge per
+scrip per sell** that does not shrink with the position. On a Rs 10,000 ticket
+the round trip is ~Rs 48, about 0.1R of a Rs 500 risk budget. Rates carry
+`VERIFIED_ON`, like `crossborder.py`.
 
 ## Testing conventions
 

@@ -33,9 +33,10 @@ st.set_page_config(
 
 from nifty_algo.ui.theme import CSS, get_palette          # noqa: E402
 from nifty_algo.ui import (page_live, page_brief, page_swing,        # noqa: E402
-                           page_portfolio, page_strategies, page_backtest,
-                           page_journal, page_settings)
+                           page_book, page_portfolio, page_strategies,
+                           page_backtest, page_journal, page_settings)
 from nifty_algo.ui.state import get_config                # noqa: E402
+from nifty_algo.ui.components import banner               # noqa: E402
 from nifty_algo.ui import refresh                         # noqa: E402
 
 st.markdown(CSS, unsafe_allow_html=True)
@@ -44,6 +45,7 @@ PAGES = {
     "Live alerts": page_live.render,
     "Daily brief": page_brief.render,
     "Daily picks": page_swing.render,
+    "Trade book": page_book.render,
     "Portfolio": page_portfolio.render,
     "Strategies": page_strategies.render,
     "Backtest": page_backtest.render,
@@ -69,7 +71,8 @@ def main() -> None:
 
         st.divider()
         st.caption(
-            f"**Capital** ₹{cfg.capital.starting_capital:,.0f}  \n"
+            f"**Options** ₹{cfg.capital.starting_capital:,.0f}  \n"
+            f"**Swing (India)** ₹{cfg.capital.swing_capital_inr:,.0f}  \n"
             f"**Target / stop** +{cfg.capital.session_target_pct:.0%} / "
             f"−{cfg.capital.session_stop_pct:.0%}  \n"
             f"**Max entries** {cfg.capital.max_entries_per_session}  \n"
@@ -91,7 +94,42 @@ def main() -> None:
             unsafe_allow_html=True,
         )
 
+    _protection_banner(cfg, p)
     PAGES[choice]()
+
+
+def _protection_banner(cfg, p) -> None:
+    """
+    On EVERY page, whenever a live position has no working stop today.
+
+    Without DDPI a stop GTT is rejected on any day you have not authorised
+    holdings - and Kite still shows it as active, so nothing on the broker's
+    own screen tells you. A warning confined to the Trade book page would be
+    a warning you see only when you were already looking.
+
+    Wrapped in a bare `except` deliberately: this is a safety notice, and a
+    safety notice that can crash the app is one you will end up disabling.
+    """
+    try:
+        from nifty_algo.broker import kite_equity as eq_mod
+        from nifty_algo.swing.book import TicketState
+        from nifty_algo.ui.state import get_book, get_equity_broker
+
+        book = get_book("india")
+        live = book.by_state(TicketState.ARMED, TicketState.OPEN)
+        if not live:
+            return
+        state, _ = get_equity_broker().protection_state()
+        if state != eq_mod.UNPROTECTED:
+            return
+        banner(
+            f"<b>{len(live)} live ticket(s) and no CDSL authorisation "
+            f"recorded today.</b> Any stop that triggers will be REJECTED — "
+            f"it will still show as active in Kite. Authorise holdings, or "
+            f"enable DDPI once on Settings.",
+            p.critical, "⛔")
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":

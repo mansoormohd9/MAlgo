@@ -101,24 +101,51 @@ class ExitLadder:
     backtester so there is exactly one implementation to be wrong.
     """
 
-    def __init__(self, cfg: Config = DEFAULT):
+    def __init__(self, cfg: Config = DEFAULT, trade=None):
+        """
+        `trade` overrides which TradeManagementConfig the rungs read.
+
+        The swing book holds shares for days and wants its own trail distance
+        and its own partial size, but it wants THIS ladder - the rungs, the
+        ratchet and the pessimistic tie-break are the parts that must not be
+        written twice. Passing a different settings object is the whole of the
+        difference; defaulting to `cfg.trade` leaves the option book exactly
+        as it was.
+        """
         self.cfg = cfg
+        self.trade = trade if trade is not None else cfg.trade
 
     def new_state(self, lots: int) -> LadderState:
         return LadderState(lots_total=lots, lots_remaining=lots)
 
+    def partial_units(self, lots_total: int) -> int:
+        """
+        How many units the +2R rung releases.
+
+        Two books, two ways of saying the same thing. The option book counts
+        in LOTS and can only ever bank whole ones - `partial_exit_lots`. A
+        share book counts in shares and wants a FRACTION: "bank one" out of 24
+        shares is not a partial, it is a rounding error. Floor, so a 3-share
+        ticket banks 1 and runs 2 rather than claiming a half share.
+        """
+        t = self.trade
+        fraction = getattr(t, "partial_exit_fraction", None)
+        if fraction is None:
+            return t.partial_exit_lots
+        return max(1, int(lots_total * fraction))
+
     def runner_enabled(self, lots: int) -> bool:
         """
-        A runner needs at least two lots.
+        A runner needs strictly more units than the partial takes.
 
         NSE requires order quantities in exact multiples of the lot size, so
         you cannot sell part of one NIFTY lot - 65 is 65. With a single lot
         the 2R event is a full exit, not a partial, and that is a real
         behavioural difference the caller must be told about rather than
-        discover from its fills.
+        discover from its fills. A 1-share swing ticket hits the identical
+        wall for the identical reason, and takes the identical fallback.
         """
-        return (self.cfg.trade.enable_runner
-                and lots > self.cfg.trade.partial_exit_lots)
+        return self.trade.enable_runner and lots > self.partial_units(lots)
 
     def advance(self, st: LadderState, mark_r: float,
                 best_r: Optional[float] = None,
@@ -174,7 +201,7 @@ class ExitLadder:
     def _next_rung(self, st: LadderState, best: float,
                    trail_distance_r: float) -> Optional[LadderDecision]:
         """One transition, or None when the ladder has settled for this bar."""
-        t = self.cfg.trade
+        t = self.trade
 
         # --- breakeven shift at +1R ---
         if st.mode is LadderMode.INITIAL and best >= t.breakeven_at_r - _EPS:
@@ -188,18 +215,19 @@ class ExitLadder:
         # --- partial / target at +2R ---
         if not st.partial_done and best >= t.partial_exit_at_r - _EPS:
             st.partial_done = True
+            units = self.partial_units(st.lots_total)
             if self.runner_enabled(st.lots_total):
-                st.lots_remaining -= t.partial_exit_lots
+                st.lots_remaining -= units
                 st.mode = LadderMode.TRAIL
                 st.stop_r = max(st.stop_r, 0.0)
                 return LadderDecision(
                     kind=ExitKind.PARTIAL_EXIT,
-                    exit_lots=t.partial_exit_lots,
+                    exit_lots=units,
                     exit_r=t.partial_exit_at_r,
                     new_stop_r=st.stop_r,
-                    detail=(f"banked {t.partial_exit_lots} lot at "
+                    detail=(f"banked {units} at "
                             f"+{t.partial_exit_at_r:.0f}R; "
-                            f"{st.lots_remaining} lot(s) now trailing"),
+                            f"{st.lots_remaining} now trailing"),
                 )
             lots = st.lots_remaining
             st.lots_remaining = 0
@@ -207,7 +235,7 @@ class ExitLadder:
                 kind=ExitKind.TARGET_EXIT, exit_lots=lots,
                 exit_r=t.partial_exit_at_r,
                 detail=(f"+{t.partial_exit_at_r:.0f}R target, full exit "
-                        f"(single lot - cannot split a 65-qty contract)"),
+                        f"(too small to split - no runner)"),
             )
 
         # --- trail the runner ---

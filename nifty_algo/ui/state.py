@@ -32,13 +32,90 @@ from ..alerts.dispatcher import AlertDispatcher
 from ..brief import ChainView, build_chain_view
 from ..engine import TradingEngine
 from ..journal import Journal
+from .. import settings_store
 from ..strategies.registry import default_enabled_keys
 
 
 def get_config() -> Config:
+    """
+    The one config object, shared by every page.
+
+    Saved settings are applied ONCE, on first access. They have to be applied
+    here rather than in `config.py` because `config.py` is version-controlled
+    defaults and `data/settings.json` is your account - and a default that
+    silently reads a local file is a default nobody can reason about.
+    """
     if "cfg" not in st.session_state:
         st.session_state.cfg = DEFAULT
+        try:
+            st.session_state.settings_notes = settings_store.apply_to(DEFAULT)
+        except Exception as e:      # never let a settings file stop the app
+            st.session_state.settings_notes = [f"settings could not load: {e}"]
     return st.session_state.cfg
+
+
+def settings_notes() -> list[str]:
+    """Anything `settings_store.apply_to` wanted the user told about."""
+    get_config()
+    return st.session_state.get("settings_notes", [])
+
+
+def save_settings() -> None:
+    settings_store.save(get_config())
+
+
+# ---------------------------------------------------------------- swing book
+
+def get_kite_session():
+    """
+    The shared Kite session, or None.
+
+    One per app run, so the chain, the feed, the option orders and the equity
+    book all pass through a single rate limiter - see `broker/ratelimit.py`.
+    """
+    if "kite_session" not in st.session_state:
+        try:
+            from ..broker.kite_auth import KiteSession
+            st.session_state.kite_session = KiteSession()
+        except Exception as e:
+            st.session_state.kite_error = str(e)
+            st.session_state.kite_session = None
+    return st.session_state.kite_session
+
+
+def get_equity_broker():
+    """
+    The cash-equity order path. Always returned, authenticated or not.
+
+    Unlike the option broker this is NOT None when Kite is unreachable: in
+    dry run it journals payloads with no network at all, and its reads return
+    empty rather than raising. A page that cannot render without a broker is
+    a page you cannot use to find out why the broker is missing.
+    """
+    if "equity_broker" not in st.session_state:
+        from ..broker.kite_equity import KiteEquity
+        st.session_state.equity_broker = KiteEquity(
+            session=get_kite_session(), cfg=get_config(),
+            journal=get_journal())
+    return st.session_state.equity_broker
+
+
+def get_book(market_key: str = "india", rebuild: bool = False):
+    """
+    The position ledger, replayed from the journal.
+
+    Cached per market for the life of the script run. `rebuild` after anything
+    that writes an event, so the page renders what was just recorded rather
+    than the state before it.
+    """
+    from ..swing.book import Book
+    key = f"swing_book_{market_key}"
+    if rebuild:
+        st.session_state.pop(key, None)
+    if key not in st.session_state:
+        st.session_state[key] = Book.load(get_journal(), get_config(),
+                                          market=market_key)
+    return st.session_state[key]
 
 
 def get_journal() -> Journal:
@@ -101,12 +178,15 @@ def _build_kite(cfg: Config, journal: Journal):
     """
     from ..data.chain import ChainProvider
     try:
-        from ..broker.kite_auth import KiteSession
         from ..broker.kite_chain import KiteChain
         from ..broker.kite_orders import KiteOrders
 
-        session = KiteSession()
-        if not session.authenticated:
+        # THE SHARED session, not a fresh one. Each `KiteSession` owns its own
+        # `RateLimiter`, so building a second here would run two independent
+        # limiters against one API key - which is the exact failure
+        # `broker/ratelimit.py` exists to prevent.
+        session = get_kite_session()
+        if session is None or not session.authenticated:
             return ChainProvider(cfg), None
 
         chain = KiteChain(session, cfg)

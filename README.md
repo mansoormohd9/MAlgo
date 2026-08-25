@@ -6,12 +6,21 @@ A from-scratch algo trading system for NSE index options, sized for a
 Run `python -m nifty_algo.demo_risk` first. It prints the actual economics
 of your rules before you write any strategy logic.
 
-**Entries need your click. Exits do not.** An alert never becomes a position on
-its own — you press **Place order**, which calls `engine.confirm_entry()`. Once
-you are in, the breakeven shift, the partial at +2R and the trailing stop run
-automatically, because a stop that needs a human to press a button is not a
-stop. `BrokerConfig.dry_run` defaults to `True`, so even a confirmed entry only
-logs its payload until you deliberately turn that off.
+**Entries need your click. Exits do not.** Nothing becomes a position on its
+own — you press a button. Once you are in, the breakeven shift, the partial at
++2R and the trailing stop run automatically, because a stop that needs a human
+to press a button is not a stop.
+
+**Two books, two switches, both defaulting to dry run.** The Indian swing book
+can place real cash-equity orders through Kite (`EquityBrokerConfig.dry_run`);
+the intraday option book still cannot (`BrokerConfig.dry_run`). Going live on a
+multi-day equity book is a different decision from going live on an intraday
+option book, and a single flag would have made it one decision.
+
+**One click arms a resting trigger — it does not buy now.** Every swing setup
+puts its entry *above* the last close, because each one demands the stock prove
+itself before you pay for it. So the order waits, and **Zerodha** does the
+waiting: between your click and the fill, nothing of yours needs to be running.
 
 ---
 
@@ -47,18 +56,19 @@ run identical code. Note that `run_live` attaches **no broker**: it will use a
 real chain when Kite is authenticated, but it can never place an order, because
 reading quotes and sending orders are separate permissions.
 
-### The eight pages
+### The nine pages
 
 | Page | What it does |
 |---|---|
 | **Live alerts** | Session governors with the live ratcheting floor, open positions and where their stops actually sit, alert cards with a **Place order** button, candlestick chart with the levels/trendlines/VWAP the strategies used, and a *why nothing fired* table |
 | **Daily brief** | Pre-open frame (gap, ATR, VIX, expiry, the day's rupee budget); the option chain with **which gate each strike fails**; and a journal-driven review of any past day |
 | **Daily picks** | A different book: once a day it sweeps one market's universe — **India** (Nifty 100), **US** (the union of SPUS + HLAL constituents) or **UK** (FTSE 100) — applies a **halal (Shariah) screen** under both the FTSE/Yasaar and AAOIFI standards, and returns at most three cash-equity LONG **swing** tickets, priced in that market's currency and in rupees, with an overlap check against the Shariah ETFs you already hold and a ledger accounting for every symbol |
+| **Trade book** | **What you actually own.** The morning checklist (Kite token, CDSL authorisation, free cash), open positions with where the stop really sits, armed triggers still waiting, every disagreement between the ledger and Zerodha, and the realised results of trades you *took* — as opposed to picks the scanner made |
 | **Portfolio** | The cross-border picture no single ticket can show: the **US estate-tax meter** ($60,000 non-resident exemption, and which of your holdings count toward it), US-vs-Ireland domicile comparison, what your funds actually own, and LRS/TCS arithmetic. Arithmetic with citations, not advice |
 | **Strategies** | Toggle each of the ten setups, tune every parameter, control the regime gate |
-| **Backtest** | Walk-forward run, metrics, equity curve, per-strategy expectancy, **and how the day rules behaved** — target hits, floor hits, ratchets, entries used |
+| **Backtest** | Two books, two panels. Intraday: walk-forward, metrics, equity curve, **and how the day rules behaved**. Swing: the same over daily equity bars, with its survivorship and point-in-time caveats printed above every number |
 | **Journal** | The append-only record, filterable, CSV/JSONL export |
-| **Settings** | Feed choice, notification channels with per-channel test buttons, `.env` status |
+| **Settings** | The three capital pots, the live-orders switch, DDPI status, feed choice, notification channels, `.env` status |
 
 ---
 
@@ -359,6 +369,62 @@ IP or VPS. Start at half the computed size for 20 sessions.
 
 ---
 
+## The swing book, live
+
+```
+Evening   Scan runs. Up to 3 tickets. You press Arm on the ones you want.
+          -> a BUY GTT rests at Zerodha: "buy N if it trades through X"
+          Close the laptop.
+
+Any day   Zerodha watches the price. Not this app. It fires unattended.
+
+Next run  Trade book -> Run reconcile & manage:
+            reads holdings, records the fill and its SLIPPAGE
+            arms the exit OCO (stop + target) for anything unguarded
+            advances the ladder on today's bar
+            pushes any ratcheted stop to the broker with a modify
+            retires entries that never triggered inside their window
+```
+
+**The one thing that can silently break this: CDSL TPIN.** Unless **DDPI** is
+active on your Zerodha account, every delivery sell — not just GTT, *any* CNC
+sell — needs a TPIN authorisation that is **valid for one trading day**. A stop
+GTT armed on Monday is rejected on Wednesday unless you re-authorised that
+morning, and **Kite still shows it as active**. Nothing on the broker's own
+screen tells you the stop is decorative.
+
+So the app refuses to call a stop protected on a day the authorisation is not
+recorded, and puts that warning on *every* page while a ticket is live.
+Enabling DDPI is a free one-time e-sign and removes the whole problem.
+
+| | Without DDPI | With DDPI |
+|---|---|---|
+| Buy trigger fires | works | works |
+| Stop / target fires | **rejected** unless authorised that morning | works |
+| Your daily job | Kite login **+ authorise holdings** | Kite login |
+
+### What the swing backtest says
+
+Read `python -m nifty_algo.swing.backtest --market india --years 3` before
+arming anything. It prints its own caveats first — survivorship (the universe
+file is *today's* index), point-in-time fundamentals, and news that cannot be
+replayed — and they all run in the flattering direction.
+
+On the ~2.5 years of cached Nifty 100 data at the time of writing it returned a
+**negative expectancy of roughly −0.04R a trade at a 24–26% win rate, against
+the 33.3% a 2:1 payoff needs to break even.** Per-setup figures flipped sign
+between two runs with different capital, which is what 30-trade samples do.
+That is not a reason to abandon the idea; it is a reason not to arm it with
+money yet.
+
+### Portfolio heat, which the option book never needed
+
+`max_entries_per_session` caps entries *in a day*. A swing book holds for days,
+so three scans on three days could put nine positions on. `SwingConfig.max_open_risk_r`
+caps total R at risk across everything open, and a position whose stop has
+reached breakeven contributes nothing to it — which is the point of moving it
+there. The Trade book shows the figure against the cap.
+
 ## Compliance checklist (mandatory since 1 April 2026)
 
 - [ ] Broker API that is registered under the retail algo framework
@@ -397,7 +463,7 @@ dependency, and you should know it rather than discover it.
 ## Testing
 
 ```bash
-pytest                    # 131 tests
+pytest                    # 540 tests
 ```
 
 The suite that matters most is `tests/test_lookahead.py`. Every other failure

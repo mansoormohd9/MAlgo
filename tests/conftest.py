@@ -100,3 +100,56 @@ def trending(n: int = 140, drift: float = 0.0035, vol: float = 0.010,
     """A geometric random walk with drift - an uptrend you can seed."""
     rng = np.random.default_rng(seed)
     return list(start_price * np.exp(np.cumsum(rng.normal(drift, vol, n))))
+
+
+# ---------------------------------------------------------------- the broker
+#
+# NO TEST MAY EVER REACH A REAL BROKER, and until this existed several did.
+#
+# `state.get_equity_broker()` builds a `KiteEquity` over a real `KiteSession`,
+# which reads `.kite_session.json` from the repo root. On a machine where the
+# owner has logged in for the day - which is the whole point of the file - the
+# UI tests quietly started making live calls to Zerodha for holdings, GTTs and
+# margins. Read-only, but wrong three times over: it spends the account's API
+# rate limit, it makes the tests depend on somebody's balance (they began
+# failing the day that balance went negative), and a test suite has no
+# business touching a live trading account at all.
+#
+# The fix is to pre-seed the cache `get_equity_broker()` reads, so it never
+# constructs one. `offline_broker()` still exercises the REAL `KiteEquity` -
+# only the session underneath it is a stub - so the reads go down the genuine
+# `_transport._read` failure path and come back empty, which is exactly the
+# state a machine with no token is in.
+
+class OfflineSession:
+    """A `KiteSession` that is never authenticated and never dials out."""
+
+    authenticated = False
+
+    def __init__(self):
+        self.limiter = None
+
+    def client(self):
+        from nifty_algo.broker.kite_auth import NotAuthenticated
+        raise NotAuthenticated("tests never reach a real broker")
+
+    def login_url(self) -> str:
+        return "https://kite.zerodha.com/connect/login?api_key=test"
+
+
+def offline_broker(cfg=None, journal=None):
+    """A real `KiteEquity` over a stub session. Holdings and GTTs come back
+    empty; `free_cash()` comes back None, meaning "not checked"."""
+    from nifty_algo.broker.kite_equity import KiteEquity
+    from nifty_algo.config import Config
+    return KiteEquity(OfflineSession(), cfg or Config(), journal)
+
+
+def seed_offline_broker(at, cfg=None, journal=None):
+    """Put an offline broker into an `AppTest`'s session state before it runs.
+
+    Call this on EVERY AppTest that opens a page touching the swing book.
+    """
+    at.session_state["kite_session"] = OfflineSession()
+    at.session_state["equity_broker"] = offline_broker(cfg, journal)
+    return at

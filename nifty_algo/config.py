@@ -68,16 +68,48 @@ class CapitalConfig:
 
     @property
     def reward_risk_ratio(self) -> float:
-        return self.reward_per_trade_pct / self.risk_per_trade_pct
+        """
+        Reward:risk, derived rather than set - so it cannot contradict the
+        governors it is computed from.
 
-    # --- the foreign pot ---
-    # Money remitted under LRS lives in a different broker and is not
-    # available to a domestic trade, so it is a second POOL - never a second
-    # formula. `risk_per_trade_pct` above is still the only place the governors
-    # are turned into a per-trade number; this just applies it to the other
-    # balance. Left at 0 until you fund it, and a foreign scan with an unfunded
-    # pool stands down rather than sizing off the domestic account.
+        Guarded because `risk_per_trade_pct` is itself `session_stop_pct /
+        max_entries_per_session`, and a zero session stop makes this a
+        division by zero. That took the WHOLE APP down rather than just the
+        page that read it, because `app.py` prints this in the sidebar on
+        every render. A ratio of 0.0 with no risk defined is the honest
+        answer, and it leaves the misconfiguration visible instead of fatal.
+        """
+        risk = self.risk_per_trade_pct
+        return self.reward_per_trade_pct / risk if risk else 0.0
+
+    # --- the other pots ---
+    # THREE POOLS, ONE FORMULA. Each of these is a separate BALANCE, never a
+    # separate formula: `risk_per_trade_pct` above stays the only place the
+    # session governors are turned into a per-trade number, and every pool
+    # runs through it. Adding a second formula is how two books end up with
+    # two versions of the same risk rule that drift apart.
+    #
+    #   starting_capital     the intraday NIFTY option account
+    #   swing_capital_inr    Indian cash equity held for days - a DIFFERENT
+    #                        pot from the option account even though both are
+    #                        rupees at the same broker, because one balance
+    #                        funding two books means a drawdown in one
+    #                        silently shrinks the size of the other
+    #   foreign_capital_inr  money remitted under LRS, in another broker
+    #                        entirely and unreachable from a domestic trade
+    #
+    # The last two are 0 until you fund them, and a scan against an unfunded
+    # pool STANDS THE MARKET DOWN rather than quietly sizing off another pot.
+    swing_capital_inr: float = 0.0
     foreign_capital_inr: float = 0.0
+
+    @property
+    def swing_risk_per_trade_inr(self) -> float:
+        return self.swing_capital_inr * self.risk_per_trade_pct
+
+    @property
+    def swing_reward_per_trade_inr(self) -> float:
+        return self.swing_capital_inr * self.reward_per_trade_pct
 
     @property
     def foreign_risk_per_trade_inr(self) -> float:
@@ -87,13 +119,47 @@ class CapitalConfig:
     def foreign_reward_per_trade_inr(self) -> float:
         return self.foreign_capital_inr * self.reward_per_trade_pct
 
+    #: pool key -> (attribute holding the balance, human label). Spelled once
+    #: so the balance, the label and the error message cannot disagree. The
+    #: keys are `swing.markets.POOL_*`, imported by value rather than by name
+    #: to keep `config` free of a cycle back into `swing`.
+    POOLS = {
+        "home": ("starting_capital", "intraday option account"),
+        "swing_india": ("swing_capital_inr", "Indian swing pot"),
+        "foreign": ("foreign_capital_inr", "foreign (LRS) pool"),
+    }
+
+    def _pool(self, pool: str) -> tuple[str, str]:
+        try:
+            return self.POOLS[pool]
+        except KeyError:
+            # Deliberately loud. The previous version returned the domestic
+            # balance for any unrecognised pool, so a typo sized a trade off
+            # the wrong account and produced an entirely plausible ticket.
+            raise KeyError(
+                f"unknown capital pool {pool!r} - registered pools are "
+                f"{', '.join(sorted(self.POOLS))}"
+            ) from None
+
     def capital_inr(self, pool: str) -> float:
-        return self.foreign_capital_inr if pool == "foreign" else self.starting_capital
+        """The balance backing `pool`, in rupees."""
+        return float(getattr(self, self._pool(pool)[0]))
 
     def risk_inr(self, pool: str) -> float:
-        """Per-trade risk budget in rupees for either pool."""
-        return (self.foreign_risk_per_trade_inr if pool == "foreign"
-                else self.risk_per_trade_rupees)
+        """Per-trade risk budget in rupees, for any pool."""
+        return self.capital_inr(pool) * self.risk_per_trade_pct
+
+    def reward_inr(self, pool: str) -> float:
+        """Per-trade reward target in rupees, for any pool."""
+        return self.capital_inr(pool) * self.reward_per_trade_pct
+
+    def pool_label(self, pool: str) -> str:
+        """How to name this pot to a human, e.g. in a stand-down message."""
+        return self._pool(pool)[1]
+
+    def pool_field(self, pool: str) -> str:
+        """The config attribute to point someone at when a pot is unfunded."""
+        return f"capital.{self._pool(pool)[0]}"
 
 
 @dataclass
@@ -224,6 +290,14 @@ class TradeManagementConfig:
     partial_exit_at_r: float = 2.0     # +2R -> bank part of the position
     partial_exit_lots: int = 1         # how many lots to release at that point
 
+    # A SHARE book cannot use `partial_exit_lots`. One NIFTY lot is 65 and is
+    # indivisible, so "bank one lot" is the only expressible partial there;
+    # a swing ticket is 6 shares and wants to bank 3. When this is set it
+    # replaces `partial_exit_lots` with `floor(lots_total * fraction)`.
+    # None everywhere except the swing book, so the option ladder is
+    # untouched - see `ExitLadder.partial_units`.
+    partial_exit_fraction: float | None = None
+
     trail_atr_multiple: float = 1.0    # runner trails 1 ATR behind the underlying
 
     # NSE requires order quantities in exact multiples of the lot size, so a
@@ -249,6 +323,56 @@ class BrokerConfig:
     order_type: str = "LIMIT"          # never MARKET on an option book
     limit_buffer_ticks: int = 2        # cross the spread by this much to fill
     variety: str = "regular"
+
+
+@dataclass
+class EquityBrokerConfig:
+    """
+    Cash-equity order placement for the swing book.
+
+    A SIBLING of BrokerConfig, not a replacement. That one is NFO/MIS and its
+    docstring is right that "this system is never overnight" - which is
+    exactly why it cannot describe a book that holds for days. Two profiles,
+    two products, no `if market == ...` anywhere.
+
+    `dry_run` defaults True and nothing in the code path flips it, same as the
+    option side.
+
+    THE STOP LIVES AT THE BROKER HERE, and that is the opposite of
+    `kite_orders.modify_stop()` - deliberately. An intraday option stop is
+    recomputed every 5-minute bar, so a resting order would need modifying on
+    every one of them. A swing stop moves at most once a day, so a resting GTT
+    is both cheap and the only version of the stop that survives the laptop
+    being shut.
+    """
+    dry_run: bool = True
+
+    exchange: str = "NSE"
+    product: str = "CNC"               # delivery. MIS would square off at close
+    order_type: str = "LIMIT"          # never MARKET
+    variety: str = "regular"
+    tick_size: float = 0.05
+
+    # A GTT places a LIMIT order when it triggers, and if that limit does not
+    # fill the same day the GTT is CANCELLED rather than retried. So the limit
+    # has to sit past the trigger: above it on a buy, below it on a sell.
+    # Zerodha's own guidance is that this "acts like a market order with the
+    # protection of your limit set".
+    gtt_limit_buffer_pct: float = 0.003
+
+    tag: str = "swingbook"             # <=20 alphanumeric chars, Kite's cap
+
+    # Zerodha's account cap is far higher; this is a sanity ceiling so a bug
+    # that re-arms in a loop runs out of room long before it runs out of API.
+    max_active_gtts: int = 50
+
+    # Whether DDPI (or the older POA) is active on the account. When False,
+    # every delivery SELL needs a CDSL TPIN authorisation that is valid for
+    # ONE TRADING DAY - so a resting stop GTT placed on Monday is REJECTED on
+    # Wednesday unless the account was re-authorised that morning after 07:00.
+    # It still displays as active in Kite either way, which is why this is a
+    # setting the UI reads rather than an assumption the code makes.
+    ddpi_active: bool = False
 
 
 @dataclass
@@ -436,6 +560,22 @@ class SwingConfig:
                                         # name outweigh a quiet one
     valid_for_days: int = 5             # an untriggered entry expires after this
 
+    # --- after the entry ---
+    # The runner trails this many ATRs behind the peak. Wider than the
+    # intraday book's 1.0 for the same reason `swing_atr_stop_multiple` is
+    # 1.5: an overnight hold has to survive gaps that a 15:10 flat never sees.
+    trail_atr_multiple: float = 1.5
+    # Half the position is banked at +2R and the rest runs. Whole shares, so
+    # a 1-share ticket cannot split and takes a full exit at +2R instead -
+    # the same fallback the option book uses on a single lot.
+    partial_exit_fraction: float = 0.5
+    # TOTAL open risk, in R, across every open position at once. `top_n` caps
+    # how many a single scan proposes; nothing capped how many could be open
+    # simultaneously, so three scans on three days could put nine positions
+    # on. 3.0 keeps the worst case - everything stops out together - at
+    # exactly the session stop the governors are built around.
+    max_open_risk_r: float = 3.0
+
     # --- composite score weights (must sum to 1.0) ---
     w_setup: float = 0.30
     w_relative_strength: float = 0.25
@@ -471,6 +611,7 @@ class Config:
     regime: RegimeConfig = field(default_factory=RegimeConfig)
     trade: TradeManagementConfig = field(default_factory=TradeManagementConfig)
     broker: BrokerConfig = field(default_factory=BrokerConfig)
+    equity_broker: EquityBrokerConfig = field(default_factory=EquityBrokerConfig)
     data: DataConfig = field(default_factory=DataConfig)
     alerts: AlertConfig = field(default_factory=AlertConfig)
     backtest: BacktestConfig = field(default_factory=BacktestConfig)

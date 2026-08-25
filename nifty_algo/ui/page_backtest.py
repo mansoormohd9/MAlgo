@@ -19,6 +19,16 @@ def render() -> None:
     cfg = get_config()
     st.title("Backtest")
 
+    # Two books, two backtesters, and they measure genuinely different things.
+    # A single page with a mode switch would imply the numbers are comparable;
+    # they are not - one is an intraday option book and the other is
+    # multi-day cash equity.
+    which = st.radio("Book", ["Intraday options", "Swing equity"],
+                     horizontal=True, key="bt_book")
+    if which == "Swing equity":
+        _swing(cfg, p)
+        return
+
     banner(
         "<b>What this can and cannot measure.</b> There are no historical option "
         "chains available at any price — Kite serves no data for expired contracts "
@@ -197,3 +207,189 @@ def render() -> None:
         st.dataframe(tdf, width="stretch", hide_index=True)
         st.download_button("Download trades CSV", tdf.to_csv(index=False),
                            "backtest_trades.csv", "text/csv")
+
+
+# ---------------------------------------------------------------- swing book
+
+def _swing(cfg, p) -> None:
+    """
+    The daily equity book's backtest.
+
+    A separate panel rather than a mode on the option one, because the two
+    measure different things and putting them behind one switch would imply
+    the numbers are comparable. They are not.
+    """
+    from ..swing import backtest as swing_bt
+    from ..swing import markets as markets_mod
+    from ..swing import prices as prices_mod
+    from ..swing.universe import load_universe
+
+    banner(
+        "<b>Read these before the numbers.</b> Three distortions here are "
+        "structural and cannot be coded away, so they travel with every "
+        "result rather than living in a docstring.",
+        p.warning, "⚠")
+    for c in swing_bt.CAVEATS:
+        st.markdown(f"- {c}")
+
+    market = markets_mod.get(cfg, markets_mod.INDIA)
+    c1, c2, c3 = st.columns([1, 1, 2])
+    years = c1.number_input("Years", min_value=1.0, max_value=10.0,
+                            value=3.0, step=0.5, key="swing_bt_years")
+    pot = c2.number_input("Swing pot (₹)", min_value=0.0, step=5_000.0,
+                          value=float(cfg.capital.swing_capital_inr or
+                                      100_000.0),
+                          key="swing_bt_pot",
+                          help="Sizes every ticket. The backtest refuses to "
+                               "deploy more than this in total, because live "
+                               "the third buy is simply rejected.")
+    c3.caption(
+        "Reads the daily bars already cached by the scan where it can. "
+        "A longer window downloads more history the first time, which takes "
+        "a few minutes for a hundred symbols."
+    )
+
+    if not st.button("Run swing backtest", type="primary",
+                     key="run_swing_bt"):
+        _render_swing(st.session_state.get("swing_bt_result"), cfg, p)
+        return
+
+    if pot <= 0:
+        st.error("A ₹0 pot sizes every ticket to zero. Set it above, or on "
+                 "the Settings page.")
+        return
+
+    # `get_config()` hands back the process-global DEFAULT, so BOTH of these
+    # overrides leak into every other page for the rest of the session if they
+    # are not restored - and a `history_days` left at six years would have
+    # every later scan download years of bars it never reads. Restored in
+    # `finally`, not on the success path.
+    original_pot = cfg.capital.swing_capital_inr
+    original_days = cfg.swing.history_days
+    cfg.capital.swing_capital_inr = pot
+    cfg.swing.history_days = max(int(years * 365) + 260, 400)
+
+    bar = st.progress(0.0, text="loading history")
+    try:
+        stocks = load_universe(market.universe_csv)
+        tickers = {s.symbol: s.yf_ticker for s in stocks}
+        price_set = prices_mod.load_prices(
+            tickers, cfg, market,
+            progress=lambda d, t, l: bar.progress(
+                min(1.0, d / t if t else 0.0), text=l))
+        result = swing_bt.run(
+            cfg, market, price_set.bars, price_set.benchmark, stocks=stocks,
+            progress=lambda d, t, l: bar.progress(
+                min(1.0, d / t if t else 0.0), text=f"simulating {l}"))
+    except Exception as e:
+        bar.empty()
+        st.error(f"The backtest could not complete: {e}")
+        return
+    finally:
+        cfg.capital.swing_capital_inr = original_pot
+        cfg.swing.history_days = original_days
+
+    bar.empty()
+    st.session_state.swing_bt_result = result
+    _render_swing(result, cfg, p)
+
+
+def _render_swing(result, cfg, p) -> None:
+    if result is None:
+        st.info("Nothing run yet.")
+        return
+
+    for w in result.warnings[:6]:
+        st.warning(w)
+
+    st.subheader(result.headline())
+    if result.start and result.end:
+        st.caption(f"{result.start:%b %Y} to {result.end:%b %Y} · "
+                   f"{result.symbols} symbols")
+        # A price cache younger than `price_cache_hours` is reused whole, so
+        # raising `history_days` does nothing until it expires - and a "5
+        # year" run would quietly walk 400 days without saying so.
+        got = (result.end - result.start).days / 365.0
+        wanted = float(st.session_state.get("swing_bt_years", got))
+        if got < wanted - 0.5:
+            st.warning(
+                f"You asked for {wanted:g} years and the cached bars only "
+                f"cover {got:.1f}. The daily cache is reused until it "
+                f"expires, so deep history has to be pulled deliberately: "
+                f"`python scripts/fetch_swing_history.py --market india "
+                f"--years {wanted:g}`"
+            )
+
+    m = result.metrics
+    if not m.trades:
+        return
+
+    cols = st.columns(4)
+    cols[0].metric("Trades", m.trades)
+    cols[1].metric("Win rate", f"{m.win_rate:.0%}",
+                   delta=f"{m.win_rate - m.breakeven_win_rate:+.0%} vs "
+                         f"breakeven")
+    cols[2].metric("Expectancy", f"{m.expectancy_r:+.3f}R")
+    cols[3].metric("Max drawdown", f"{m.max_drawdown_r:.1f}R")
+
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown("**Performance**")
+        st.dataframe(pd.DataFrame(m.as_dict().items(),
+                                  columns=["", "Value"]),
+                     hide_index=True, width="stretch")
+    with c2:
+        st.markdown("**What the book did**")
+        st.dataframe(pd.DataFrame(result.day_stats.as_dict().items(),
+                                  columns=["", "Value"]),
+                     hide_index=True, width="stretch")
+
+    curve = result.equity_curve_r
+    if len(curve) > 1:
+        st.plotly_chart(equity_curve(curve, p), width="stretch")
+
+    if result.by_setup:
+        st.markdown("**Per setup**")
+        st.dataframe(
+            pd.DataFrame([{
+                "Setup": key,
+                "Trades": x.trades,
+                "Win rate": f"{x.win_rate:.0%}",
+                "Expectancy (R)": f"{x.expectancy_r:+.3f}",
+                "Total (R)": f"{x.total_r:+.1f}",
+            } for key, x in result.by_setup.items()]),
+            hide_index=True, width="stretch")
+        st.caption(
+            "A setup whose edge lives in one fold did not have edge, it had "
+            "a good quarter. Treat a small trade count as no information."
+        )
+
+    gross = sum(t.gross_r for t in result.trades)
+    net = sum(t.r_multiple for t in result.trades)
+    friction = sum(t.friction for t in result.trades)
+    st.markdown("**What the charges took**")
+    st.caption(
+        f"Gross {gross:+.1f}R became net {net:+.1f}R — ₹{friction:,.0f} of "
+        f"delivery charges across {len(result.trades)} trades, about "
+        f"₹{friction / len(result.trades):,.0f} each. The flat DP fee is the "
+        f"same rupee amount on a ₹10,000 ticket as on a ₹100,000 one, which "
+        f"is why small positions keep proportionally less of a win."
+    )
+
+    with st.expander("Every trade"):
+        st.dataframe(
+            pd.DataFrame([{
+                "In": t.entry_time.date(),
+                "Out": t.exit_time.date(),
+                "Symbol": t.symbol,
+                "Setup": t.strategy,
+                "Entry": f"{t.entry:,.2f}",
+                "Exit": f"{t.exit_price:,.2f}",
+                "Qty": f"{t.quantity:g}",
+                "Outcome": t.outcome,
+                "Gross R": f"{t.gross_r:+.2f}",
+                "Net R": f"{t.r_multiple:+.2f}",
+                "Days": t.bars_held,
+            } for t in sorted(result.trades, key=lambda x: x.exit_time,
+                              reverse=True)]),
+            hide_index=True, width="stretch")

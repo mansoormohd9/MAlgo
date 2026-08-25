@@ -243,13 +243,21 @@ def scan(cfg, market=None, universe: list[Stock] | None = None,
         return result
     result.fx_note = rate.note() if not market.is_home else ""
 
-    if not market.is_home and cfg.capital.capital_inr(market.capital_pool) <= 0:
+    # An unfunded pot stands the market DOWN rather than falling back to
+    # another pool's balance. Every pool except the option account is checked,
+    # which now includes India's own swing pot: two books drawing on one
+    # balance is the same error as sizing a US trade off the Mumbai account,
+    # it is just harder to see because both halves are in rupees.
+    if (market.capital_pool != markets_mod.POOL_HOME
+            and cfg.capital.capital_inr(market.capital_pool) <= 0):
         result.stood_down = (
-            f"{market.label} sizes off the foreign capital pool, which is set "
-            f"to ₹0. Set it on the Portfolio page (or "
-            f"capital.foreign_capital_inr) - the alternative is sizing a "
-            f"foreign trade off the domestic account, which would claim money "
-            f"that is not in that broker. The Indian book is unaffected."
+            f"{market.label} sizes off the "
+            f"{cfg.capital.pool_label(market.capital_pool)}, which is set to "
+            f"₹0. Set it on the Settings page (or "
+            f"{cfg.capital.pool_field(market.capital_pool)}) - the "
+            f"alternative is sizing this trade off a different pot, which "
+            f"would claim money that book does not have. Every other market "
+            f"is unaffected."
         )
         result.warnings.append(result.stood_down)
         return result
@@ -316,24 +324,11 @@ def scan(cfg, market=None, universe: list[Stock] | None = None,
         stock = by_symbol.get(symbol)
         if stock is None:
             continue
-
-        metrics, why_not = _metrics(df, price_set.benchmark, cfg, market)
-        if why_not:
-            _reject(result, symbol, STAGE_TRADEABILITY, why_not)
+        found, metrics, rejection = evaluate_symbol(
+            symbol, df, price_set.benchmark, cfg, market)
+        if rejection is not None:
+            _reject(result, symbol, *rejection)
             continue
-
-        found, note = setup_mod.detect(symbol, df, cfg)
-        if found is None:
-            _reject(result, symbol, STAGE_SETUP, note or "no setup")
-            continue
-
-        min_rr = cfg.capital.reward_risk_ratio
-        if found.reward_risk < min_rr:
-            _reject(result, symbol, STAGE_REWARD_RISK,
-                    f"{found.label}: target is only {found.reward_risk:.2f}R "
-                    f"away, below the {min_rr:.1f}R floor")
-            continue
-
         candidates.append((stock, found, metrics))
 
     # ---- 7. earnings blackout ----
@@ -382,39 +377,95 @@ def scan(cfg, market=None, universe: list[Stock] | None = None,
         total, parts = _score(found, metrics, n, cfg)
         scored.append((stock, found, metrics, n, total, parts))
 
-    # ---- 9-10. rank, sector cap ----
-    scored.sort(key=lambda t: t[4], reverse=True)
+    # ---- 9-10. rank, sector cap, size ----
+    result.picks = rank_and_size(
+        scored, cfg, market, rate, today, verdicts=verdicts,
+        reject=lambda sym, stage, why: _reject(result, sym, stage, why))
+    result.capital_note = _capital_note(result.picks, cfg, market)
+    return result
+
+
+# ---------------- the decision stages, callable on their own ----------------
+#
+# Extracted from `scan()` so the BACKTESTER can run the identical gates over
+# historical bars instead of reimplementing them. A backtest that reimplements
+# the decision logic is measuring a different system, however carefully it is
+# copied - which is the same reason invariant #1 forbids `if backtest:` inside
+# a strategy. `scan()` above calls exactly these, so there is one implementation
+# to be wrong.
+
+def evaluate_symbol(symbol: str, df, benchmark, cfg, market):
+    """
+    Stages 3-6 for one symbol: tradeability, setup, reward:risk.
+
+    Returns `(found, metrics, rejection)` where `rejection` is a
+    `(stage, reason)` pair or None. Reading only the last bar of `df` is
+    `setup.detect`'s documented contract, which is what makes calling this on
+    a progressively truncated frame a legitimate backtest rather than a
+    look-ahead.
+    """
+    metrics, why_not = _metrics(df, benchmark, cfg, market)
+    if why_not:
+        return None, metrics, (STAGE_TRADEABILITY, why_not)
+
+    found, note = setup_mod.detect(symbol, df, cfg)
+    if found is None:
+        return None, metrics, (STAGE_SETUP, note or "no setup")
+
+    min_rr = cfg.capital.reward_risk_ratio
+    if found.reward_risk < min_rr:
+        return None, metrics, (
+            STAGE_REWARD_RISK,
+            f"{found.label}: target is only {found.reward_risk:.2f}R away, "
+            f"below the {min_rr:.1f}R floor")
+
+    return found, metrics, None
+
+
+def rank_and_size(scored, cfg, market, rate, today, verdicts=None,
+                  reject=None, top_n: int | None = None) -> list[SwingPick]:
+    """
+    Stages 9-10: rank on score, apply the sector cap and `top_n`, then size.
+
+    `scored` is `[(stock, found, metrics, news, total, parts)]`.
+    `reject(symbol, stage, reason)` is called for everything dropped, so the
+    caller's ledger still accounts for every symbol.
+    """
+    swing = cfg.swing
+    limit = swing.top_n if top_n is None else top_n
+    verdicts = verdicts or {}
+    reject = reject or (lambda *_: None)
+
+    scored = sorted(scored, key=lambda t: t[4], reverse=True)
     per_sector: dict[str, int] = {}
     picks: list[SwingPick] = []
 
     for stock, found, metrics, n, total, parts in scored:
-        if len(picks) >= swing.top_n:
-            _reject(result, stock.symbol, STAGE_SECTOR,
-                    f"ranked below the top {swing.top_n} (score {total:.3f})")
+        if len(picks) >= limit:
+            reject(stock.symbol, STAGE_SECTOR,
+                   f"ranked below the top {limit} (score {total:.3f})")
             continue
         taken = per_sector.get(stock.sector, 0)
         if taken >= swing.max_per_sector:
-            _reject(result, stock.symbol, STAGE_SECTOR,
-                    f"{stock.sector} already has {taken} pick - three tickets "
-                    f"in one sector is one bet, not three")
+            reject(stock.symbol, STAGE_SECTOR,
+                   f"{stock.sector} already has {taken} pick - three tickets "
+                   f"in one sector is one bet, not three")
             continue
 
         pick = _size(stock, found, metrics, n, total, parts,
                      verdicts.get(stock.symbol), cfg, today, market, rate)
         if pick is None:
             budget = cfg.capital.risk_inr(market.capital_pool)
-            _reject(result, stock.symbol, STAGE_SIZING,
-                    f"stop is {found.risk_points:,.2f} points wide - the "
-                    f"smallest tradeable size risks more than the "
-                    f"₹{budget:,.0f} budget")
+            reject(stock.symbol, STAGE_SIZING,
+                   f"stop is {found.risk_points:,.2f} points wide - the "
+                   f"smallest tradeable size risks more than the "
+                   f"₹{budget:,.0f} budget")
             continue
 
         per_sector[stock.sector] = taken + 1
         picks.append(pick)
 
-    result.picks = picks
-    result.capital_note = _capital_note(picks, cfg, market)
-    return result
+    return picks
 
 
 def _resolve_market(cfg, market):

@@ -7,6 +7,12 @@ forever. There is no supported way around it - Zerodha requires the interactive
 login for regulatory reasons. Any library promising otherwise is scraping the
 login form and will break, silently, at the worst possible moment.
 
+Every client this method hands out is wrapped in `ThrottledKite`, so Kite's
+published per-second ceilings are enforced in exactly one place - see
+`ratelimit.py` for why five scattered `time.sleep()` calls were not the same
+thing. The login dance below deliberately uses the raw client: it runs once a
+day and is on no hot path.
+
 The flow:
 
     1. Open login_url() in a browser, log in.
@@ -28,6 +34,7 @@ from pathlib import Path
 from typing import Optional
 
 from ..data.base import NotConfigured
+from .ratelimit import RateLimiter, ThrottledKite
 
 # Kite invalidates tokens in the early morning. Treat anything issued before
 # this hour on a previous calendar day as dead.
@@ -68,12 +75,17 @@ class KiteSession:
     """
 
     def __init__(self, api_key: str | None = None, api_secret: str | None = None,
-                 session_file: Path | str = SESSION_FILE):
+                 session_file: Path | str = SESSION_FILE,
+                 limiter: RateLimiter | None = None):
         self.api_key = (api_key or os.getenv("KITE_API_KEY", "")).strip()
         self.api_secret = (api_secret or os.getenv("KITE_API_SECRET", "")).strip()
         self.session_file = Path(session_file)
         self._kite = None
         self._cached: Optional[CachedSession] = None
+        #: ONE limiter per session, shared by every consumer of `client()`.
+        #: Per-session rather than a module global because the ceiling is per
+        #: API key - a test that builds two sessions is modelling two keys.
+        self.limiter = limiter or RateLimiter()
 
     # ---------------- credentials ----------------
 
@@ -153,9 +165,13 @@ class KiteSession:
 
         kc = self._new_client()
         kc.set_access_token(cached.access_token)
-        self._kite = kc
+        # Wrapped HERE and nowhere else. Every Kite call in this project comes
+        # through this method, so this one line throttles the chain, the feed,
+        # both history scripts, the option order path and the swing equity
+        # book at once - and anything added later, without it remembering to.
+        self._kite = ThrottledKite(kc, self.limiter)
         self._cached = cached
-        return kc
+        return self._kite
 
     @property
     def authenticated(self) -> bool:
