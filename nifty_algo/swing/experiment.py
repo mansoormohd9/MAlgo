@@ -167,6 +167,10 @@ class Cell:
     max_drawdown_r: float
     capital_blocks: int
     regime_blocks: int
+    #: Recorded because a run with settlement and one without are different
+    #: experiments that would otherwise be identical rows, and `read_ledger`
+    #: de-duplicates on (variant, fold, phase).
+    settle_days: int = 60
 
     @property
     def judgeable(self) -> bool:
@@ -184,11 +188,12 @@ class Cell:
             "capital_blocks": self.capital_blocks,
             "regime_blocks": self.regime_blocks,
             "judgeable": self.judgeable,
+            "settle_days": self.settle_days,
         }
 
 
 def _cell(v: Variant, window: bt.Window, phase: str,
-          result: bt.SwingBacktestResult) -> Cell:
+          result: bt.SwingBacktestResult, settle_days: int = 60) -> Cell:
     m = result.metrics
     start, end = ((window.train_start, window.train_end) if phase == "train"
                   else (window.test_start, window.test_end))
@@ -200,6 +205,7 @@ def _cell(v: Variant, window: bt.Window, phase: str,
         max_drawdown_r=m.max_drawdown_r,
         capital_blocks=result.day_stats.capital_blocks,
         regime_blocks=result.day_stats.regime_blocks,
+        settle_days=settle_days,
     )
 
 
@@ -255,6 +261,7 @@ def sweep(cfg: Config, market, bars: dict, benchmark=None, stocks=None,
           train_months: Optional[int] = None,
           test_months: Optional[int] = None,
           window_start: Optional[date] = None,
+          settle_days: int = 60,
           use_cache: bool = True,
           progress: Optional[Callable] = None) -> Sweep:
     """
@@ -319,8 +326,9 @@ def sweep(cfg: Config, market, bars: dict, benchmark=None, stocks=None,
                 result = bt.run(variant_cfg, market, bars, benchmark,
                                 stocks=stocks, start=lo, end=hi,
                                 scan_cache=cache,
-                                sessions_index=sessions_index)
-                out.cells.append(_cell(v, w, phase, result))
+                                sessions_index=sessions_index,
+                                settle_days=settle_days)
+                out.cells.append(_cell(v, w, phase, result, settle_days))
                 done += 1
     return out
 
@@ -346,8 +354,15 @@ def read_ledger(directory: str = "data/experiments") -> pd.DataFrame:
         return pd.DataFrame()
     frames = [pd.read_parquet(path).assign(source=path.name) for path in paths]
     frame = pd.concat(frames, ignore_index=True)
-    return frame.drop_duplicates(subset=["variant", "fold", "phase"],
-                                 keep="last").reset_index(drop=True)
+    # `settle_days` is part of the identity of a cell, not a detail of it: a
+    # run with the settlement tail and one without are different experiments
+    # over the same variant and fold. Leaving it out of the key made the
+    # deliberate bias-measurement run silently overwrite the good rows.
+    key = ["variant", "fold", "phase"]
+    if "settle_days" in frame.columns:
+        frame["settle_days"] = frame["settle_days"].fillna(60)
+        key.append("settle_days")
+    return frame.drop_duplicates(subset=key, keep="last").reset_index(drop=True)
 
 
 def report(frame: pd.DataFrame) -> None:
@@ -355,6 +370,17 @@ def report(frame: pd.DataFrame) -> None:
     if frame.empty:
         print("No sweep results found. Run the sweep first.")
         return
+
+    # Only the correctly-settled rows are reported. Rows from a
+    # `--settle-days 0` run exist to measure the boundary bias, and averaging
+    # them together with the real ones would bury it instead.
+    if "settle_days" in frame.columns and frame["settle_days"].nunique() > 1:
+        best = frame["settle_days"].max()
+        others = sorted(set(frame["settle_days"].unique()) - {best})
+        print(f"  ledger also holds rows at settle_days={others} - reporting "
+              f"settle_days={int(best)} only; use the ledger directly to "
+              f"compare them")
+        frame = frame[frame["settle_days"] == best]
 
     folds = sorted(frame["fold"].unique())
     # `source` exists only on a frame read back from parquet; a live sweep
@@ -455,6 +481,10 @@ def _main() -> None:                                       # pragma: no cover
                         help="directory for the parquet ledger")
     parser.add_argument("--no-cache", action="store_true",
                         help="re-scan for every variant (slow; proves the cache)")
+    parser.add_argument("--settle-days", type=int, default=60,
+                        help="sessions after a window closes in which its "
+                             "open trades may still finish; 0 reproduces the "
+                             "winner-deleting boundary bias, for measuring it")
     parser.add_argument("--report", action="store_true",
                         help="read the ledger and print it; run nothing")
     args = parser.parse_args()
@@ -489,6 +519,7 @@ def _main() -> None:                                       # pragma: no cover
 
     out = sweep(cfg, market, price_set.bars, price_set.benchmark,
                 stocks=stocks, variants=chosen, window_start=window_start,
+                settle_days=args.settle_days,
                 train_months=args.train_months, test_months=args.test_months,
                 use_cache=not args.no_cache,
                 # flush: without it Python buffers a redirected stdout

@@ -624,6 +624,37 @@ class SwingConfig:
 
 
 @dataclass
+class PortfolioConfig:
+    """
+    Which brokers this account actually uses, for `nifty_algo/portfolio/`.
+
+    THIS LIST IS A CLAIM ABOUT YOUR ACCOUNTS, and it decides how a missing
+    answer is read. A connector NOT in it is never called and never counted -
+    which is what keeps the registered-but-unimplemented IBKR stub from
+    marking every snapshot incomplete. A connector that IS in it and cannot
+    answer makes the snapshot incomplete, and portfolio percentages are then
+    withheld rather than computed against a partial book.
+
+    So adding "ibkr" here before it is implemented is not a no-op: it is you
+    saying "I hold things there", and every report will correctly refuse to
+    quote a weight until it can see them.
+    """
+    connectors: tuple = ("manual", "kite")
+    manual_path: str = "data/manual_positions.csv"
+
+    # Sessions of daily bars behind the correlation matrix and the beta
+    # figures in the risk report. ~1 trading year: long enough that a single
+    # earnings gap does not dominate, short enough to describe the regime you
+    # are actually in. The report prints the window and the sample size,
+    # because a correlation without an n is a decoration.
+    correlation_days: int = 250
+    #: Below this many overlapping sessions, a pair's correlation is reported
+    #: as unavailable rather than computed. Two names that share 12 bars will
+    #: happily produce a 0.9.
+    min_correlation_sessions: int = 60
+
+
+@dataclass
 class Config:
     capital: CapitalConfig = field(default_factory=CapitalConfig)
     instrument: InstrumentConfig = field(default_factory=InstrumentConfig)
@@ -638,6 +669,7 @@ class Config:
     alerts: AlertConfig = field(default_factory=AlertConfig)
     backtest: BacktestConfig = field(default_factory=BacktestConfig)
     swing: SwingConfig = field(default_factory=SwingConfig)
+    portfolio: PortfolioConfig = field(default_factory=PortfolioConfig)
 
 
 DEFAULT = Config()

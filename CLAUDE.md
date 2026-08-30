@@ -16,6 +16,8 @@ python -m nifty_algo.brief              # the day's frame + scored chain, CLI fo
 python -m nifty_algo.swing.scanner --market india|us|uk   # the swing book, headless
 python -m nifty_algo.swing.backtest --market india --years 3 --capital 100000   # does the swing book work?
 python -m nifty_algo.swing.experiment --market india --years 3 --capital 100000  # which rule set, chosen out-of-sample
+python -m nifty_algo.research macro --market india          # macro fact pack; --json is what a skill reads
+python -m nifty_algo.research risk  --market india --json   # portfolio risk fact pack
 python scripts/fetch_swing_history.py --market india --years 6  # deep daily bars for it
 python scripts/build_universe.py --market us   # rebuild data/us_halal.csv from SPUS+HLAL
 python scripts/build_universe.py --market uk   # rebuild data/ftse100.csv
@@ -24,7 +26,7 @@ python scripts/fetch_history.py         # real 5m NIFTY history (resumable)
 python scripts/fetch_vix.py             # India VIX, for SYNTHETIC_PREMIUM backtests
 ```
 
-Tests (569: 565 passing, 4 skipped; pytest, `pythonpath = . tests` so `nifty_algo` and the conftest helpers both import without an install step):
+Tests (617: 613 passing, 4 skipped; pytest, `pythonpath = . tests` so `nifty_algo` and the conftest helpers both import without an install step):
 
 ```bash
 pytest                                                     # the only run that counts as done
@@ -285,6 +287,77 @@ gates new longs on the benchmark being above its own moving average.
 `regime_ma_days = 0` disables it, which is how every result before it existed
 was produced. It fails closed: a missing or too-short benchmark blocks rather
 than passes.
+
+## Holdings, and the research briefings built on them
+
+`nifty_algo/portfolio/` answers "what do I own", broker-agnostically.
+`nifty_algo/research/` turns that plus market data into **fact packs** - JSON
+evidence a briefing is allowed to cite - and `.claude/skills/macro-brief/` and
+`.claude/skills/portfolio-risk/` write the prose from them. There is no LLM
+call in the Python; the arithmetic is deterministic and testable, and the
+judgment (Fed outlook, moat ratings, sector rotation) is handed over
+explicitly through `Section.judgment`.
+
+**`ConnectorResult.available` is the field that matters most in the whole
+package.** `BrokerTransport._read` returns an empty default when a broker read
+FAILS - right for a reconciler, catastrophic for a risk report, because an
+empty list read as "you hold nothing" produces no concentration, no
+correlation and no single-stock risk on a fully invested account. `available`
+defaults False, `unavailable()` demands a reason, and the Kite connector sets
+it from the delta in `read_failures` either side of the call. Regression:
+`test_a_failed_holdings_read_is_not_an_empty_portfolio`.
+
+**An incomplete snapshot withholds every percentage.**
+`PortfolioSnapshot.weight()` returns **None**, not a float, when any enabled
+connector failed or any currency would not convert. A share computed against a
+denominator that could not be established reads exactly like one that was, and
+it would be acted on. Absolute values still render - they are facts about what
+was seen.
+
+**A connector not in `PortfolioConfig.connectors` is never asked and never
+counted.** That list is a claim about your accounts, and it is what keeps the
+registered-but-unimplemented IBKR stub from marking every snapshot incomplete
+forever. Enabling `ibkr` before it is implemented is therefore not a no-op: it
+correctly makes every report refuse to quote a weight.
+
+**The research package never writes to the price cache.** `load_prices`
+re-downloads `history_days` (400) and **rewrites the parquet** on any cache
+miss, and `scripts/fetch_swing_history.py` deliberately puts six years in that
+same file. So `holdings_prices.bars_for` asks only for symbols already cached
+and names the rest, rather than silently truncating the history every backtest
+depends on.
+
+**A fact this build could not establish is `available=False` with a reason,
+never a blank and never a zero.** About a third of what these briefings ask
+for does not exist for Indian equities on any free source: **India publishes
+no short-interest disclosure at all**, insider dealing is a SEBI PIT filing
+rather than an API, institutional trend is the quarterly shareholding pattern,
+and the CPI/GDP/repo prints have no free machine endpoint (they come from
+`data/macro_manual.csv` if you keep one). Rendered as 0.0, every one of those
+reads as good news. `FactPack.unavailable()` is a top-level list in the JSON
+so the skills can check that rule without walking the tree.
+
+**Yields move in basis points, indices in percent.** `macro_series` carries
+`RATE` vs `LEVEL` per series and `factor_moves` differences the first and
+percent-changes the second. Percent-changing a yield makes a 10bp move at 0.5%
+look twenty times the same move at 5%, which would rank every rate sensitivity
+in the book by nothing but where yields happened to be.
+
+**The stress test is REPLAYED, not modelled.** `risk_report.episodes()` finds
+the benchmark's real peak-to-trough falls in the cached history and applies
+today's weights to what those names actually did, reporting `coverage_pct`
+alongside. No distribution is assumed: a parametric VaR on equity returns
+understates the tail by construction, because the days that matter are the
+ones a normal distribution says cannot happen. Two limits are printed above
+every result - the weights are today's, not the ones held then, and the cached
+universe is today's index, so the same survivorship distortion applies as in
+the swing backtest.
+
+**`exposure.portfolio_returns` renormalises per session rather than filling
+with zeroes.** A holding with no bar on an early session is excluded from that
+day's mean, not scored 0% at full weight - the latter damps the volatility,
+the percentiles and the worst session by exactly the missing weight, in the
+reassuring direction, with no error anywhere.
 
 ## Delivery charges are not option charges
 

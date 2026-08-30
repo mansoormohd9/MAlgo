@@ -14,11 +14,21 @@ Like the rest of `ui/`, this page decides nothing. `swing/crossborder.py` does
 the arithmetic and `swing/holdings.py` reads the funds' books; this lays them
 out and states the caveats.
 
-THE INPUTS ARE TYPED IN, NOT FETCHED. There is no broker connection in this
-build - the decision was screener-only, manual orders - so balances come from
-you. They persist in session state for the life of the app run and are never
-written to disk, because a file of account balances is not something this repo
-should be creating without being asked.
+WHERE THE HOLDINGS COME FROM. `nifty_algo/portfolio/` reads every enabled
+connector - Zerodha for the Indian cash book, a hand-kept CSV for everything
+no API reports, IBKR registered and not yet implemented - and the strip at the
+top of this page says which of them actually answered. That distinction is
+load-bearing: a broker read that FAILED returns an empty list, and an empty
+list read as "you hold nothing" is a portfolio page showing no exposure on a
+fully invested account.
+
+THE FUND BALANCES ARE STILL TYPED IN, and still never written to disk. No API
+reaches the foreign broker holding SPUS, HLAL and the UCITS, so they come from
+you, they live in session state for this app run only, and they are handed to
+the portfolio layer as the manual connector's in-memory rows - a file of
+account balances is not something this repo should create without being asked.
+Put them in `data/manual_positions.csv` (gitignored) if you would rather they
+persisted and reached the research briefings.
 """
 from __future__ import annotations
 
@@ -31,6 +41,8 @@ from .theme import get_palette
 from ..swing import crossborder as crossborder_mod
 from ..swing import fx as fx_mod
 from ..swing import holdings as holdings_mod
+from ..portfolio import aggregate as portfolio_mod
+from ..portfolio.base import ETF, Position
 
 HOLDINGS_CSV = "data/etf_holdings.csv"
 
@@ -74,6 +86,7 @@ def render() -> None:
     _capital_pool(cfg, rate, p)
     values = _inputs(p)
 
+    _connectors(cfg, values, p)
     _estate_meter(values, p)
     _domicile_comparison(p)
     _overlap_table(values, p)
@@ -136,9 +149,11 @@ def _capital_pool(cfg, rate, p) -> None:
 # ---------------------------------------------------------------- inputs
 
 def _inputs(p) -> dict:
-    st.subheader("What you hold")
-    st.caption("Entered by hand — this build has no broker connection. Values "
-               "live for this app run only and are never written to disk.")
+    st.subheader("What you hold abroad")
+    st.caption("Entered by hand — no API reaches the broker holding these. "
+               "Values live for this app run only and are never written to "
+               "disk; put them in data/manual_positions.csv to persist them "
+               "and have the research briefings see them.")
 
     values: dict[str, float] = {}
     cols = st.columns(len(FUNDS) + 1)
@@ -335,3 +350,77 @@ def _reporting(p) -> None:
         st.caption("Sources: " + " · ".join(
             f"[{label}]({url})"
             for label, url in crossborder_mod.SOURCES.values()))
+
+
+# ---------------------------------------------------------------- connectors
+
+def _typed_positions(values: dict) -> list[Position]:
+    """
+    The fund balances above, as portfolio positions.
+
+    In memory only - handed to the manual connector as `extra` rather than
+    written anywhere, which keeps this page's promise while still letting the
+    look-through and the risk briefing see what you hold.
+    """
+    out: list[Position] = []
+    for key, label, _domicile, _situs, _note in FUNDS:
+        amount = float(values.get(key, 0.0) or 0.0)
+        if amount <= 0:
+            continue
+        out.append(Position(
+            key=f"us:{key}", symbol=key, market="us", quantity=1.0,
+            average_price=0.0, last_price=amount, currency="USD",
+            asset_class=ETF, source="manual", account="typed", name=label))
+    return out
+
+
+def _connectors(cfg, values, p) -> None:
+    """
+    Which sources answered, and which could not.
+
+    At the top of the holdings section rather than at the bottom, because
+    every figure below is a figure about what was READ. A source that failed
+    silently would make this page understate the account, and understating an
+    account is the direction that reads as reassurance.
+    """
+    st.subheader("Where these holdings come from")
+    snapshot = portfolio_mod.load(
+        cfg, manual={"extra": _typed_positions(values)})
+
+    st.dataframe(pd.DataFrame([{
+        "Source": r.source,
+        "Answered": "yes" if r.available else "NO",
+        "Positions": len(r.positions),
+        "Detail": r.note,
+    } for r in snapshot.results]), width="stretch", hide_index=True)
+
+    if not snapshot.complete:
+        banner(
+            "<b>This account is only partly readable, so portfolio "
+            "percentages are withheld.</b> A share computed against a "
+            "denominator we could not establish reads exactly like one that "
+            "was, and it would be acted on. " + " ".join(snapshot.caveats()),
+            p.warning, "⚠")
+    else:
+        banner(f"Every enabled connector answered. {snapshot.note()}",
+               p.good, "▣")
+
+    if snapshot.positions:
+        st.dataframe(pd.DataFrame([{
+            "Symbol": pos.symbol,
+            "Market": pos.market,
+            "Qty": pos.quantity,
+            "Last": pos.last_price,
+            "Currency": pos.currency,
+            "Value (₹)": round(snapshot.value_inr.get(pos.key, 0.0), 0),
+            "Source": pos.source,
+        } for pos in sorted(snapshot.positions,
+                            key=lambda x: -snapshot.value_inr.get(x.key, 0.0))]),
+            width="stretch", hide_index=True)
+
+    st.caption(
+        f"Enabled connectors: `{'`, `'.join(cfg.portfolio.connectors)}` "
+        f"(`PortfolioConfig.connectors`). One that is listed and cannot answer "
+        f"makes the snapshot incomplete; one that is not listed is never asked "
+        f"and never counted — which is what keeps the unimplemented IBKR "
+        f"connector from marking every snapshot incomplete forever.")

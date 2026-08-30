@@ -100,6 +100,12 @@ class Market:
     price_divisor: float = 1.0        # 100.0 where the exchange quotes minor
                                       # units (LSE pence). Applied ONCE, at
                                       # ingest, so nothing downstream repeats it.
+    # What Yahoo appends to a bare exchange ticker. The universe CSVs already
+    # carry a `yf_ticker` per row and remain authoritative; this is the rule
+    # for a symbol that is NOT in the universe file - a holding in a mid cap,
+    # say - so the research reports can price what you actually own rather
+    # than only what the scanner screens.
+    yf_suffix: str = ""
 
     # --- tradeability floors, in this market's own currency ---
     min_price: float = 0.0
@@ -129,6 +135,16 @@ class Market:
     def turnover(self, amount: float) -> str:
         return f"{self.symbol}{amount:,.1f} {self.turnover_unit}".strip()
 
+    def yf_ticker(self, symbol: str) -> str:
+        """
+        Yahoo's name for a bare exchange symbol.
+
+        The universe CSV's `yf_ticker` column wins wherever it exists - it is
+        hand-maintained and handles the names that do not follow the rule.
+        This is the fallback for a symbol you HOLD but do not screen.
+        """
+        return f"{symbol.upper()}{self.yf_suffix}"
+
     def qualified(self, symbol: str) -> str:
         """
         `{market}:{SYMBOL}` - the key for anything cached or journalled.
@@ -151,7 +167,7 @@ def default_markets() -> dict[str, Market]:
             benchmark_ticker="^NSEI", benchmark_label="Nifty 50",
             currency="INR", symbol="\u20b9", fx_pair=None,
             capital_pool=POOL_SWING_IN, domestic=True, allow_fractional=False,
-            price_divisor=1.0,
+            price_divisor=1.0, yf_suffix=".NS",
             min_price=50.0,
             # 20-day average traded value. Rupees crore, as every Indian
             # screen quotes it.
@@ -164,7 +180,7 @@ def default_markets() -> dict[str, Market]:
             benchmark_ticker="^GSPC", benchmark_label="S&P 500",
             currency="USD", symbol="$", fx_pair="USDINR=X",
             capital_pool=POOL_FOREIGN, domestic=False, allow_fractional=True,
-            price_divisor=1.0,
+            price_divisor=1.0, yf_suffix="",
             # A US large cap under $5 has usually been left for dead; the
             # universe is S&P 500 constituents, so this floor rarely bites and
             # exists to catch a delisting in progress.
@@ -179,7 +195,7 @@ def default_markets() -> dict[str, Market]:
             currency="GBP", symbol="\u00a3", fx_pair="GBPINR=X",
             capital_pool=POOL_FOREIGN, domestic=False, allow_fractional=False,
             # THE PENCE TRAP. See the module docstring.
-            price_divisor=100.0,
+            price_divisor=100.0, yf_suffix=".L",
             min_price=1.0,
             min_avg_turnover=3.0, turnover_unit="m", turnover_divisor=1e6,
             taxonomy=TAXONOMY_GICS,
