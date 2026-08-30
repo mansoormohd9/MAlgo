@@ -11,7 +11,7 @@ excellent.
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import numpy as np
 import pandas as pd
@@ -283,7 +283,23 @@ def test_metrics_come_from_the_option_books_implementation(result):
     m = result.metrics
 
     assert m.trades == len(result.trades)
-    assert m.breakeven_win_rate == pytest.approx(1 / 3, abs=0.01)  # 2:1 payoff
+
+    # THE YARDSTICK IS REALISED, NOT DESIGNED. `target_breakeven_win_rate` is
+    # the 1/(1+R:R) the config aims at; `breakeven_win_rate` is the win rate
+    # the payoff that actually happened had to clear. This assertion used to
+    # read `breakeven_win_rate == 1/3`, which is what let a 22.7% win rate be
+    # compared against 33.3% when the realised figure was 25.4%.
+    assert m.target_breakeven_win_rate == pytest.approx(1 / 3, abs=0.01)
+    rs = [t.r_multiple for t in result.trades]
+    wins = [r for r in rs if r > 0]
+    losses = [-r for r in rs if r < 0]
+    if wins and losses:
+        avg_win = sum(wins) / len(wins)
+        avg_loss = sum(losses) / len(losses)
+        assert m.avg_win_r == pytest.approx(avg_win, rel=1e-6)
+        assert m.avg_loss_r == pytest.approx(avg_loss, rel=1e-6)
+        assert m.breakeven_win_rate == pytest.approx(
+            avg_loss / (avg_win + avg_loss), rel=1e-6)
     assert m.total_r == pytest.approx(
         sum(t.r_multiple for t in result.trades), rel=1e-6)
     assert sum(x.trades for x in result.by_setup.values()) == m.trades
@@ -302,3 +318,202 @@ def test_a_partial_exit_is_charged_two_sell_days_of_dp_fee(result):
     for t in scaled:
         plain = c.friction(t.entry, t.exit_price, t.quantity)
         assert t.friction == pytest.approx(plain + c.dp_charge)
+
+
+# ------------------------------------------------------- the yardstick itself
+
+class _R:
+    """The three fields `compute_metrics` actually reads."""
+
+    def __init__(self, r: float, strategy: str = "breakout"):
+        self.r_multiple = r
+        self.bars_held = 1
+        self.net_pnl = 0.0
+        self.strategy = strategy
+
+
+def test_breakeven_is_the_payoff_that_happened_not_the_one_configured():
+    """
+    Three +2R wins and seven -0.5R losses need 20%, not 33%.
+
+    This is the shape the ladder actually produces - it shifts to breakeven at
+    +1R, so most losers come in well under a full R - and judging it against
+    1/(1+R:R) overstates the shortfall every time. The India book cleared
+    22.7% against a realised 25.4% while the report printed 33.3%.
+    """
+    from nifty_algo.backtest import compute_metrics
+
+    m = compute_metrics([_R(2.0)] * 3 + [_R(-0.5)] * 7, reward_risk=2.0)
+
+    assert m.avg_win_r == pytest.approx(2.0)
+    assert m.avg_loss_r == pytest.approx(0.5)          # magnitude, unsigned
+    assert m.breakeven_win_rate == pytest.approx(0.2)
+    assert m.target_breakeven_win_rate == pytest.approx(1 / 3)
+    assert m.win_rate == pytest.approx(0.3)            # clears realised, not design
+
+
+def test_a_one_sided_sample_does_not_fall_back_to_the_design_figure():
+    """
+    No winners means no win rate clears it; no losers means any does.
+
+    Both are the honest reading. Quietly substituting the config figure for a
+    sample that cannot support one is how the wrong yardstick got here in the
+    first place.
+    """
+    from nifty_algo.backtest import compute_metrics
+
+    assert compute_metrics([_R(-1.0)] * 5).breakeven_win_rate == 1.0
+    assert compute_metrics([_R(1.0)] * 5).breakeven_win_rate == 0.0
+
+    # No trades at all: nothing realised, so no realised yardstick is offered.
+    empty = compute_metrics([])
+    assert empty.breakeven_win_rate == 0.0
+    assert empty.target_breakeven_win_rate == pytest.approx(1 / 3)
+
+
+def test_exit_buckets_separate_a_full_stop_from_a_breakeven_scratch(result):
+    """
+    `outcome` calls both of them "stop"; they are opposite facts.
+
+    A trade that reached +1R, moved its stop to breakeven and died there cost
+    nothing and was also a winner the book failed to keep. Counting it with
+    the -1R stops is how the most likely cause of a low win rate stays
+    invisible.
+    """
+    buckets = result.exit_buckets
+
+    assert set(buckets) == {label for label, _, _ in bt.EXIT_BUCKETS}
+    assert sum(buckets.values()) == len(result.trades)
+
+    stopped = [t for t in result.trades if t.r_multiple < -0.5]
+    scratched = [t for t in result.trades if -0.5 <= t.r_multiple < 0.5]
+    assert buckets["Stopped (< -0.5R)"] == len(stopped)
+    assert buckets["Scratched (-0.5..+0.5R)"] == len(scratched)
+
+
+# ------------------------------------------------- walk-forward and the cache
+
+def test_folds_tile_the_period_once_with_no_gaps_and_no_overlaps():
+    """
+    Every session after the first train window is scored exactly once.
+
+    Overlapping test windows would count the same trade twice and make a
+    lucky month look like a repeatable one; a gap would quietly drop the
+    months that happened to be worst.
+    """
+    from datetime import date
+
+    windows = bt.fold_windows(date(2023, 1, 1), date(2026, 1, 1),
+                              train_months=6, test_months=2)
+
+    assert windows
+    for w in windows:
+        assert w.train_start < w.train_end < w.test_start <= w.test_end
+    for earlier, later in zip(windows, windows[1:]):
+        # The next test window starts the day the previous one ended.
+        assert later.test_start == earlier.test_end + timedelta(days=1)
+    assert windows[-1].test_end <= date(2026, 1, 1)
+
+
+def test_fold_windows_refuses_a_zero_length_split():
+    from datetime import date
+
+    with pytest.raises(ValueError):
+        bt.fold_windows(date(2023, 1, 1), date(2024, 1, 1), 6, 0)
+
+
+def test_a_replayed_variant_is_identical_to_a_direct_run(cfg, market, world):
+    """
+    THE guard on the scan cache. Same config, cache or no cache, same trades.
+
+    The cache exists so a sweep of variants is affordable, and it earns that
+    only if replaying it cannot change an answer. If this ever fails, every
+    experiment result built on the cache is void - the failure mode is not a
+    crash but a plausible table of numbers describing a book nobody ran.
+    """
+    bars, bench = world
+
+    direct = bt.run(cfg, market, bars, bench)
+
+    cache = bt.ScanCache(signature=bt.scan_signature(cfg, market))
+    first = bt.run(cfg, market, bars, bench, scan_cache=cache)
+    assert cache.sessions_cached > 0
+    replayed = bt.run(cfg, market, bars, bench, scan_cache=cache)
+
+    def fingerprint(r):
+        return [(t.symbol, t.entry_time, t.exit_time, t.entry, t.exit_price,
+                 t.quantity, round(t.r_multiple, 12)) for t in r.trades]
+
+    assert fingerprint(first) == fingerprint(direct)
+    assert fingerprint(replayed) == fingerprint(direct)
+    assert replayed.metrics.expectancy_r == direct.metrics.expectancy_r
+
+
+def test_a_cache_from_different_scan_parameters_is_refused(cfg, market, world):
+    """
+    A stale scan does not raise on its own - it answers the wrong question
+    fluently. So the mismatch has to raise here, at the only point where it
+    is still detectable.
+    """
+    bars, bench = world
+    cache = bt.ScanCache(signature=bt.scan_signature(cfg, market))
+    bt.run(cfg, market, bars, bench, scan_cache=cache)
+
+    cfg.swing.swing_atr_stop_multiple = 2.5      # changes every stop, and so
+    cfg.swing.target_max_atr = 6.0               # every R:R and every ranking
+    with pytest.raises(ValueError, match="scan cache"):
+        bt.run(cfg, market, bars, bench, scan_cache=cache)
+
+
+def test_ladder_parameters_do_not_invalidate_a_scan(cfg, market):
+    """
+    The whole point of the split: the ladder runs after the scan, so a
+    breakeven-shift or trail experiment must be able to reuse one pass.
+    """
+    before = bt.scan_signature(cfg, market)
+    cfg.swing.trail_atr_multiple = 3.0
+    cfg.swing.partial_exit_fraction = 0.25
+    cfg.swing.top_n = 1
+    cfg.swing.max_open_risk_r = 1.0
+    assert bt.scan_signature(cfg, market) == before
+
+    cfg.swing.ema_fast = 10                       # ...but a setup input does
+    assert bt.scan_signature(cfg, market) != before
+
+
+def test_a_window_carries_its_trades_to_the_exit_instead_of_dropping_them(
+        cfg, market, world):
+    """
+    THE walk-forward bias. A position open when the window closes used to be
+    deleted from the statistics, and what is open at any moment is not a
+    random sample: losers stop out in days, winners trail for weeks. Cutting
+    at the boundary therefore removes winners preferentially and makes every
+    variant look worse than it is - measured at about 0.2R on the India sweep.
+
+    Settling must add trades, never remove them, and must not let the window
+    open anything new.
+    """
+    bars, bench = world
+    sessions = bt.all_sessions(bars)
+    cut = sessions[len(sessions) // 2].date()
+
+    dropped = bt.run(cfg, market, bars, bench, end=cut, settle_days=0)
+    settled = bt.run(cfg, market, bars, bench, end=cut, settle_days=60)
+
+    assert settled.metrics.trades >= dropped.metrics.trades
+    assert len(settled.warnings) <= len(dropped.warnings)
+
+    # Every trade the truncated run scored is scored identically by the
+    # settled one - settlement finishes trades, it does not re-run them.
+    def by_key(result):
+        return {(t.symbol, t.entry_time): round(t.r_multiple, 12)
+                for t in result.trades}
+
+    short, long = by_key(dropped), by_key(settled)
+    assert set(short) <= set(long)
+    for key, r in short.items():
+        assert long[key] == r
+
+    # And nothing was ENTERED after the window closed.
+    for t in settled.trades:
+        assert t.entry_time.date() <= cut

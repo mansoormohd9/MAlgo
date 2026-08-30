@@ -37,6 +37,11 @@ from ..signals import (atr, build_levels, close_position_in_range,
 
 LONG = "long"
 
+#: The archetypes, in the order they are tried. `cfg.swing.enabled_setups`
+#: selects from these by key - a config field rather than an argument, so the
+#: live scanner and the backtest cannot be running different subsets.
+BUILDERS: tuple = ()          # filled at the bottom, once the builders exist
+
 
 @dataclass
 class SwingSetup:
@@ -95,7 +100,9 @@ def detect(symbol: str, df: pd.DataFrame, cfg) -> tuple[SwingSetup | None, str]:
 
     candidates: list[SwingSetup] = []
     notes: list[str] = []
-    for builder in (_breakout, _pullback, _squeeze, _reclaim):
+    for key, builder in BUILDERS:
+        if key not in cfg.swing.enabled_setups:
+            continue
         found, note = builder(symbol, df, ctx, cfg)
         if found:
             candidates.append(found)
@@ -440,3 +447,14 @@ def _quality(ctx: dict, base: float, touches: int) -> float:
     score += min(0.10, 0.03 * max(0, touches - 1))
     score += 0.05 * min(1.0, ctx["close_position"])
     return round(min(1.0, score), 3)
+
+
+# The tuple is assembled here rather than above because the builders have to
+# exist first. Order is preserved for reproducibility: `detect` sorts by
+# quality and ties resolve by whichever was appended first.
+BUILDERS = (
+    ("breakout", _breakout),
+    ("pullback", _pullback),
+    ("squeeze", _squeeze),
+    ("reclaim", _reclaim),
+)

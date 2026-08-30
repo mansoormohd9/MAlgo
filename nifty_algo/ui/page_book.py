@@ -355,16 +355,24 @@ def _performance(book, bars, cfg, p) -> None:
     st.markdown("#### How the trades you took have performed")
     last_prices = {t.symbol: _last(bars, t.symbol) or 0.0 for t in book.open}
     perf = book_mod.performance(book, last_prices)
-    breakeven = 1.0 / (1.0 + cfg.capital.reward_risk_ratio)
+    # The DESIGN figure, passed as a fallback only: `headline` uses the payoff
+    # this book actually realised once enough trades have closed to have one,
+    # and says which of the two it is showing.
+    design_breakeven = 1.0 / (1.0 + cfg.capital.reward_risk_ratio)
 
-    st.caption(perf.headline(breakeven))
+    st.caption(perf.headline(design_breakeven))
     if not perf.trades and not perf.open_positions:
         return
 
     c = st.columns(5)
     c[0].metric("Closed", perf.trades)
+    yard, basis = perf.yardstick(design_breakeven)
     c[1].metric("Win rate", f"{perf.win_rate:.0%}",
-                help=f"Breakeven at this reward:risk is {breakeven:.0%}.")
+                help=(f"Breakeven is {yard:.0%} ({basis}). The realised figure "
+                      f"comes from the payoff these trades actually produced; "
+                      f"the design figure is what a "
+                      f"{cfg.capital.reward_risk_ratio:.0f}:1 ratio would imply "
+                      f"if every trade ran to target."))
     c[2].metric("Expectancy", f"{perf.expectancy_r:+.2f}R")
     c[3].metric("Realised", f"₹{perf.realised_inr:+,.0f}")
     c[4].metric("Unrealised", f"₹{perf.unrealised_inr:+,.0f}")

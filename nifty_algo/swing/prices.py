@@ -333,12 +333,23 @@ def relative_strength(stock: pd.DataFrame, benchmark: pd.DataFrame,
     """
     if benchmark is None or len(stock) < days + 1 or len(benchmark) < days + 1:
         return None
-    joined = pd.concat([stock["close"], benchmark["close"]], axis=1,
-                       join="inner").dropna()
-    joined.columns = ["stock", "bench"]
-    if len(joined) < days + 1:
+
+    # Index intersection rather than `pd.concat(..., join="inner").dropna()`.
+    # Identical semantics - inner join aligns on the shared index, dropna
+    # removes rows where either close is missing - and materially cheaper,
+    # because concat builds a whole DataFrame out of two 1,300-row series to
+    # answer a question about the last 22 of them. The backtest calls this
+    # twice per symbol per session; it was a fifth of the scan's cost.
+    shared = stock.index.intersection(benchmark.index)
+    if len(shared) < days + 1:
         return None
-    window = joined.iloc[-(days + 1):]
-    s_ret = window["stock"].iloc[-1] / window["stock"].iloc[0] - 1.0
-    b_ret = window["bench"].iloc[-1] / window["bench"].iloc[0] - 1.0
+    s = stock["close"].reindex(shared)
+    b = benchmark["close"].reindex(shared)
+    keep = s.notna().to_numpy() & b.notna().to_numpy()
+    if int(keep.sum()) < days + 1:
+        return None
+    s_vals = s.to_numpy()[keep][-(days + 1):]
+    b_vals = b.to_numpy()[keep][-(days + 1):]
+    s_ret = s_vals[-1] / s_vals[0] - 1.0
+    b_ret = b_vals[-1] / b_vals[0] - 1.0
     return float(s_ret - b_ret)

@@ -14,7 +14,8 @@ streamlit run app.py                    # the console (7 pages)
 python -m nifty_algo.run_live --provider kite --telegram   # headless alerts, never places an order
 python -m nifty_algo.brief              # the day's frame + scored chain, CLI form of the Daily brief page
 python -m nifty_algo.swing.scanner --market india|us|uk   # the swing book, headless
-python -m nifty_algo.swing.backtest --market india --years 3   # does the swing book work?
+python -m nifty_algo.swing.backtest --market india --years 3 --capital 100000   # does the swing book work?
+python -m nifty_algo.swing.experiment --market india --years 3 --capital 100000  # which rule set, chosen out-of-sample
 python scripts/fetch_swing_history.py --market india --years 6  # deep daily bars for it
 python scripts/build_universe.py --market us   # rebuild data/us_halal.csv from SPUS+HLAL
 python scripts/build_universe.py --market uk   # rebuild data/ftse100.csv
@@ -23,7 +24,7 @@ python scripts/fetch_history.py         # real 5m NIFTY history (resumable)
 python scripts/fetch_vix.py             # India VIX, for SYNTHETIC_PREMIUM backtests
 ```
 
-Tests (544: 540 passing, 4 skipped; pytest, `pythonpath = . tests` so `nifty_algo` and the conftest helpers both import without an install step):
+Tests (569: 565 passing, 4 skipped; pytest, `pythonpath = . tests` so `nifty_algo` and the conftest helpers both import without an install step):
 
 ```bash
 pytest                                                     # the only run that counts as done
@@ -45,6 +46,12 @@ four steps, in order:
 2. **Assume the solution is wrong** - re-read the diff and write down a concrete reason it is broken, with a `file:line` and the input that breaks it, *before* any reason it is right. Every failure this repo has actually suffered was plausible rather than loud.
 3. **Backtest if the traded path moved** - `swing/` or `signals.py` -> the swing backtest; `strategy.py` / `risk.py` / `positions.py` / `governor.py` -> the option backtest, which has no CLI (the Backtest page, or `Backtester(cfg).run(bars)` in process). UI, broker and script changes are not backtestable; say so rather than skipping quietly.
 4. **Report** what ran, what failed, what was not backtestable, and any test you modified.
+
+If the change is meant to *improve* something rather than fix it, step 3b also
+applies: name the metric, the baseline and the out-of-sample window **before**
+writing the change, derive every yardstick from trades rather than config, and
+choose between variants with `python -m nifty_algo.swing.experiment`, which
+selects on a train window and scores on the test window after it.
 
 ## The two books
 
@@ -204,6 +211,80 @@ below the next session's **open** (a gap through the trigger fills at the
 open), and total deployment never exceeds the pot - checked against the
 **fill**, not the planned entry, because a gap-up otherwise deploys money the
 account does not have.
+
+**The pot is part of the experiment.** `swing_capital_inr` defaults to 0 and a
+zero pot sizes every ticket to zero, so a run without `--capital` reports "no
+trades" and reads like tight gates. At Rs 1,00,000 the India run refuses **795
+entries for want of cash against 282 taken** - the pot decides *which* trades
+the book gets, not merely their size, so two runs at different `--capital` are
+two different experiments.
+
+## Choosing between rule sets: the yardstick and the folds
+
+**The breakeven win rate is derived from the trades, not from the config.**
+`compute_metrics` computes it as `avg_loss / (avg_win + avg_loss)` and keeps
+the design figure `1/(1+R:R)` beside it as `target_breakeven_win_rate`. They
+are ten points apart on the current book: the ladder shifts to breakeven at
++1R, so it produces small losses and medium wins rather than 2:1 trades, and
+judging it against 33.3% turned a 2.7-point miss into an apparent 10.6-point
+rout. `book.Performance.yardstick()` does the same for the live book and falls
+back to the design figure - saying so - under
+`MIN_TRADES_FOR_REALISED_BREAKEVEN`.
+
+**`swing/backtest.run()` is one in-sample pass; `fold_windows()` and
+[experiment.py](nifty_algo/swing/experiment.py) are how a choice gets made.**
+Variants are selected on a train window and scored on the test window that
+follows, because picking the best of eight variants on the data that measured
+them is fitting, not evidence. The out-of-sample column is the result; the
+train-test gap is how much of a variant was fitting.
+
+**`ScanCache` makes that affordable, and refuses to be wrong quietly.**
+`evaluate_symbol` is a pure function of (symbol, bars to date, scan config,
+market) - it does not read the book - so one scan pass serves every variant
+that only changes the ladder, the regime gate or the capital rules. The
+duplicate-name filter moves to the consumer, which is what makes this safe.
+`scan_signature()` hashes every `SwingConfig` field **except** an explicit
+book-only list, so a new field invalidates the cache by default; a mismatch
+**raises** rather than falling back, because a stale scan answers a different
+question fluently. `test_a_replayed_variant_is_identical_to_a_direct_run` is
+the guard.
+
+**Budget the sweep by SIGNATURE GROUP, not by variant count.** Measured on the
+India universe (98 symbols, 1355 sessions): one scanned session costs ~3.6s, so
+a full pass is **~80 minutes**. Variants sharing a scan signature share that
+one pass; each variant that changes the signals (`stopwide`, `breakoutonly`,
+`pullbackonly`) adds another. Seven cache-sharing variants cost about what one
+costs; running all ten in a single invocation costs four passes. The cost is
+`setup.detect` recomputing every indicator over the whole truncated frame on
+every session - O(n^2) in bars, and not fixable without bounding the frame,
+which would change `build_levels` and is a behaviour change rather than an
+optimisation. Two exact wins have already been taken: `relative_strength` uses
+an index intersection rather than `pd.concat`, and the ranking-only metrics
+(RS, 52-week position, volume ratio) are computed by `scanner._enrich` **only
+for symbols that pass the gates** - they score, they never reject, and paying
+for the ranking of 95 names in 100 that had no setup was a third of the cost.
+
+**`--years` names the TEST WINDOW, not the fetch.** It used to set
+`history_days` only, so a run labelled "3 years" scored every session the
+parquet held - `fetch_swing_history` pulls six, and the India runs were
+actually 1355 sessions, about 5.4 years. Both CLIs now pass a window start to
+`run()`; the older bars stay loaded as warm-up, because trimming the bars
+would fix the label and score the first sessions on half-converged EMAs. The
+swing backtest also prints its true date range above the headline now - a
+result that cannot say which period it covers is not a result.
+
+**Anything long-running must be unbuffered end to end.** `python -u` alone is
+not enough: a `| grep` in the pipeline buffers too, and the first attempt at
+this sweep ran for 101 CPU-minutes having written zero bytes. Use `python -u
+... | grep --line-buffered`, and the CLIs pass `flush=True` on their progress
+prints.
+
+**The regime filter is off by default.** `swing/market_regime.py` (not
+`regime.py` - that one classifies an intraday session for the option book)
+gates new longs on the benchmark being above its own moving average.
+`regime_ma_days = 0` disables it, which is how every result before it existed
+was produced. It fails closed: a missing or too-short benchmark blocks rather
+than passes.
 
 ## Delivery charges are not option charges
 

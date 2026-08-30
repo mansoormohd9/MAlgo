@@ -49,8 +49,9 @@ book cannot disagree about it.
 """
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, timedelta
 from typing import Callable, Optional
 
 import numpy as np
@@ -59,6 +60,7 @@ import pandas as pd
 from ..backtest import Metrics, compute_metrics
 from ..config import Config
 from ..positions import ExitKind, ExitLadder
+from . import market_regime as regime_mod
 from . import markets as markets_mod
 from . import news as news_mod
 from . import scanner as scanner_mod
@@ -121,6 +123,10 @@ class SwingDayStats:
     avg_deployed_inr: float = 0.0
     heat_blocks: int = 0           # entries refused by the open-risk cap
     capital_blocks: int = 0        # entries refused for want of cash
+    regime_blocks: int = 0         # days the regime gate refused an entry
+                                   # that had room and heat to be taken - not
+                                   # every day the market was below its
+                                   # average, because a full book never asked
     peak_deployed_inr: float = 0.0
 
     def as_dict(self) -> dict:
@@ -134,7 +140,41 @@ class SwingDayStats:
             "Peak deployed": f"₹{self.peak_deployed_inr:,.0f}",
             "Entries blocked by heat cap": self.heat_blocks,
             "Entries blocked by cash": self.capital_blocks,
+            "Entry days blocked by regime": self.regime_blocks,
         }
+
+
+#: Where a trade actually ended, in R. `outcome` cannot answer this: `_close`
+#: maps every ExitKind.STOPPED_OUT to the word "stop", so a full -1R stop and
+#: a 0R exit at a stop already shifted to breakeven are the same string. They
+#: are opposite facts about the ladder. The boundaries are in R because that
+#: is the only unit both books share.
+EXIT_BUCKETS: tuple[tuple[str, float, float], ...] = (
+    ("Stopped (< -0.5R)", float("-inf"), -0.5),
+    ("Scratched (-0.5..+0.5R)", -0.5, 0.5),
+    ("Small win (+0.5..+1.5R)", 0.5, 1.5),
+    ("Target zone (+1.5..+2.5R)", 1.5, 2.5),
+    ("Runner (> +2.5R)", 2.5, float("inf")),
+)
+
+
+def exit_buckets(trades: list["SwingTrade"]) -> dict[str, int]:
+    """
+    How the ladder ended each trade, bucketed by realised R.
+
+    The bucket that matters is `Scratched`: those are trades that reached +1R,
+    moved the stop to breakeven, and then died there. They cost nothing, and
+    they are also the winners the book was supposed to have - a book whose win
+    rate sits just under its breakeven is usually losing them here, and no
+    other field in the result says so.
+    """
+    counts = {label: 0 for label, _, _ in EXIT_BUCKETS}
+    for t in trades:
+        for label, low, high in EXIT_BUCKETS:
+            if low <= t.r_multiple < high:
+                counts[label] += 1
+                break
+    return counts
 
 
 @dataclass
@@ -149,6 +189,14 @@ class SwingBacktestResult:
     start: Optional[date] = None
     end: Optional[date] = None
     symbols: int = 0
+
+    @property
+    def exit_buckets(self) -> dict[str, int]:
+        return exit_buckets(self.trades)
+
+    @property
+    def partials_banked(self) -> int:
+        return sum(1 for t in self.trades if t.partial_banked)
 
     @property
     def equity_curve_r(self) -> pd.Series:
@@ -166,7 +214,7 @@ class SwingBacktestResult:
             return "No trades. Either the gates are too tight or the window is too short."
         verdict = ("above" if m.win_rate > m.breakeven_win_rate else "below")
         return (f"{m.trades} trades · {m.win_rate:.0%} won ({verdict} the "
-                f"{m.breakeven_win_rate:.0%} breakeven) · expectancy "
+                f"{m.breakeven_win_rate:.0%} realised breakeven) · expectancy "
                 f"{m.expectancy_r:+.3f}R · total {m.total_r:+.1f}R · "
                 f"max drawdown {m.max_drawdown_r:.1f}R")
 
@@ -207,6 +255,138 @@ class _Open:
         return per_unit * (self.state.lots_remaining / total)
 
 
+# ------------------------------------------------------------- walk-forward
+
+@dataclass(frozen=True)
+class Window:
+    """One train/test split. Dates only - it holds no data and no result."""
+    index: int
+    train_start: date
+    train_end: date
+    test_start: date
+    test_end: date
+
+    @property
+    def label(self) -> str:
+        return f"fold {self.index} · test {self.test_start:%b %Y}-{self.test_end:%b %Y}"
+
+
+def fold_windows(start: date, end: date, train_months: int,
+                 test_months: int) -> list[Window]:
+    """
+    Rolling train/test splits across `start`..`end`.
+
+    WHY THE SWING BOOK NEEDS THIS. Until now `run()` was a single in-sample
+    pass, which is fine for "what did these rules do" and useless for "which
+    of these rule sets should I use" - choosing the best of eight variants on
+    the same data that measured them is not evidence, it is the definition of
+    fitting. The option backtester has had folds since the start; this is the
+    same idea, reusing `cfg.backtest.train_months` / `test_months` rather than
+    inventing a second set of numbers to drift apart.
+
+    Windows roll forward by the TEST length, so every session outside the
+    first train window is scored exactly once out-of-sample.
+    """
+    if train_months <= 0 or test_months <= 0:
+        raise ValueError("train_months and test_months must both be positive")
+
+    windows: list[Window] = []
+    train_start = pd.Timestamp(start)
+    hard_end = pd.Timestamp(end)
+    i = 0
+    while True:
+        train_end = train_start + pd.DateOffset(months=train_months)
+        test_end = train_end + pd.DateOffset(months=test_months)
+        if train_end >= hard_end:
+            break
+        # A truncated final test window is still a window - it is simply
+        # shorter, and dropping it would throw away the most recent data,
+        # which is the part least likely to be stale.
+        windows.append(Window(
+            index=i,
+            train_start=train_start.date(),
+            train_end=(train_end - pd.Timedelta(days=1)).date(),
+            test_start=train_end.date(),
+            test_end=min(test_end - pd.Timedelta(days=1), hard_end).date(),
+        ))
+        i += 1
+        train_start = train_start + pd.DateOffset(months=test_months)
+    return windows
+
+
+# --------------------------------------------------------------- scan cache
+
+#: Fields of `SwingConfig` the SCAN cannot see. Everything else is assumed to
+#: change the signals and therefore invalidates a cached scan.
+#:
+#: The asymmetry is deliberate and load-bearing. Forgetting to list a
+#: book-only field here costs a re-scan, which is slow. Failing to notice that
+#: a NEW field affects the scan would serve a stale answer to a different
+#: question - the benchmark-cache bug in a new costume. So the default is
+#: "invalidates", and only fields provably read after `evaluate_symbol` are
+#: exempt: sizing, ranking, the ladder, the fill window and the sector cap all
+#: run outside the cached unit.
+BOOK_ONLY_SWING_FIELDS = frozenset({
+    "top_n", "max_open_risk_r", "trail_atr_multiple", "partial_exit_fraction",
+    "valid_for_days", "max_per_sector",
+    # The ladder runs after the scan, and the regime gate is a property of the
+    # day rather than of any symbol - `_scan_day` reads neither. `breakeven_at_r`
+    # and `regime_ma_days` are exactly the two levers this cache exists to
+    # sweep cheaply. `enabled_setups` is NOT here: `setup.detect` reads it.
+    "breakeven_at_r", "regime_ma_days",
+    # never read by the backtest at all
+    "markets", "default_market", "cache_dir", "history_days", "halal",
+    "price_cache_hours", "fundamentals_cache_days",
+    "earnings_blackout_days", "news_finalists", "news_lookback_hours",
+    "news_max_items",
+})
+
+
+def scan_signature(cfg: Config, market) -> str:
+    """
+    Identity of everything the per-symbol scan reads.
+
+    A `ScanCache` carries this and `run` refuses to use one that disagrees.
+    Reusing a cache across a changed stop band would answer yesterday's
+    question with today's label, and would do it without raising.
+    """
+    payload = [(k, repr(v)) for k, v in sorted(vars(cfg.swing).items())
+               if k not in BOOK_ONLY_SWING_FIELDS]
+    payload.append(("reward_risk_ratio", repr(cfg.capital.reward_risk_ratio)))
+    payload.append(("market", repr((market.key, market.min_price,
+                                    market.min_avg_turnover,
+                                    market.benchmark_ticker,
+                                    market.price_divisor))))
+    return hashlib.sha1(repr(payload).encode()).hexdigest()[:16]
+
+
+@dataclass
+class ScanCache:
+    """
+    Every symbol's evaluation for every session, computed once.
+
+    WHY THIS EXISTS. A 3-year India pass is ~135,000 `evaluate_symbol` calls
+    and over ten minutes, and a sweep of eight variants across six walk-forward
+    folds would be a day of compute - which in practice means the sweep does
+    not get run, and parameters get chosen by argument instead of evidence.
+
+    WHY IT IS SAFE. `evaluate_symbol` is a pure function of (symbol, bars up
+    to today, scan config, market). It does not read the book: the only
+    book-dependent step in `_scan_day` is skipping names already held, and
+    that filter moves to the consumer, where it belongs. Ranking, sizing, the
+    sector cap and the ladder all run outside this cache, which is exactly why
+    the ladder and regime variants can replay it.
+
+    `test_a_replayed_variant_is_identical_to_a_direct_run` is the guard.
+    """
+    signature: str
+    days: dict = field(default_factory=dict)
+
+    @property
+    def sessions_cached(self) -> int:
+        return len(self.days)
+
+
 # --------------------------------------------------------------- the runner
 
 def run(cfg: Config, market, bars: dict[str, pd.DataFrame],
@@ -214,7 +394,10 @@ def run(cfg: Config, market, bars: dict[str, pd.DataFrame],
         stocks: Optional[list] = None,
         start: Optional[date] = None, end: Optional[date] = None,
         costs: EquityCostModel = DEFAULT_EQUITY_COSTS,
-        progress: Optional[Callable] = None) -> SwingBacktestResult:
+        progress: Optional[Callable] = None,
+        scan_cache: Optional[ScanCache] = None,
+        sessions_index: Optional[pd.DatetimeIndex] = None,
+        settle_days: int = 60) -> SwingBacktestResult:
     """
     Walk the daily bars forward, one session at a time.
 
@@ -222,7 +405,34 @@ def run(cfg: Config, market, bars: dict[str, pd.DataFrame],
     returns, so a backtest reads the cache the live scan already wrote.
     `stocks` supplies sector labels for the sector cap; without it every name
     is treated as its own sector and the cap cannot bite.
+
+    `end` is the last day a new position may be OPENED, not the last day the
+    book is managed. After it, `settle_days` further sessions are walked with
+    entries switched off, so a position opened inside the window is carried to
+    its natural exit.
+
+    WHY THAT MATTERS. Anything still open when a window closes is excluded
+    from the statistics, and what is still open is not a random sample - a
+    loser hits its stop in days while a winner trails for weeks. Cutting at
+    the boundary therefore deletes winners preferentially. Measured on the
+    30-fold India sweep before this existed: the same ~261 trades scored
+    -67.8R tiled against -21.6R run continuously, and every variant looked
+    about 0.2R worse than it was.
+
+    `scan_cache` is an optional `ScanCache` shared across variant runs. It is
+    filled on first use and read afterwards, and it RAISES rather than falls
+    back when its signature disagrees with this config - a silently stale scan
+    is the one failure mode that would make every number here plausible and
+    wrong.
     """
+    if scan_cache is not None:
+        expected = scan_signature(cfg, market)
+        if scan_cache.signature != expected:
+            raise ValueError(
+                f"scan cache was built for signature {scan_cache.signature} "
+                f"and this config hashes to {expected}; a cache may only be "
+                f"shared between runs whose scan parameters are identical")
+
     result = SwingBacktestResult(market=market.key)
     if not bars:
         result.warnings.append("no bars supplied - nothing to test")
@@ -241,13 +451,31 @@ def run(cfg: Config, market, bars: dict[str, pd.DataFrame],
             f"anything below.")
         return result
 
-    sessions = _sessions(bars, start, end)
+    sessions = _sessions(bars, start, end, sessions_index)
     if len(sessions) < 2:
         result.warnings.append("fewer than two sessions in range")
         return result
 
     result.start, result.end = sessions[0].date(), sessions[-1].date()
     result.symbols = len(bars)
+
+    # The regime filter fails closed, which is right, and which means a
+    # missing benchmark produces a book that never trades. Without this line
+    # that reads as "the filter kills the book" rather than "the filter never
+    # ran" - two opposite conclusions from one empty table.
+    if cfg.swing.regime_ma_days > 0:
+        probe = regime_mod.benchmark_state(benchmark, cfg.swing.regime_ma_days,
+                                           as_of=sessions[0])
+        if benchmark is None:
+            result.warnings.append(
+                f"the {cfg.swing.regime_ma_days}-day regime filter is on but "
+                f"no benchmark was supplied, so EVERY day is blocked and no "
+                f"trade below is a judgement about the setups")
+        elif not probe.ok and probe.moving_average is None:
+            result.warnings.append(
+                f"the benchmark has fewer than {cfg.swing.regime_ma_days} bars "
+                f"at the start of this window, so the first sessions are "
+                f"blocked for want of history rather than by the market")
 
     warmup = setup_mod.min_bars(cfg)
     open_trades: dict[str, _Open] = {}
@@ -283,9 +511,20 @@ def run(cfg: Config, market, bars: dict[str, pd.DataFrame],
             stats.heat_blocks += 1
             continue
 
+        # ---- 2b. is the market itself worth being long in? ----
+        # Off by default (`regime_ma_days = 0`). Placed after the heat check
+        # and before the scan for the same cheap-to-expensive reason the live
+        # scanner orders its gates: a day the whole book stands down should
+        # not cost 100 symbol evaluations.
+        regime = regime_mod.benchmark_state(
+            benchmark, cfg.swing.regime_ma_days, as_of=day)
+        if not regime.ok:
+            stats.regime_blocks += 1
+            continue
+
         # ---- 3. the scan, on bars up to and including today ----
         scored = _scan_day(bars, benchmark, day, cfg, market, warmup,
-                           open_trades, by_symbol, sectors)
+                           open_trades, by_symbol, sectors, scan_cache)
         if not scored:
             continue
 
@@ -297,13 +536,25 @@ def run(cfg: Config, market, bars: dict[str, pd.DataFrame],
             _try_open(pick, bars, sessions, i, open_trades, ladder, cfg,
                       stats, capital)
 
-    # Anything still open at the end is NOT counted as a win or a loss. It is
-    # an unfinished trade, and scoring it at the last close would let a long
-    # holding period masquerade as an outcome.
+    # ---- settlement: manage to the exit, open nothing new ----
+    # The entry window is closed; these sessions exist only to let positions
+    # opened inside it finish. Day stats deliberately do not advance here -
+    # they describe the window that was traded, not the tail that settled it.
+    if open_trades and settle_days > 0:
+        every = _sessions(bars, None, None, sessions_index)
+        tail = [d for d in every if d > sessions[-1]][:settle_days]
+        for day in tail:
+            if not open_trades:
+                break
+            _manage(open_trades, bars, day, ladder, cfg, costs, result, sectors)
+
+    # Anything still open after settlement is NOT counted as a win or a loss.
+    # It is an unfinished trade, and scoring it at the last close would let a
+    # long holding period masquerade as an outcome.
     for t in open_trades.values():
         result.warnings.append(
-            f"{t.symbol} was still open at the end of the window and is "
-            f"excluded from the statistics.")
+            f"{t.symbol} was still open {settle_days} sessions after the "
+            f"window closed and is excluded from the statistics.")
 
     stats.avg_deployed_inr = deployed_total / stats.days if stats.days else 0.0
     result.day_stats = stats
@@ -314,15 +565,29 @@ def run(cfg: Config, market, bars: dict[str, pd.DataFrame],
 
 # --------------------------------------------------------------- internals
 
-def _sessions(bars: dict, start: Optional[date],
-              end: Optional[date]) -> list[pd.Timestamp]:
-    """Every trading day any symbol has a bar for, in order."""
+def all_sessions(bars: dict) -> pd.DatetimeIndex:
+    """
+    Every trading day any symbol has a bar for, in order.
+
+    Split out and exposed because a sweep calls `run()` hundreds of times over
+    the same bars, and unioning a hundred DatetimeIndexes each time was a
+    meaningful share of the wall clock for work whose answer never changes.
+    """
     index = None
     for df in bars.values():
         index = df.index if index is None else index.union(df.index)
     if index is None:
+        return pd.DatetimeIndex([])
+    return pd.DatetimeIndex(sorted(set(index)))
+
+
+def _sessions(bars: dict, start: Optional[date], end: Optional[date],
+              precomputed: Optional[pd.DatetimeIndex] = None
+              ) -> list[pd.Timestamp]:
+    """The sessions in range. `precomputed` is `all_sessions(bars)`, reused."""
+    days = all_sessions(bars) if precomputed is None else precomputed
+    if len(days) == 0:
         return []
-    days = pd.DatetimeIndex(sorted(set(index)))
     if start is not None:
         days = days[days.date >= start]
     if end is not None:
@@ -331,7 +596,7 @@ def _sessions(bars: dict, start: Optional[date],
 
 
 def _scan_day(bars, benchmark, day, cfg, market, warmup, open_trades,
-              by_symbol, sectors):
+              by_symbol, sectors, cache: Optional[ScanCache] = None):
     """
     Run the live gates over every symbol, using bars up to `day` inclusive.
 
@@ -340,11 +605,21 @@ def _scan_day(bars, benchmark, day, cfg, market, warmup, open_trades,
     it - a property `tests/test_swing_setup.py` asserts by truncating a frame
     and checking the ticket does not move.
     """
+    if cache is not None and day in cache.days:
+        # The duplicate-name guard is applied HERE rather than during
+        # evaluation, because which names are held is a property of the book
+        # being simulated and not of the market on that day. Moving it is what
+        # makes one scan serve every variant.
+        return [row for row in cache.days[day] if row[0].symbol not in open_trades]
+
     bench = benchmark.loc[benchmark.index <= day] if benchmark is not None else None
     scored = []
 
     for symbol, df in bars.items():
-        if symbol in open_trades:
+        # Without a cache, skip held names before doing the work - the result
+        # is the same and the pass is faster. With one, evaluate everything
+        # once so later variants holding different names still hit it.
+        if cache is None and symbol in open_trades:
             continue                      # the duplicate-name guard
         frame = df.loc[df.index <= day]
         if len(frame) < warmup:
@@ -366,7 +641,10 @@ def _scan_day(bars, benchmark, day, cfg, market, warmup, open_trades,
             symbol, sectors.get(symbol, symbol))
         scored.append((stock, found, metrics, n, total, parts))
 
-    return scored
+    if cache is None:
+        return scored
+    cache.days[day] = scored
+    return [row for row in scored if row[0].symbol not in open_trades]
 
 
 def _try_open(pick, bars, sessions, i, open_trades, ladder, cfg, stats,
@@ -607,14 +885,27 @@ def _main() -> None:                                      # pragma: no cover
     print(f"Loading {len(tickers)} symbols, ~{args.years:g} years ...")
     price_set = prices_mod.load_prices(tickers, cfg, market)
 
+    # `--years` sizes the TEST WINDOW, not just the fetch. The cache is
+    # allowed to hold more history than was asked for - `fetch_swing_history`
+    # pulls six years - and for a long time it silently did: a run labelled
+    # "3 years" tested every session in the parquet, which was 5.4. The extra
+    # bars are still loaded and still used, but only as WARM-UP: indicators
+    # need history before the first scored session, and starting the window
+    # at the first cached bar would score sessions whose EMAs were half
+    # converged.
+    window_start = date.today() - timedelta(days=int(args.years * 365))
+
     result = run(cfg, market, price_set.bars, price_set.benchmark,
-                 stocks=stocks,
-                 progress=lambda d, t, l: print(f"  [{d}/{t}] {l}", end="\r"))
+                 stocks=stocks, start=window_start,
+                 progress=lambda d, t, l: print(f"  [{d}/{t}] {l}",
+                                                end="\r", flush=True))
     print(" " * 60, end="\r")
 
     for w in result.warnings[:5]:
         print(f"  ! {w}")
     print()
+    print(f"{result.start} to {result.end}"
+          f"{' - ' + str(result.symbols) + ' symbols' if result.symbols else ''}")
     print(result.headline())
     print()
     for k, v in result.metrics.as_dict().items():
@@ -622,6 +913,12 @@ def _main() -> None:                                      # pragma: no cover
     print()
     for k, v in result.day_stats.as_dict().items():
         print(f"  {k:<26} {v}")
+    print("\n  Where trades ended:")
+    for label, count in result.exit_buckets.items():
+        share = count / result.metrics.trades if result.metrics.trades else 0.0
+        print(f"    {label:<26} {count:>4}  {share:>5.0%}")
+    print(f"    {'Banked a partial':<26} {result.partials_banked:>4}")
+
     if result.by_setup:
         print("\n  Per setup:")
         for key, m in result.by_setup.items():

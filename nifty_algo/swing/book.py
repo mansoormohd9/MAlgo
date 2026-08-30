@@ -619,6 +619,13 @@ class Book:
 
 # --------------------------------------------------------------- performance
 
+#: Below this many closed trades the realised payoff is one lucky runner away
+#: from any number you like, so the design figure is shown INSTEAD - labelled
+#: as the design figure, never silently. Ten is where avg win and avg loss
+#: stop being anecdotes; it is a judgement, not a measurement.
+MIN_TRADES_FOR_REALISED_BREAKEVEN = 10
+
+
 @dataclass
 class Performance:
     """Realised results of trades you actually took. Requirement 4's answer."""
@@ -632,6 +639,8 @@ class Performance:
     open_risk_r: float = 0.0
     unrealised_inr: float = 0.0
     avg_slippage_pct: Optional[float] = None
+    avg_win_r: float = 0.0
+    avg_loss_r: float = 0.0            # positive magnitude, not signed
 
     @property
     def win_rate(self) -> float:
@@ -641,13 +650,34 @@ class Performance:
     def expectancy_r(self) -> float:
         return self.total_r / self.trades if self.trades else 0.0
 
-    def headline(self, breakeven_win_rate: float = 1 / 3) -> str:
+    def yardstick(self, design_breakeven: float = 1 / 3) -> tuple[float, str]:
+        """
+        The win rate this book actually had to clear, and where it came from.
+
+        A ladder that shifts to breakeven at +1R and banks half at +2R does
+        not produce 2:1 trades - it produces small losses and medium wins - so
+        `1/(1+R:R)` describes the intention rather than the book. Judge by the
+        realised payoff once there are enough trades to have one, and say
+        which of the two is on screen. The backtester learned this the
+        expensive way: 22.7% won against a realised 25.4% breakeven was
+        printed as 22.7% against 33.3%, and a near-miss read as a rout.
+        """
+        if (self.trades >= MIN_TRADES_FOR_REALISED_BREAKEVEN
+                and self.avg_win_r + self.avg_loss_r > 0):
+            return self.avg_loss_r / (self.avg_win_r + self.avg_loss_r), "realised"
+        return design_breakeven, "design"
+
+    def headline(self, design_breakeven: float = 1 / 3) -> str:
         if not self.trades:
             return (f"{self.open_positions} open, nothing closed yet - too "
                     f"early to say whether this is working.")
-        verdict = ("above" if self.win_rate > breakeven_win_rate else "below")
+        breakeven, basis = self.yardstick(design_breakeven)
+        verdict = ("above" if self.win_rate > breakeven else "below")
+        tail = ("" if basis == "realised" else
+                f" - fewer than {MIN_TRADES_FOR_REALISED_BREAKEVEN} closed, "
+                f"so this is the design figure, not a measurement")
         return (f"{self.trades} closed · {self.wins} won ({self.win_rate:.0%}, "
-                f"{verdict} the {breakeven_win_rate:.0%} breakeven) · "
+                f"{verdict} the {breakeven:.0%} {basis} breakeven{tail}) · "
                 f"expectancy {self.expectancy_r:+.2f}R · "
                 f"net ₹{self.realised_inr:+,.0f}")
 
@@ -665,6 +695,10 @@ def performance(book: Book, last_prices: Optional[dict] = None) -> Performance:
         p.realised_inr += t.realised_inr
     if rs:
         p.best_r, p.worst_r = max(rs), min(rs)
+        wins = [r for r in rs if r > 0]
+        losses = [-r for r in rs if r < 0]
+        p.avg_win_r = sum(wins) / len(wins) if wins else 0.0
+        p.avg_loss_r = sum(losses) / len(losses) if losses else 0.0
     for t in book.open:
         p.open_positions += 1
         p.realised_inr += t.realised_inr        # a banked partial is realised
@@ -817,11 +851,15 @@ def swing_trade(cfg: Config):
     second one, so a rung added to the ladder cannot exist for one book and
     not the other.
     """
-    return replace(
-        cfg.trade,
-        trail_atr_multiple=cfg.swing.trail_atr_multiple,
-        partial_exit_fraction=cfg.swing.partial_exit_fraction,
-    )
+    overrides = {
+        "trail_atr_multiple": cfg.swing.trail_atr_multiple,
+        "partial_exit_fraction": cfg.swing.partial_exit_fraction,
+    }
+    # None means "inherit the intraday rung", so the default swing book is
+    # byte-identical to what it was before this override existed.
+    if cfg.swing.breakeven_at_r is not None:
+        overrides["breakeven_at_r"] = cfg.swing.breakeven_at_r
+    return replace(cfg.trade, **overrides)
 
 
 def _f(value, default: float = 0.0) -> float:

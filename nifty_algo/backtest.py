@@ -112,7 +112,18 @@ class Metrics:
     longest_losing_streak: int = 0
     avg_bars_held: float = 0.0
     net_pnl: float = 0.0              # synthetic mode only
+    # THE YARDSTICK, and the one number here that is not descriptive.
+    # `breakeven_win_rate` is derived from the trades that actually happened -
+    # avg_loss / (avg_win + avg_loss) - because that is the win rate THIS
+    # book, with THIS ladder, had to clear. `target_breakeven_win_rate` is the
+    # 1/(1+R:R) the config was designed around. They are not the same number
+    # and conflating them is how a near-miss reads as a rout: the swing book's
+    # first honest run cleared 22.7% against a realised 25.4%, while the
+    # config figure printed 33.3% and made the gap look four times wider.
     breakeven_win_rate: float = 0.0
+    target_breakeven_win_rate: float = 0.0
+    avg_win_r: float = 0.0
+    avg_loss_r: float = 0.0           # positive magnitude, not signed
 
     def as_dict(self) -> dict:
         return {
@@ -120,6 +131,9 @@ class Metrics:
             "Wins": self.wins,
             "Win rate": f"{self.win_rate:.1%}",
             "Breakeven win rate": f"{self.breakeven_win_rate:.1%}",
+            "Breakeven (design)": f"{self.target_breakeven_win_rate:.1%}",
+            "Avg win (R)": f"{self.avg_win_r:+.2f}",
+            "Avg loss (R)": f"{-self.avg_loss_r:+.2f}",
             "Expectancy (R)": f"{self.expectancy_r:+.3f}",
             "Total (R)": f"{self.total_r:+.2f}",
             "Profit factor": f"{self.profit_factor:.2f}",
@@ -197,8 +211,21 @@ class BacktestResult:
 # ---------------------------------------------------------------- metrics
 
 def compute_metrics(trades: list[BacktestTrade], reward_risk: float = 2.0) -> Metrics:
-    m = Metrics(breakeven_win_rate=1.0 / (1.0 + reward_risk))
+    """
+    Descriptive statistics, plus the one number you are allowed to judge by.
+
+    The breakeven win rate is computed from the REALISED payoff, not from
+    `reward_risk`. A ladder that shifts to breakeven at +1R and banks half at
+    +2R does not produce 2:1 trades; it produces small losses and medium
+    wins, and the win rate it needs follows from what it produced. The design
+    figure is kept alongside as `target_breakeven_win_rate` so the gap between
+    intent and outcome stays visible - it is a finding, not a rounding error.
+    """
+    m = Metrics(target_breakeven_win_rate=1.0 / (1.0 + reward_risk))
     if not trades:
+        # No trades: nothing was realised, so there is no realised yardstick.
+        # Showing the design figure here would invite comparing a win rate of
+        # zero against it, which is a comparison of nothing with an intention.
         return m
 
     rs = np.array([t.r_multiple for t in trades], dtype=float)
@@ -213,6 +240,21 @@ def compute_metrics(trades: list[BacktestTrade], reward_risk: float = 2.0) -> Me
     gains = rs[rs > 0].sum()
     losses = abs(rs[rs < 0].sum())
     m.profit_factor = float(gains / losses) if losses > 0 else float("inf")
+
+    n_win = int((rs > 0).sum())
+    n_loss = int((rs < 0).sum())
+    m.avg_win_r = float(gains / n_win) if n_win else 0.0
+    m.avg_loss_r = float(losses / n_loss) if n_loss else 0.0
+    # No winners: no win rate clears it, so 100%. No losers: any win rate
+    # does, so 0%. Both are the honest reading of a one-sided sample, and
+    # both beat silently falling back to the design figure.
+    denom = m.avg_win_r + m.avg_loss_r
+    if denom > 0:
+        m.breakeven_win_rate = m.avg_loss_r / denom
+    elif n_loss:
+        m.breakeven_win_rate = 1.0
+    else:
+        m.breakeven_win_rate = 0.0
 
     equity = rs.cumsum()
     peak = np.maximum.accumulate(equity)

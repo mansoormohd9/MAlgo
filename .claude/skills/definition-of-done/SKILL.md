@@ -169,6 +169,39 @@ Rules that travel with any number this produces:
 
 ---
 
+## Step 3b - if the change is meant to IMPROVE something
+
+A bug fix is done when it is correct. An improvement is done when it is
+*measured*, and the three rules below exist because this repo has already
+broken all three at once - it ran a book for months against a yardstick that
+came from a config field, on a harness with no out-of-sample window, and drew
+conclusions from an in-sample pass.
+
+**Say the metric, the baseline and the window BEFORE writing the change.**
+"Improve the swing book" is not a target; "raise walk-forward expectancy above
+the baseline's -0.077R test column over 6/2-month folds" is. Written first, it
+cannot be quietly redefined to whatever the change happened to produce.
+
+**A yardstick is derived from trades, never from config.** `compute_metrics`
+computes `breakeven_win_rate` from the realised payoff and keeps
+`target_breakeven_win_rate` beside it. Any "above/below breakeven" claim must
+say which one it used. The two differ by ten points on the current book, and
+for months the wrong one was on screen.
+
+**Choosing on the data that measured it is not evidence.** Use
+`python -m nifty_algo.swing.experiment` - it selects on the train window and
+scores on the test window that follows. Report the walk-forward number, the
+baseline's test number, and the train-test gap, which is the size of the
+fitting. Never report the best in-sample row as a result.
+
+**A new BOOK gets its harness in the same change as its first strategy.**
+Invariant 10 in `CLAUDE.md` forbids a strategy that is live-tradeable but
+un-backtestable; a book is the same rule at a larger scale. The swing book was
+written the other way round - roughly eight thousand lines before anything
+could be measured - and the measuring device then found the edge was negative.
+
+---
+
 ## Step 4 - report
 
 Four lines, always, even when everything is clean:

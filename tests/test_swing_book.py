@@ -472,4 +472,40 @@ def test_performance_counts_only_trades_that_were_actually_taken(cfg, journal):
     # 2R won, 1R lost -> +0.5R a trade, comfortably above the 33% breakeven
     # a 2:1 ratio implies.
     assert p.expectancy_r == pytest.approx(0.5)
-    assert "above the 33% breakeven" in p.headline()
+
+    # TWO closed trades cannot measure a payoff, so the headline falls back to
+    # the DESIGN figure and says so rather than quoting a two-trade average as
+    # if it were the book's real breakeven.
+    line = p.headline()
+    assert "above the 33% design breakeven" in line
+    assert "not a measurement" in line
+
+
+def test_the_yardstick_switches_to_the_realised_payoff_once_there_are_enough(
+        cfg, journal):
+    """
+    The number a book is judged against comes from the trades it took.
+
+    A ladder that shifts to breakeven at +1R does not produce 2:1 trades, so
+    `1/(1+R:R)` is the intention and not the yardstick. Below
+    MIN_TRADES_FOR_REALISED_BREAKEVEN there is no measurable payoff and the
+    design figure is shown, labelled; at or above it, the realised one is.
+    """
+    from nifty_algo.swing.book import (MIN_TRADES_FOR_REALISED_BREAKEVEN,
+                                       Performance)
+
+    # Three wins of +2R against seven losses of -0.5R: the ladder's shape.
+    # Realised breakeven is 0.5 / (2.0 + 0.5) = 20%, and 30% clears it - the
+    # same trades against the 33% design figure would read as failing.
+    p = Performance(trades=10, wins=3, total_r=2.5,
+                    avg_win_r=2.0, avg_loss_r=0.5)
+    assert p.trades >= MIN_TRADES_FOR_REALISED_BREAKEVEN
+    rate, basis = p.yardstick(1 / 3)
+    assert basis == "realised"
+    assert rate == pytest.approx(0.2)
+    assert "above the 20% realised breakeven" in p.headline(1 / 3)
+
+    # One trade short, the same payoff is not yet evidence of a payoff.
+    q = Performance(trades=MIN_TRADES_FOR_REALISED_BREAKEVEN - 1, wins=3,
+                    total_r=2.5, avg_win_r=2.0, avg_loss_r=0.5)
+    assert q.yardstick(1 / 3) == (1 / 3, "design")

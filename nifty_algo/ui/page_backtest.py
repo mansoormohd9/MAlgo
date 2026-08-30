@@ -120,16 +120,26 @@ def render() -> None:
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Trades", m.trades)
     c2.metric("Win rate", f"{m.win_rate:.1%}",
-              f"breakeven {m.breakeven_win_rate:.1%}", delta_color="off")
+              f"realised breakeven {m.breakeven_win_rate:.1%}",
+              delta_color="off")
     c3.metric("Expectancy", f"{m.expectancy_r:+.3f} R",
               "per trade, net of friction", delta_color="off")
     c4.metric("Profit factor", f"{m.profit_factor:.2f}",
               f"max DD {m.max_drawdown_r:.2f} R", delta_color="off")
 
     if m.win_rate < m.breakeven_win_rate:
+        # The REALISED breakeven - what the payoff these trades actually
+        # produced had to clear. Attributing it to the configured ratio would
+        # be the conflation this figure exists to end: the ladder banks half
+        # at +2R and shifts to breakeven at +1R, so it does not produce 2:1
+        # trades and 1/(1+R:R) is not the number it had to beat.
         banner(f"Win rate {m.win_rate:.1%} is below the {m.breakeven_win_rate:.1%} "
-               f"needed at {cfg.capital.reward_risk_ratio:.1f}:1. This "
-               f"configuration loses money on this data.", p.critical, "⛔")
+               f"this payoff needed (avg win {m.avg_win_r:+.2f}R against avg "
+               f"loss {-m.avg_loss_r:+.2f}R). A "
+               f"{cfg.capital.reward_risk_ratio:.1f}:1 book that always ran to "
+               f"target would have needed "
+               f"{m.target_breakeven_win_rate:.1%}. This configuration loses "
+               f"money on this data.", p.critical, "⛔")
     if mode is Mode.SYNTHETIC_PREMIUM:
         st.caption(f"Synthetic net P&L: ₹{m.net_pnl:+,.0f} — "
                    f"optimistic by 15–25%, see the banner above.")
@@ -328,7 +338,7 @@ def _render_swing(result, cfg, p) -> None:
     cols[0].metric("Trades", m.trades)
     cols[1].metric("Win rate", f"{m.win_rate:.0%}",
                    delta=f"{m.win_rate - m.breakeven_win_rate:+.0%} vs "
-                         f"breakeven")
+                         f"realised breakeven")
     cols[2].metric("Expectancy", f"{m.expectancy_r:+.3f}R")
     cols[3].metric("Max drawdown", f"{m.max_drawdown_r:.1f}R")
 

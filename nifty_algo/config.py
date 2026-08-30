@@ -560,11 +560,33 @@ class SwingConfig:
                                         # name outweigh a quiet one
     valid_for_days: int = 5             # an untriggered entry expires after this
 
+    # --- which archetypes may fire ---
+    # `setup.detect` tries every builder listed here and nothing else. It is a
+    # config field rather than a backtest-only filter because a backtest that
+    # can trade a subset the live scanner cannot is no longer measuring the
+    # system being traded (invariant 1). Measured finding that made it worth
+    # having: breakout was 209 of 282 trades, pullback 71, reclaim 2, squeeze
+    # ZERO - the book calls itself four archetypes and trades as one.
+    enabled_setups: tuple = ("breakout", "pullback", "squeeze", "reclaim")
+
+    # --- market regime ---
+    # Days of the benchmark moving average new longs must be above. 0 = off,
+    # which is how every result before this existed was produced. See
+    # market_regime.py for why a long-only breakout book wants one.
+    regime_ma_days: int = 0
+
     # --- after the entry ---
     # The runner trails this many ATRs behind the peak. Wider than the
     # intraday book's 1.0 for the same reason `swing_atr_stop_multiple` is
     # 1.5: an overnight hold has to survive gaps that a 15:10 flat never sees.
     trail_atr_multiple: float = 1.5
+    # Where the stop moves to breakeven, in R. None inherits the intraday
+    # book's `TradeConfig.breakeven_at_r`. It is overridable here for the same
+    # reason `trail_atr_multiple` is: +1R on a 5-minute bar and +1R on a daily
+    # bar are different distances relative to the noise that has to be
+    # survived, and a shift that fires inside daily noise converts winners
+    # into scratches. Set it high (99) to disable the rung and trail only.
+    breakeven_at_r: float | None = None
     # Half the position is banked at +2R and the rest runs. Whole shares, so
     # a 1-share ticket cannot split and takes a full exit at +2R instead -
     # the same fallback the option book uses on a single lot.

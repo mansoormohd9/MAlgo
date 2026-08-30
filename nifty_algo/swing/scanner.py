@@ -40,6 +40,7 @@ from . import halal as halal_mod
 from . import news as news_mod
 from . import prices as prices_mod
 from . import fx as fx_mod
+from . import market_regime as regime_mod
 from . import markets as markets_mod
 from . import setup as setup_mod
 from .universe import Stock, load_universe
@@ -316,6 +317,23 @@ def scan(cfg, market=None, universe: list[Stock] | None = None,
         _reject(result, symbol, STAGE_NO_DATA,
                 "yfinance returned no daily bars for this ticker")
 
+    # ---- 2b. the market itself, before any per-symbol work ----
+    # A long-only book has no answer to a market trending down; this is the
+    # filter the option book has always had and this one shipped without. Off
+    # unless `regime_ma_days` is set. It reads the benchmark, so it cannot run
+    # before prices - but it runs before the setup, R:R, earnings and news
+    # work it would otherwise waste.
+    regime = regime_mod.benchmark_state(price_set.benchmark,
+                                        swing.regime_ma_days)
+    if not regime.ok:
+        result.stood_down = (
+            f"{market.label} stands down: {regime.reason}. This is the "
+            f"{regime.ma_days}-day regime filter, not an absence of setups - "
+            f"turn it off in settings to scan anyway."
+        )
+        result.warnings.append(result.stood_down)
+        return result
+
     # ---- 3-6. tradeability, setup, reward:risk ----
     candidates: list[tuple[Stock, setup_mod.SwingSetup, dict]] = []
     by_symbol = {s.symbol: s for s in eligible}
@@ -419,7 +437,7 @@ def evaluate_symbol(symbol: str, df, benchmark, cfg, market):
             f"{found.label}: target is only {found.reward_risk:.2f}R away, "
             f"below the {min_rr:.1f}R floor")
 
-    return found, metrics, None
+    return found, _enrich(metrics, df, benchmark, cfg), None
 
 
 def rank_and_size(scored, cfg, market, rate, today, verdicts=None,
@@ -503,10 +521,6 @@ def _metrics(df, benchmark, cfg, market) -> tuple[dict, str]:
         "turnover_cr": turnover,          # legacy alias; India reads the same
         "currency_symbol": market.symbol,
         "benchmark_label": market.benchmark_label,
-        "pos_52w": prices_mod.position_in_52w(df),
-        "rs_short": prices_mod.relative_strength(df, benchmark, swing.rs_short_days),
-        "rs_long": prices_mod.relative_strength(df, benchmark, swing.rs_long_days),
-        "volume_ratio": _volume_ratio(df),
         "ema_fast_period": swing.ema_fast,
         "ema_slow_period": swing.ema_slow,
     }
@@ -525,6 +539,27 @@ def _metrics(df, benchmark, cfg, market) -> tuple[dict, str]:
         return metrics, (f"ATR is {atr_pct:.2%} of price - a {swing.swing_atr_stop_multiple}x "
                          f"ATR stop is too wide to size within the risk budget")
     return metrics, ""
+
+
+def _enrich(metrics: dict, df, benchmark, cfg) -> dict:
+    """
+    The metrics that SCORE but never gate, added once a setup exists.
+
+    Relative strength, position in the 52-week range and the volume ratio
+    decide how a candidate ranks; none of them can reject one. Computing them
+    for every symbol on every session meant the backtest paid for the ranking
+    of the ~95 names in 100 that had no setup to rank - about half the cost of
+    a scan. Nothing reads these on a rejected symbol: `_reject` records the
+    stage and the reason, and `_score` only ever sees survivors.
+    """
+    swing = cfg.swing
+    metrics["pos_52w"] = prices_mod.position_in_52w(df)
+    metrics["rs_short"] = prices_mod.relative_strength(df, benchmark,
+                                                       swing.rs_short_days)
+    metrics["rs_long"] = prices_mod.relative_strength(df, benchmark,
+                                                      swing.rs_long_days)
+    metrics["volume_ratio"] = _volume_ratio(df)
+    return metrics
 
 
 def _volume_ratio(df) -> float:
