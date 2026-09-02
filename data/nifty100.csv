@@ -44,7 +44,7 @@ SBIN,State Bank of India,Financial Services,Public Sector Bank,SBIN.NS
 SHRIRAMFIN,Shriram Finance,Financial Services,Non Banking Financial Company (NBFC),SHRIRAMFIN.NS
 SUNPHARMA,Sun Pharmaceutical Industries,Healthcare,Pharmaceuticals,SUNPHARMA.NS
 TATACONSUM,Tata Consumer Products,Fast Moving Consumer Goods,Tea & Coffee,TATACONSUM.NS
-TATAMOTORS,Tata Motors,Automobile and Auto Components,Passenger Cars & Utility Vehicles,TATAMOTORS.NS
+TMPV,Tata Motors Passenger Vehicles,Automobile and Auto Components,Passenger Cars & Utility Vehicles,TMPV.NS
 TATASTEEL,Tata Steel,Metals & Mining,Iron & Steel,TATASTEEL.NS
 TCS,Tata Consultancy Services,Information Technology,Computers - Software & Consulting,TCS.NS
 TECHM,Tech Mahindra,Information Technology,Computers - Software & Consulting,TECHM.NS
@@ -85,7 +85,7 @@ JINDALSTEL,Jindal Steel & Power,Metals & Mining,Iron & Steel,JINDALSTEL.NS
 JSWENERGY,JSW Energy,Power,Power Generation,JSWENERGY.NS
 LICI,Life Insurance Corporation of India,Financial Services,Life Insurance,LICI.NS
 LODHA,Lodha Developers,Realty,Residential Commercial Projects,LODHA.NS
-LTIM,LTIMindtree,Information Technology,Computers - Software & Consulting,LTIM.NS
+LTM,LTIMindtree,Information Technology,Computers - Software & Consulting,LTM.NS
 MOTHERSON,Samvardhana Motherson International,Automobile and Auto Components,Auto Components,MOTHERSON.NS
 NAUKRI,Info Edge (India),Consumer Services,Internet & Catalogue Retail,NAUKRI.NS
 PFC,Power Finance Corporation,Financial Services,Non Banking Financial Company (NBFC),PFC.NS

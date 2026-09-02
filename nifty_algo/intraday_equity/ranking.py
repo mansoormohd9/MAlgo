@@ -180,9 +180,13 @@ def prefilter(ranks: list[MorningRank], cfg,
     """
     ie = cfg.intraday_equity
     floor = ie.min_session_turnover_inr if min_adv_inr is None else min_adv_inr
+    # NOTE the DAILY band. `prior_atr_pct` is computed from prior SESSIONS,
+    # so it is a daily ATR (~2.2% on a Nifty 100 name). Testing it against
+    # the 5-minute band (~0.26%) rejects the entire universe and reports it
+    # as "no candidates" - see the comment on these fields in config.py.
     eligible = [r for r in ranks
                 if r.adv_inr >= floor
-                and ie.min_atr_pct <= r.prior_atr_pct <= ie.max_atr_pct]
+                and ie.min_daily_atr_pct <= r.prior_atr_pct <= ie.max_daily_atr_pct]
     if ie.rs_prefilter_n and ie.rs_prefilter_n > 0:
         eligible = eligible[:ie.rs_prefilter_n]
     return [r.symbol for r in eligible]

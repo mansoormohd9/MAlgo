@@ -151,7 +151,8 @@ class Result:
     end: date | None = None
     symbols: int = 0
     missing_symbols: list = field(default_factory=list)
-    costs: IntradayEquityCostModel = DEFAULT_INTRADAY_EQUITY_COSTS
+    costs: IntradayEquityCostModel = field(
+        default_factory=IntradayEquityCostModel)
     pot_note: str = ""
     typical_stop_pct: float = 0.0
     friction_r: float = 0.0
@@ -389,25 +390,37 @@ def run(cfg: Config, bars: dict, benchmark: pd.DataFrame | None = None,
             continue
 
         # ---- walk the day ----------------------------------------------
+        # KEYED ON THE TIMESTAMP, NOT ON A POSITION.
+        #
+        # `bar_index` is positional within one symbol's own session, and
+        # positions only line up across symbols while every session has
+        # exactly the same bars. A single halted bar - which leaves 74 bars
+        # and so still clears the 60-bar integrity gate - shifts every later
+        # index for that name by one. Ranking would then compare a signal at
+        # 11:45 against one at 11:50, and management would mark a position
+        # against the wrong bar. Nothing would raise; the trades would simply
+        # be against prices that never coincided.
         by_bar: dict = {}
         for symbol, (_, scan) in per_symbol.items():
             for s in scan.signals:
-                by_bar.setdefault(s.bar_index, []).append(s)
+                by_bar.setdefault(s.bar_time, []).append(s)
 
         open_positions: dict = {}
         deployed = 0.0
         traded_today = 0
-        bar_count = max(len(s) for s, _ in per_symbol.values())
+        #: every timestamp any watched symbol printed today, in order
+        timeline = sorted({ts for sess, _ in per_symbol.values()
+                           for ts in sess.index})
 
-        for i in range(bar_count):
+        for i, now in enumerate(timeline):
             # 1. MANAGE FIRST. Open money outranks a new opportunity.
             for symbol in list(open_positions):
                 pos = open_positions[symbol]
                 session = per_symbol[symbol][0]
-                if i >= len(session) or i <= pos.entry_index - 1:
+                if now not in session.index or now < pos.entry_time:
                     continue
-                bar = session.iloc[i]
-                closed = _manage(pos, bar, session.index[i], i, ladder,
+                bar = session.loc[now]
+                closed = _manage(pos, bar, now, i, ladder,
                                  trail_r, cfg, costs, result)
                 if closed:
                     deployed -= pos.sized.deployed_inr
@@ -417,7 +430,7 @@ def run(cfg: Config, bars: dict, benchmark: pd.DataFrame | None = None,
                                               len(open_positions))
 
             # 2. then look for entries, on signals from bar i
-            candidates = by_bar.get(i, [])
+            candidates = by_bar.get(now, [])
             if not candidates:
                 continue
             room = ie.top_n - len(open_positions)
@@ -438,11 +451,15 @@ def run(cfg: Config, bars: dict, benchmark: pd.DataFrame | None = None,
 
             for _score, sig, _parts in picks:
                 session = per_symbol[sig.symbol][0]
-                # THE SIGNAL BAR NEVER FILLS.
-                if i + 1 >= len(session):
+                # THE SIGNAL BAR NEVER FILLS. The fill bar is the next bar
+                # THIS SYMBOL printed, looked up positionally within its own
+                # session rather than off the shared timeline - the next
+                # timeline entry might belong to a different name.
+                at = session.index.get_loc(sig.bar_time)
+                if at + 1 >= len(session):
                     result.stats.late_signal_blocks += 1
                     continue
-                nxt = session.iloc[i + 1]
+                nxt = session.iloc[at + 1]
 
                 fill = _fill_price(nxt, cfg, costs)
                 if fill > sig.ref_close * (1.0 + ie.max_chase_pct):
@@ -466,7 +483,7 @@ def run(cfg: Config, bars: dict, benchmark: pd.DataFrame | None = None,
                 st = ladder.new_state(sized.quantity)
                 open_positions[sig.symbol] = _Open(
                     signal=sig, sized=sized, state=st, ladder=ladder,
-                    entry_time=session.index[i + 1], entry_index=i + 1,
+                    entry_time=session.index[at + 1], entry_index=at + 1,
                     quantity_open=sized.quantity)
                 deployed += sized.deployed_inr
                 traded_today += 1
@@ -555,7 +572,8 @@ def _close(pos: _Open, price: float, ts, i: int, reason: str, cfg, costs,
     if pos.partial_banked:
         # A banked partial is a THIRD leg, and it pays its own charges.
         banked_qty = qty - pos.quantity_open
-        friction += (costs.sell_cost(entry + rp * 2.0, banked_qty)
+        friction += (costs.sell_cost(entry + rp * cfg.capital.reward_risk_ratio,
+                                     banked_qty)
                      + costs.slippage(entry, banked_qty))
 
     net = gross - friction
@@ -580,3 +598,131 @@ def _close(pos: _Open, price: float, ts, i: int, reason: str, cfg, costs,
 __all__ = ["run", "Result", "IntradayTrade", "DayStats", "SignalCache",
            "signal_signature", "BOOK_ONLY_FIELDS", "intraday_trade_cfg",
            "CAVEATS"]
+
+
+# --------------------------------------------------------------- CLI
+
+
+def _report(res: Result, cfg: Config) -> None:
+    """
+    What gets printed, and the order matters.
+
+    Caveats first, then the FRICTION ARITHMETIC, then the result. Friction
+    goes above the expectancy rather than below it because it is the bar the
+    expectancy has to clear - discovering it afterwards invites reading a
+    thin positive number as an edge when it is not one.
+    """
+    print(CAVEATS)
+    print(f"slippage assumption: {res.costs.slippage_pct:.3%} per leg "
+          f"(PRE-REGISTERED, not measured - charges verified {VERIFIED_ON})")
+    print()
+    print("-- what the book has to clear before any signal helps --")
+    print(f"  {res.pot_note}")
+    if res.typical_stop_pct:
+        rr = cfg.capital.reward_risk_ratio
+        breakeven = (1.0 + res.friction_r) / (1.0 + rr)
+        print(f"  median stop {res.typical_stop_pct:.3%} -> friction "
+              f"{res.friction_r:.3f}R per round trip")
+        print(f"  so a {rr:.1f}:1 payoff needs a {breakeven:.1%} win rate to "
+              f"break even, against {1.0/(1.0+rr):.1%} with no costs at all")
+    print()
+
+    if res.start:
+        print(f"range: {res.start} -> {res.end}   symbols: {res.symbols}")
+    s = res.stats
+    print(f"sessions {s.days} (flat {s.days_flat})   max concurrent "
+          f"{s.max_concurrent}   signals seen {s.signals_seen}")
+    print(f"blocked: capital {s.capital_blocks}, slots {s.slot_blocks}, "
+          f"heat {s.heat_blocks}, gap {s.gap_blocks}, "
+          f"stop-cap {s.stop_cap_blocks}, last-bar {s.late_signal_blocks}")
+    print()
+    print("RESULT:", res.headline())
+    m = res.metrics
+    if m and m.trades:
+        print(f"  profit factor {m.profit_factor:.2f}   max DD "
+              f"{m.max_drawdown_r:.2f}R   avg bars held {m.avg_bars_held:.1f}")
+        print(f"  avg win {m.avg_win_r:+.2f}R   avg loss {m.avg_loss_r:+.2f}R"
+              f"   ambiguous (counted losses) {res.ambiguous_count}")
+        print()
+        print("  by strategy:")
+        for k, v in sorted(res.by_strategy().items(), key=lambda kv: -kv[1]["n"]):
+            print(f"    {k:<18} n={v['n']:<5} {v['expectancy']:+.3f}R")
+    print()
+    print("  rejection ledger (why nothing fired):")
+    for stage, n in sorted(res.rejections.items(), key=lambda kv: -kv[1]):
+        print(f"    {stage:<24} {n:,}")
+
+
+def _main(argv=None):    # pragma: no cover
+    import argparse
+    import sys
+
+    from ..config import DEFAULT
+    from ..swing import markets as markets_mod
+    from . import bars as bars_mod
+
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    cfg = DEFAULT
+    p = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--market", default=cfg.intraday_equity.market,
+                   choices=markets_mod.keys(cfg))
+    p.add_argument("--years", type=float, default=None,
+                   help="size of the TEST window, not of the fetch")
+    p.add_argument("--capital", type=float, default=None)
+    p.add_argument("--leverage", type=float, default=None)
+    p.add_argument("--interval", type=int,
+                   default=cfg.intraday_equity.bar_interval_minutes)
+    args = p.parse_args(argv)
+
+    if args.capital is not None:
+        cfg.capital.intraday_equity_capital_inr = args.capital
+    if args.leverage is not None:
+        cfg.intraday_equity.mis_leverage = args.leverage
+
+    market = markets_mod.get(cfg, args.market)
+    loaded = bars_mod.load_cached(
+        market.cache_suffix, args.interval, [], market.benchmark_ticker,
+        cache_dir=cfg.intraday_equity.cache_dir)
+    if loaded is None:
+        print("No intraday cache. Run:\n"
+              f"  python scripts/fetch_intraday_history.py "
+              f"--market {args.market} --years 3")
+        return 2
+
+    from ..swing.universe import load_universe
+    wanted = [s.symbol for s in load_universe(market.universe_csv)]
+    loaded = bars_mod.load_cached(
+        market.cache_suffix, args.interval, wanted, market.benchmark_ticker,
+        cache_dir=cfg.intraday_equity.cache_dir)
+    if loaded is None or not loaded.bars:
+        print("Cache present but holds none of the universe.")
+        return 2
+
+    start = None
+    if args.years:
+        from datetime import timedelta
+        sessions = loaded.all_sessions()
+        if sessions:
+            start = sessions[-1] - timedelta(days=int(args.years * 365))
+
+    if loaded.dropped:
+        print(f"integrity gates dropped {len(loaded.dropped)} sessions: "
+              f"{loaded.drop_counts()}")
+    if loaded.missing:
+        print(f"NO DATA for {len(loaded.missing)}: "
+              f"{', '.join(loaded.missing[:10])}")
+
+    def progress(n, total, day):
+        print(f"\r  scanning {n}/{total}  {day}", end="", flush=True)
+
+    res = run(cfg, loaded.bars, benchmark=loaded.benchmark, start=start,
+              universe_key=market.universe_csv, progress=progress)
+    print()
+    _report(res, cfg)
+    return 0
+
+
+if __name__ == "__main__":       # pragma: no cover
+    raise SystemExit(_main())

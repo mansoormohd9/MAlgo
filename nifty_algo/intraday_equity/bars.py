@@ -251,13 +251,32 @@ def apply_gates(df: pd.DataFrame, symbol: str, interval_minutes: int,
     """
     if df.empty:
         return df
+    if not df.index.is_monotonic_increasing:
+        df = df.sort_index()
 
-    days = sorted({ts.date() for ts in df.index})
+    # SESSIONS ARE ADDRESSED BY SLICE, NOT BY BOOLEAN MASK.
+    #
+    # This used to be `for day in days: df[df.index.date == day]`, which
+    # rebuilds 55,000 Python date objects and scans the whole frame once per
+    # session - 744 times, twice over. On a three-year 5-minute history that
+    # cost 15 SECONDS PER SYMBOL, so a hundred-name load spent 25 minutes in
+    # here having printed nothing, which reads exactly like a hung process.
+    # The index is sorted, so each session is a contiguous slice and the
+    # boundaries can be found in one pass.
+    day_index = df.index.normalize()
+    day_vals, starts = np.unique(day_index.to_numpy(), return_index=True)
+    bounds = np.append(starts, len(df))
+    days = [pd.Timestamp(v).date() for v in day_vals]
+
+    high = df["high"].to_numpy(dtype=float)
+    low = df["low"].to_numpy(dtype=float)
+    close = df["close"].to_numpy(dtype=float)
+
     daily = []
-    for day in days:
-        s = df[df.index.date == day]
-        daily.append((day, float(s["high"].max()), float(s["low"].min()),
-                      float(s["close"].iloc[-1]), len(s)))
+    for i, day in enumerate(days):
+        a, b = int(bounds[i]), int(bounds[i + 1])
+        daily.append((day, high[a:b].max(), low[a:b].min(),
+                      close[b - 1], b - a))
     frame = pd.DataFrame(daily, columns=["day", "high", "low", "close", "bars"])
 
     # Wilder-style daily ATR over session ranges. Only ever used as a scale
@@ -269,23 +288,30 @@ def apply_gates(df: pd.DataFrame, symbol: str, interval_minutes: int,
                    (frame["low"] - prev_close).abs()))
     atr = tr.ewm(alpha=1.0 / 14, adjust=False, min_periods=5).mean()
 
-    keep: list[date] = []
-    for i, row in frame.iterrows():
-        day = row["day"]
-        session = df[df.index.date == day]
+    keep: list[int] = []
+    for i, day in enumerate(days):
+        a, b = int(bounds[i]), int(bounds[i + 1])
+        # A positional slice is a cheap view, so `_session_gate` keeps its
+        # DataFrame signature and its own tests.
         reason = _session_gate(
-            session,
+            df.iloc[a:b],
             None if i == 0 else float(prev_close.iloc[i]),
             interval_minutes, min_session_bars, max_overnight_atr,
             None if pd.isna(atr.iloc[i]) else float(atr.iloc[i]))
         if reason:
             dropped.append((symbol, day, reason))
         else:
-            keep.append(day)
+            keep.append(i)
 
     if not keep:
         return df.iloc[0:0]
-    mask = pd.Series([ts.date() in set(keep) for ts in df.index], index=df.index)
+    if len(keep) == len(days):
+        return df
+    # `set(keep)` used to be rebuilt inside this comprehension - once per row,
+    # 55,000 times per symbol. Marking whole slices avoids the question.
+    mask = np.zeros(len(df), dtype=bool)
+    for i in keep:
+        mask[int(bounds[i]):int(bounds[i + 1])] = True
     return df[mask]
 
 

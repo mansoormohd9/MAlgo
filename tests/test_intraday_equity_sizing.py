@@ -52,9 +52,15 @@ def test_a_stop_tighter_than_the_floor_is_rejected(cfg):
 
 def test_a_stop_inside_both_bounds_is_accepted(cfg):
     """The ordinary case, so the two rejections above are not vacuous."""
-    stop, reason = sizing.resolve_stop(1000.0, 6.0, cfg)   # 0.6%
+    atr = 2.57          # the measured median 5m ATR on a Rs 1000 share
+    stop, reason = sizing.resolve_stop(1000.0, atr, cfg)
     assert reason is None
-    assert stop == pytest.approx(994.0)
+    # derived from config, not hardcoded: `atr_stop_multiple` is a deliberate
+    # choice that has already moved once (1.0 -> 2.0 on the friction
+    # arithmetic), and a test that pins the old value fails for the wrong
+    # reason when it moves again.
+    assert stop == pytest.approx(
+        1000.0 - atr * cfg.intraday_equity.atr_stop_multiple)
 
 
 def test_the_five_percent_cap_is_a_ceiling_not_the_working_stop(cfg):
@@ -63,11 +69,12 @@ def test_the_five_percent_cap_is_a_ceiling_not_the_working_stop(cfg):
     unreachable on ~96% of Nifty 100 sessions, so it can only be a ceiling.
     A typical ~0.6% ATR stop must pass it untouched.
     """
-    typical_atr_pct = 0.006
+    typical_atr_pct = 0.00257        # measured Nifty 100 median, 5-minute
     stop, reason = sizing.resolve_stop(1000.0, 1000.0 * typical_atr_pct, cfg)
     assert reason is None
-    assert stop == pytest.approx(994.0)
-    assert (1000.0 - stop) / 1000.0 < cfg.intraday_equity.max_stop_pct
+    assert (1000.0 - stop) / 1000.0 < cfg.intraday_equity.max_stop_pct, (
+        "a typical intraday ATR stop should pass the 5% ceiling untouched - "
+        "the ceiling exists for outliers, not for the median name")
 
 
 # ------------------------------------------------------------ leverage

@@ -650,8 +650,33 @@ class IntradayEquityConfig:
     force_exit: time = time(15, 10)
 
     # --- the stop, and the two bounds on it ---
+    # THE STOP MULTIPLE IS THE MOST CONSEQUENTIAL NUMBER IN THIS BOOK, and
+    # 1.0 - the option book's SignalConfig default - is the wrong value here.
+    # Two forces pull against each other, and both are arithmetic rather than
+    # opinion. Measured 5-minute ATR is 0.257% of price and the median stock's
+    # whole daily high-low range is 2.04%:
+    #
+    #   xATR  stop%   friction  breakeven  lev needed  2R move (% of day's range)
+    #    1.0  0.257%   0.556R     51.9%       6.5x      0.51%   (25%)
+    #    2.0  0.514%   0.292R     43.1%       3.2x      1.03%   (50%)
+    #    3.0  0.771%   0.204R     40.1%       2.2x      1.54%   (76%)
+    #    4.0  1.028%   0.160R     38.7%       1.6x      2.06%   (101%)
+    #
+    # FRICTION FORCES A WIDE STOP: costs and slippage are roughly fixed in
+    # percent, so at 1x ATR they eat 0.556R and the book must win 52% of a
+    # 2:1 payoff merely to break even. THE SESSION'S FINITE RANGE FORCES A
+    # NARROW ONE: at 4x ATR the +2R partial needs the trade to travel the
+    # stock's ENTIRE median daily range in one direction, from the entry,
+    # before 15:10.
+    #
+    # 2.0 is chosen because it is the tightest multiple whose leverage
+    # requirement (3.2x) fits inside Zerodha's ~5x MIS allowance, so sizing is
+    # decided by RISK rather than by the size of the pot. This was derived
+    # from measured volatility and published costs BEFORE any expectancy was
+    # computed - it is a pre-registered design choice, not a tuned one - and
+    # `stoptight`/`stopwide` sweep it out-of-sample.
     atr_period: int = 14
-    atr_stop_multiple: float = 1.0
+    atr_stop_multiple: float = 2.0
 
     # A 5% stop was the original brief. Measured on the cached Nifty 100
     # history, the MEDIAN stock's median daily high-low range is 2.04% and
@@ -665,8 +690,12 @@ class IntradayEquityConfig:
     # and looks like risk control while doing the opposite.
     max_stop_pct: float = 0.05
     # And a floor, because a stop tighter than the spread plus slippage is
-    # not a stop, it is a guaranteed scratch.
-    min_stop_pct: float = 0.002
+    # not a stop, it is a guaranteed scratch. Set against the modelled round
+    # trip: slippage is 0.05% a leg, so 0.10% there and back, and this floor
+    # is 1.5x that. It also sits below the p10 5-minute ATR of 0.213%, so it
+    # rejects only genuinely untradeable stops rather than quietly excluding
+    # the calmer half of the universe.
+    min_stop_pct: float = 0.0015
 
     # Refuse to chase a gap this far past the signal bar's close. The fill is
     # the NEXT bar's open; if that opened far above the trigger the setup is
@@ -674,9 +703,34 @@ class IntradayEquityConfig:
     max_chase_pct: float = 0.004
 
     # --- tradeability, in intraday terms ---
+    # THESE ARE 5-MINUTE NUMBERS AND MUST NOT BE COPIED FROM SwingConfig.
+    # `SwingConfig.min_atr_pct` is 0.008 because a DAILY bar of a Nifty 100
+    # name has a measured median ATR of 2.22%. A 5-minute bar does not: by
+    # sqrt-of-time over the 75 bars in an NSE session, the implied 5m ATR is
+    #
+    #     median 0.257%,  p10 0.213%,  p90 0.330%,  max 0.438%
+    #
+    # measured across the 98 symbols in data/cache/daily_prices_india.parquet.
+    # A floor of 0.004 - which is what a daily-shaped band looks like -
+    # admitted ONE symbol of 98, so the scan returned nothing and read as
+    # tight gates rather than as a misconfigured band. The floor below sits
+    # well under p10 so it only catches a genuinely dead tape, and the ceiling
+    # well over the daily-scaled maximum so it only catches a halt or a
+    # corporate action the integrity gate missed.
     min_session_turnover_inr: float = 5.0e7   # Rs 5 crore in the session so far
-    min_atr_pct: float = 0.004
-    max_atr_pct: float = 0.060
+    min_atr_pct: float = 0.0012
+    max_atr_pct: float = 0.0150
+
+    # AND THESE ARE THE DAILY ONES, WHICH ARE A DIFFERENT QUANTITY.
+    # The morning prefilter ranks on PRIOR SESSIONS, so its ATR is a daily
+    # ATR - measured median 2.22%, p10 1.85%, p90 2.86%. The pair above is a
+    # 5-minute ATR, measured median 0.257%. They differ by a factor of ~8.7
+    # (sqrt of the 75 bars in a session) and sharing one field between them
+    # silently filters the universe against the wrong scale: a daily 2.2%
+    # tested against a 1.5% intraday ceiling rejects EVERY name, and the scan
+    # then reports no candidates rather than a misconfiguration.
+    min_daily_atr_pct: float = 0.010
+    max_daily_atr_pct: float = 0.060
     #: Never take more than this share of the fill bar's volume. Without it,
     #: risk-based sizing will happily buy a third of a 5-minute bar on a
     #: mid-cap, and the backtest will report that fill as free.

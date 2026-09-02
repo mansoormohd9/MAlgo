@@ -29,6 +29,25 @@ therefore look like they never had a setup. The swing book learned the same
 lesson with `PriceSet.missing`, which `fetch_swing_history` reports BY NAME
 rather than by count.
 
+...AND A NAMED FAILURE WITH NOTHING TO ACT ON IS ONLY HALF THE JOB.
+
+The first real run of the intraday fetcher printed `UNRESOLVED: TATAMOTORS,
+LTIM` and stopped there. Both are renames - the companies are listed, under
+new tradingsymbols, carrying their original permanent tokens. The dump Kite
+returns has a `name` column that says so, and this module used to throw it
+away, which turned a two-second diagnosis into an afternoon.
+
+So the name is cached alongside the token, and an unresolved symbol comes back
+with `suggestions`: candidates ranked by company-name overlap and by
+tradingsymbol prefix. Name overlap is the one that matters, because a rename
+frequently keeps nothing of the old ticker - `TATAMOTORS` and `TMPV` share not
+one character.
+
+NOTHING IS EVER AUTO-APPLIED. A suggestion is printed for a human to act on by
+editing the universe file. Substituting a symbol silently is how one company
+gets screened against another's balance sheet, which is exactly the failure
+the `{market}:{SYMBOL}` cache keying exists to prevent.
+
 DELISTINGS ARE THE OTHER HALF OF THAT, and this module cannot fix them. The
 dump is today's listed universe, so a company that left the index two years
 ago is absent here AND absent from any history you fetch. See the survivorship
@@ -37,8 +56,9 @@ caveat in `backtest.py` - it is a limit of the data, not a bug to be found.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date
 from pathlib import Path
 
 from ..broker.kite_auth import KiteSession, NotAuthenticated
@@ -54,6 +74,29 @@ EXCHANGE = "NSE"
 #: "a share you can take an intraday position in".
 EQUITY_SERIES = "EQ"
 
+#: Shortest tradingsymbol prefix worth treating as a lead. Three characters
+#: matches dozens of names in a 10,000-row dump and would bury the real
+#: candidate under noise.
+MIN_PREFIX = 4
+
+#: How much of an unresolved name's words a candidate must carry to be
+#: offered, weighted by word length so a long distinctive word counts for
+#: more than a short one.
+NAME_MATCH_FLOOR = 0.6
+
+#: How many candidates to offer. Enough to contain the answer, few enough to
+#: read on one line.
+MAX_SUGGESTIONS = 3
+
+#: Corporate boilerplate, dropped from both sides before comparing. Without
+#: it, every "... LIMITED" matches every other "... LIMITED".
+_NAME_STOPWORDS = frozenset({
+    "LTD", "LIMITED", "THE", "CO", "COMPANY", "CORP", "CORPORATION",
+    "PVT", "PRIVATE", "INDIA", "INDIAN", "OF", "AND",
+})
+
+_NON_WORD = re.compile(r"[^A-Z0-9]+")
+
 
 class InstrumentsUnavailable(RuntimeError):
     """The dump could not be fetched and no usable cache existed."""
@@ -67,9 +110,14 @@ class TokenSet:
     `missing` is not an error channel - a universe legitimately contains
     names that have been delisted or renamed. It is a REPORTING channel, and
     the caller is expected to say the names out loud.
+
+    `suggestions` is what turns that report into something actionable:
+    `{unresolved symbol: [(candidate tradingsymbol, its company name), ...]}`.
+    It is advisory only, and `tokens` never contains a suggested symbol.
     """
     tokens: dict[str, int] = field(default_factory=dict)
     missing: list[str] = field(default_factory=list)
+    suggestions: dict[str, list[tuple[str, str]]] = field(default_factory=dict)
     fetched_on: date | None = None
     from_cache: bool = False
 
@@ -92,12 +140,113 @@ class TokenSet:
             line += f"; UNRESOLVED: {shown}{more}"
         return line
 
+    def suggestion_lines(self) -> list[str]:
+        """
+        One line per unresolved symbol, ready to print.
+
+        Separate from `note()` because this is the part a human acts on, and
+        it belongs on its own lines rather than appended to a summary. A
+        symbol with no candidate still gets a line - "delisted" and "renamed"
+        are different findings and the absence of a lead is evidence for the
+        first.
+        """
+        out = []
+        for symbol in self.missing:
+            cands = self.suggestions.get(symbol) or []
+            if not cands:
+                # Not proof of a delisting. Kite leaves `name` equal to the
+                # tradingsymbol on some rows - LTIM's successor LTM is named
+                # "LTM" - and a row with no company name cannot be matched by
+                # one. Check Kite for a symbol holding the OLD token before
+                # concluding the company is gone.
+                out.append(f"  {symbol}: no candidate by name or ticker. Kite "
+                           f"leaves some rows unnamed, so this is not proof of "
+                           f"a delisting - look for a symbol carrying the old "
+                           f"instrument token")
+                continue
+            shown = ", ".join(f"{sym} ({name})" for sym, name in cands)
+            out.append(f"  {symbol}: did you mean {shown}?")
+        return out
+
 
 def cache_path(cache_dir: str = "data/cache") -> Path:
     return Path(cache_dir) / CACHE_NAME
 
 
-def _read_cache(path: Path, max_age_days: int) -> tuple[dict, date] | None:
+# ------------------------------------------------------------------ matching
+
+
+def _words(text: str) -> set[str]:
+    """A company name reduced to its distinctive words."""
+    raw = _NON_WORD.sub(" ", str(text or "").upper()).split()
+    return {w for w in raw if w and w not in _NAME_STOPWORDS}
+
+
+def _coverage(want: set[str], have: set[str]) -> float:
+    """
+    How much of `want` the candidate carries, weighted by word length.
+
+    Length-weighted on purpose: "TATA MOTORS" against "TATA CHEMICALS" scores
+    the shared 4-letter TATA at 4/10, not at one word in two, so the candidate
+    that also carries MOTORS wins clearly.
+    """
+    total = sum(len(w) for w in want)
+    if not total:
+        return 0.0
+    return sum(len(w) for w in want if w in have) / total
+
+
+def _suggest(symbol: str, want_name: str, all_names: dict[str, str],
+             limit: int = MAX_SUGGESTIONS) -> list[tuple[str, str]]:
+    """
+    Candidates for one unresolved symbol, best first. NEVER auto-applied.
+
+    Two independent paths, because renames come in two shapes:
+
+      by NAME - `TATAMOTORS` -> `TMPV`, which shares no character with the old
+      ticker at all. This is the path that actually works, and it is only
+      possible because the dump's `name` column is now cached.
+
+      by PREFIX - `SOMENAME` -> `SOMENAMEFIN`, where the ticker was extended.
+      Cheap, and catches the cases where the registered name moved but the
+      ticker barely did.
+    """
+    symbol = symbol.upper()
+    want = _words(want_name) or _words(symbol)
+    scored: dict[str, float] = {}
+
+    for cand, cname in all_names.items():
+        if cand == symbol:
+            continue
+        cov = _coverage(want, _words(cname))
+        if cov >= NAME_MATCH_FLOOR:
+            scored[cand] = max(scored.get(cand, 0.0), cov)
+
+    if len(symbol) >= MIN_PREFIX:
+        for n in range(len(symbol), MIN_PREFIX - 1, -1):
+            share = n / len(symbol)
+            if share < NAME_MATCH_FLOOR:
+                # A short shared prefix is not a lead. "TATA" of TATAMOTORS
+                # matches ten unrelated Tata companies and would fill every
+                # suggestion slot with noise.
+                break
+            pre = symbol[:n]
+            hits = [c for c in all_names if c != symbol and c.startswith(pre)]
+            if hits:
+                # Scored just under a perfect name match so a name hit wins a
+                # tie: a shared prefix is weaker evidence than a company name.
+                for c in hits:
+                    scored[c] = max(scored.get(c, 0.0), 0.9 * share)
+                break
+
+    ranked = sorted(scored.items(), key=lambda kv: (-kv[1], kv[0]))
+    return [(c, all_names.get(c, "")) for c, _ in ranked[:limit]]
+
+
+# ------------------------------------------------------------------ the dump
+
+
+def _read_cache(path: Path, max_age_days: int) -> tuple[dict, dict, date] | None:
     """The cached map, or None if absent, corrupt or stale."""
     if not path.exists():
         return None
@@ -105,6 +254,10 @@ def _read_cache(path: Path, max_age_days: int) -> tuple[dict, date] | None:
         raw = json.loads(path.read_text(encoding="utf-8"))
         fetched = date.fromisoformat(raw["fetched_on"])
         tokens = {str(k): int(v) for k, v in raw["tokens"].items()}
+        # `names` arrived after `tokens` did. A cache written before it is
+        # still perfectly good for resolving - it simply cannot suggest - and
+        # it self-heals on the next daily refresh.
+        names = {str(k): str(v) for k, v in (raw.get("names") or {}).items()}
     except Exception:
         # A torn cache costs one re-download, never a crash.
         return None
@@ -112,28 +265,33 @@ def _read_cache(path: Path, max_age_days: int) -> tuple[dict, date] | None:
         return None
     if (date.today() - fetched).days > max_age_days:
         return None
-    return tokens, fetched
+    return tokens, names, fetched
 
 
-def _write_cache(path: Path, tokens: dict[str, int], fetched: date) -> None:
+def _write_cache(path: Path, tokens: dict[str, int], names: dict[str, str],
+                 fetched: date) -> None:
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
-            json.dumps({"fetched_on": fetched.isoformat(), "tokens": tokens}),
+            json.dumps({"fetched_on": fetched.isoformat(),
+                        "tokens": tokens, "names": names}),
             encoding="utf-8")
     except Exception:
         # Caching is an optimisation; failing to cache is not failing.
         pass
 
 
-def _download(session: KiteSession) -> dict[str, int]:
+def _download(session: KiteSession) -> tuple[dict[str, int], dict[str, str]]:
     """
-    Every NSE `EQ` tradingsymbol mapped to its instrument token.
+    Every NSE `EQ` tradingsymbol mapped to its instrument token, and its name.
 
     Filtered to `EQUITY_SERIES` on purpose: the unfiltered NSE dump includes
     ETFs and government securities whose tradingsymbols can collide with the
     shapes a universe file uses, and an ETF is not something this book should
     ever be able to take an MIS position in by accident.
+
+    The `name` column is kept because a rename is otherwise undiagnosable -
+    see the module docstring.
     """
     kite = session.client()
     try:
@@ -143,6 +301,7 @@ def _download(session: KiteSession) -> dict[str, int]:
             f"Kite instruments({EXCHANGE}) failed: {e}") from e
 
     tokens: dict[str, int] = {}
+    names: dict[str, str] = {}
     for row in rows or []:
         if str(row.get("segment") or "") != EXCHANGE:
             continue
@@ -152,19 +311,21 @@ def _download(session: KiteSession) -> dict[str, int]:
         token = row.get("instrument_token")
         if symbol and token:
             tokens[symbol] = int(token)
+            names[symbol] = str(row.get("name") or "")
 
     if not tokens:
         raise InstrumentsUnavailable(
             f"Kite returned no {EXCHANGE} {EQUITY_SERIES} instruments")
-    return tokens
+    return tokens, names
 
 
 def load_tokens(session: KiteSession | None = None,
                 cache_dir: str = "data/cache",
                 max_age_days: int = 1,
-                force_refresh: bool = False) -> tuple[dict[str, int], date, bool]:
+                force_refresh: bool = False
+                ) -> tuple[dict[str, int], dict[str, str], date, bool]:
     """
-    The full NSE equity token map: (tokens, fetched_on, from_cache).
+    The full NSE equity map: (tokens, names, fetched_on, from_cache).
 
     Falls back to a STALE cache if the download fails, because permanent
     tokens do not rot - a month-old map is still correct for every name it
@@ -175,38 +336,46 @@ def load_tokens(session: KiteSession | None = None,
     if not force_refresh:
         hit = _read_cache(path, max_age_days)
         if hit is not None:
-            return hit[0], hit[1], True
+            return hit[0], hit[1], hit[2], True
 
     if session is None:
         session = KiteSession()
 
     try:
-        tokens = _download(session)
+        tokens, names = _download(session)
     except (InstrumentsUnavailable, NotAuthenticated):
         stale = _read_cache(path, max_age_days=36500)
         if stale is not None:
-            return stale[0], stale[1], True
+            return stale[0], stale[1], stale[2], True
         raise
 
     today = date.today()
-    _write_cache(path, tokens, today)
-    return tokens, today, False
+    _write_cache(path, tokens, names, today)
+    return tokens, names, today, False
 
 
 def resolve(symbols, session: KiteSession | None = None,
             cache_dir: str = "data/cache",
             max_age_days: int = 1,
-            force_refresh: bool = False) -> TokenSet:
+            force_refresh: bool = False,
+            names: dict[str, str] | None = None) -> TokenSet:
     """
     Resolve an iterable of NSE tradingsymbols to instrument tokens.
 
     Every symbol lands in exactly one of `tokens` or `missing`, so the caller
     can assert the two account for the whole universe. That assertion is the
     point of the class.
+
+    `names` is an optional `{symbol: company name}` map - the universe file's
+    `name` column - used ONLY to suggest successors for symbols that do not
+    resolve. Without it the suggestion falls back to the ticker itself, which
+    still finds ticker-shaped renames and will not find `TATAMOTORS -> TMPV`.
     """
-    all_tokens, fetched, from_cache = load_tokens(
+    all_tokens, all_names, fetched, from_cache = load_tokens(
         session, cache_dir=cache_dir, max_age_days=max_age_days,
         force_refresh=force_refresh)
+
+    wanted_names = {str(k).upper(): v for k, v in (names or {}).items()}
 
     out = TokenSet(fetched_on=fetched, from_cache=from_cache)
     for sym in symbols:
@@ -216,6 +385,11 @@ def resolve(symbols, session: KiteSession | None = None,
             out.missing.append(key)
         else:
             out.tokens[key] = token
+
+    for key in out.missing:
+        found = _suggest(key, wanted_names.get(key, ""), all_names)
+        if found:
+            out.suggestions[key] = found
     return out
 
 
@@ -232,4 +406,5 @@ def accounts_for(tokens: TokenSet, symbols) -> bool:
 
 
 __all__ = ["TokenSet", "InstrumentsUnavailable", "resolve", "load_tokens",
-           "accounts_for", "cache_path", "EXCHANGE", "EQUITY_SERIES"]
+           "accounts_for", "cache_path", "EXCHANGE", "EQUITY_SERIES",
+           "MIN_PREFIX", "NAME_MATCH_FLOOR", "MAX_SUGGESTIONS"]
