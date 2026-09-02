@@ -38,6 +38,17 @@ class CostModel:
 
         return brokerage + txn + sebi + ipft + gst + stt + stamp
 
+    def leg(self, turnover: float, is_sell: bool) -> float:
+        """
+        One leg's statutory + brokerage cost. Public because the SHORT
+        PREMIUM book pays these same rates in the opposite leg order - it
+        sells first, so STT lands on entry - and the alternative was either
+        a second copy of the rate table or a reach into `_leg` from another
+        package. Pure delegation: no behaviour here, and nothing in this
+        module calls it.
+        """
+        return self._leg(turnover, is_sell)
+
     def round_trip(self, entry_premium: float, exit_premium: float,
                    quantity: int) -> float:
         """Total statutory + brokerage cost for a full buy->sell cycle."""

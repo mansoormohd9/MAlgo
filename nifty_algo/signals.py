@@ -9,6 +9,8 @@ option premiums. Options are the execution vehicle, not the signal source.
 """
 from __future__ import annotations
 from dataclasses import dataclass
+
+from . import indicator_cache as _cache
 from typing import Optional, Sequence
 
 import numpy as np
@@ -19,6 +21,11 @@ import pandas as pd
 
 def atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
     """Average True Range - your unit of 'normal' movement."""
+    _p = _cache.pack_for(df, "atr")
+    if _p is not None:
+        _hit = _cache.served(_p, "atr", (period,), len(df))
+        if _hit is not None:
+            return _hit
     high, low, close = df["high"], df["low"], df["close"]
     prev_close = close.shift(1)
     tr = pd.concat([
@@ -36,6 +43,11 @@ def body_to_range(df: pd.DataFrame) -> pd.Series:
     Conviction measure. Near 1.0 = decisive candle. Near 0.0 = indecision.
     This one ratio expresses both your 'doji' and your 'pressure' ideas.
     """
+    _p = _cache.pack_for(df, "body_to_range")
+    if _p is not None:
+        _hit = _cache.served(_p, "body_to_range", (), len(df))
+        if _hit is not None:
+            return _hit
     rng = (df["high"] - df["low"]).replace(0, np.nan)
     return (df["close"] - df["open"]).abs() / rng
 
@@ -46,6 +58,11 @@ def close_position_in_range(df: pd.DataFrame) -> pd.Series:
     (buyers won the bar), 0.0 = at the low (sellers won).
     This is your 'buy/sell pressure' made numeric.
     """
+    _p = _cache.pack_for(df, "close_position_in_range")
+    if _p is not None:
+        _hit = _cache.served(_p, "close_position_in_range", (), len(df))
+        if _hit is not None:
+            return _hit
     rng = (df["high"] - df["low"]).replace(0, np.nan)
     return (df["close"] - df["low"]) / rng
 
@@ -83,6 +100,11 @@ def has_traded_volume(df: pd.DataFrame) -> bool:
     running without volume is running with a weaker confirmation than the
     strategy docstrings describe.
     """
+    _p = _cache.scalar_for(df, "has_traded_volume")
+    if _p is not None:
+        _hit = _cache.served_scalar(_p, "has_traded_volume", (), len(df))
+        if _hit is not None:
+            return _hit
     if "volume" not in df.columns:
         return False
     v = df["volume"]
@@ -104,6 +126,11 @@ def volume_surge(df: pd.DataFrame, lookback: int = 20,
     With volume: this bar's volume is `multiple` x the rolling average.
     Without volume: this bar's RANGE is `multiple` x the rolling average range.
     """
+    _p = _cache.pack_for(df, "volume_surge")
+    if _p is not None:
+        _hit = _cache.served(_p, "volume_surge", (lookback, multiple), len(df))
+        if _hit is not None:
+            return _hit
     if not has_traded_volume(df):
         rng = (df["high"] - df["low"]).abs()
         baseline = rng.rolling(lookback).mean()
@@ -134,6 +161,13 @@ def find_pivots(df: pd.DataFrame, lookback: int = 5) -> tuple[pd.Series, pd.Seri
     a pivot `lookback` bars after it formed. The backtester must respect
     that delay or you have look-ahead bias.
     """
+    _p = _cache.pack_for_pivots(df, "find_pivots")
+    if _p is not None:
+        _ladder = _p.pivots.get(lookback)
+        if _ladder is not None:
+            _h, _l = _ladder.visible_at(len(df) - 1)
+            return (pd.Series(_h, index=df.index),
+                    pd.Series(_l, index=df.index))
     highs, lows = df["high"], df["low"]
     win = 2 * lookback + 1
     is_high = highs == highs.rolling(win, center=True).max()
@@ -230,6 +264,12 @@ def underlying_liquidity_ok(df: pd.DataFrame, lookback: int = 20,
     A dead tape shows up as a collapsed range just as clearly as it shows up
     as thin volume.
     """
+    _p = _cache.scalar_for(df, "underlying_liquidity_ok")
+    if _p is not None:
+        _hit = _cache.served_scalar(
+            _p, "underlying_liquidity_ok", (lookback, min_ratio), len(df))
+        if _hit is not None:
+            return _hit
     if len(df) < lookback + 1:
         return False
     if has_traded_volume(df):
@@ -255,6 +295,11 @@ def opening_range(df: pd.DataFrame, minutes: int = 15,
 # ---------------- VWAP: the benchmark institutions actually trade against ----------------
 
 def typical_price(df: pd.DataFrame) -> pd.Series:
+    _p = _cache.pack_for(df, "typical_price")
+    if _p is not None:
+        _hit = _cache.served(_p, "typical_price", (), len(df))
+        if _hit is not None:
+            return _hit
     return (df["high"] + df["low"] + df["close"]) / 3.0
 
 
@@ -270,6 +315,11 @@ def vwap(df: pd.DataFrame) -> pd.Series:
     spent its time. The reclaim setups still work against it, but call it what
     it is - check has_traded_volume() before describing it as VWAP to a human.
     """
+    _p = _cache.pack_for(df, "vwap")
+    if _p is not None:
+        _hit = _cache.served(_p, "vwap", (), len(df))
+        if _hit is not None:
+            return _hit
     tp = typical_price(df)
     w = _participation_weights(df)
     day = pd.Series(df.index.date, index=df.index)
@@ -301,6 +351,11 @@ def ema(series: pd.Series, period: int) -> pd.Series:
 
 def trend_state(df: pd.DataFrame, fast: int = 9, slow: int = 21) -> pd.Series:
     """+1 = up, -1 = down, 0 = no trend. Fast/slow EMA separation with slope agreement."""
+    _p = _cache.pack_for(df, "trend_state")
+    if _p is not None:
+        _hit = _cache.served(_p, "trend_state", (fast, slow), len(df))
+        if _hit is not None:
+            return _hit
     ef, es = ema(df["close"], fast), ema(df["close"], slow)
     up = (ef > es) & (ef.diff() > 0)
     down = (ef < es) & (ef.diff() < 0)
@@ -327,12 +382,22 @@ def narrowest_range_n(df: pd.DataFrame, n: int = 7) -> pd.Series:
     buyer LONG volatility before it expands rather than after - everything else
     in this system buys once the move is already underway and IV has repriced.
     """
+    _p = _cache.pack_for(df, "narrowest_range_n")
+    if _p is not None:
+        _hit = _cache.served(_p, "narrowest_range_n", (n,), len(df))
+        if _hit is not None:
+            return _hit
     rng = df["high"] - df["low"]
     return rng == rng.rolling(n).min()
 
 
 def range_percentile(df: pd.DataFrame, lookback: int = 20) -> pd.Series:
     """Where the current bar's range sits in its own recent distribution, 0..1."""
+    _p = _cache.pack_for(df, "range_percentile")
+    if _p is not None:
+        _hit = _cache.served(_p, "range_percentile", (lookback,), len(df))
+        if _hit is not None:
+            return _hit
     rng = df["high"] - df["low"]
     return rng.rolling(lookback).rank(pct=True)
 
