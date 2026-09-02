@@ -233,6 +233,16 @@ rout. `book.Performance.yardstick()` does the same for the live book and falls
 back to the design figure - saying so - under
 `MIN_TRADES_FOR_REALISED_BREAKEVEN`.
 
+**A walk-forward window must SETTLE, or it deletes winners.** `end` is the
+last day a position may be *opened*; `run(..., settle_days=60)` then keeps
+managing until those trades finish. Anything still open when a window closes is
+excluded from the statistics, and what is open at a boundary is not a random
+sample - a loser hits its stop in days, a winner trails for weeks. Measured on
+the same variant over the same window with settlement as the only difference:
+**-0.132R over 236 trades against +0.043R over 308**, so the bias was 0.176R
+and 23% of all trades. It made every variant look worse than it was and it
+raised no error at all.
+
 **`swing/backtest.run()` is one in-sample pass; `fold_windows()` and
 [experiment.py](nifty_algo/swing/experiment.py) are how a choice gets made.**
 Variants are selected on a train window and scored on the test window that

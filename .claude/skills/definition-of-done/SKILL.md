@@ -142,19 +142,32 @@ Rules that travel with any number this produces:
   that line is the result, not a warning to scroll past. **A zero-trade
   backtest is a configuration failure to investigate, never a finding to
   report.**
-- **It takes over ten minutes** on a funded pot for India over three years.
-  Run it in the background and keep working; do not shorten `--years` to make
-  it finish, because a shorter window is a different experiment.
+- **It takes over ten minutes** on a funded pot for India over three years,
+  and a full variant sweep is closer to forty. Run it in the background and
+  keep working; do not shorten `--years` to make it finish, because a shorter
+  window is a different experiment.
+- **Windows must settle.** `run(..., settle_days=60)` keeps managing a window's
+  open positions after its entry window closes. Deleting them instead - which
+  is what the harness did at first - removes winners preferentially, because a
+  loser stops out in days and a winner trails for weeks. Measured cost of
+  getting this wrong: **0.176R and 23% of all trades**.
 - **Reproduce the distortion warnings the module prints**, do not quote the
   headline alone. Survivorship, point-in-time fundamentals and unreplayable
   news are structural for the swing book; `SYNTHETIC_PREMIUM` is optimistic by
   15-25% for the option book. A number stripped of them is a different claim
   from the one the module made.
-- **Compare against the baseline, and be suspicious of improvement.** Measured
-  2026-08-25, `--market india --years 3 --capital 100000`: **282 trades, 22.7%
-  won against a 33.3% breakeven, expectancy -0.077R, total -21.6R, max
-  drawdown 43.4R**. A change that turns that positive is a claim to be checked -
-  most often the check finds a look-ahead, not an edge.
+- **Compare against the walk-forward baseline, not a single pass.** Measured
+  2026-08-31, 33 folds of 6m train / 2m test over ~6 years, india, Rs 1,00,000:
+  the **baseline scores +0.114R over 322 out-of-sample trades**, 95% fold
+  bootstrap **[-0.059, +0.292]**. The interval spans zero, so "the book makes
+  money" is not yet a claim this data supports - and neither is "it loses".
+  Four levers have already been measured and REJECTED against that baseline:
+  the 50- and 200-day regime filters, the breakeven shift at +1.5R and +2R,
+  the 1.5-2.5 ATR stop band, and breakout-only or pullback-only. Do not
+  re-propose them without new evidence.
+- **An in-sample improvement under ~0.1R is noise at this sample size**, and
+  selecting the best variant per train window paid WORSE than leaving the book
+  alone. Train expectancy has no demonstrated predictive power here.
 - **The pot is part of the experiment, so quote it.** That run reports **795
   entries blocked by cash** against 282 taken: at Rs 1,00,000 the account
   refuses far more trades than it fills, so the pot decides *which* trades the
