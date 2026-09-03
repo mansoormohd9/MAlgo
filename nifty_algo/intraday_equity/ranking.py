@@ -40,6 +40,7 @@ never divided or normalised the way a pence-quoted LSE price is.
 """
 from __future__ import annotations
 
+from bisect import bisect_left
 from dataclasses import dataclass, field
 from datetime import date
 
@@ -114,8 +115,82 @@ def relative_strength(stock_closes: pd.Series, bench_closes: pd.Series,
     return float(s[-1] / s[-1 - days] - b[-1] / b[-1 - days])
 
 
+@dataclass
+class _SymbolDaily:
+    """One symbol's daily aggregates over its whole history."""
+    dates: list
+    closes: pd.Series
+    atr: np.ndarray
+    turnover: np.ndarray
+
+
+class DailyHistory:
+    """
+    Per-symbol daily aggregates over the WHOLE history, computed once.
+
+    `morning_ranks` used to rebuild these on every session: it filtered the
+    intraday frame with `frame.index.date < day` - one Python date object per
+    row, 55,000 per symbol - and then re-aggregated the entire prior history
+    with a groupby. Measured on the India universe those two steps cost 1.09s
+    and 0.96s PER SESSION, which was 40% of the whole backtest spent
+    recomputing yesterday's answer 739 times.
+
+    WHY PRECOMPUTING IS NOT LOOK-AHEAD. Everything served here is
+    prefix-stable, so the value at row k is identical whether or not rows
+    after k exist:
+
+      - a daily OHLCV row for a session before `day` does not depend on `day`;
+      - `ewm(adjust=False)` is a causal recursion seeded at row 0, so ATR at
+        row k reads rows 0..k only;
+      - `rolling(20).mean()` at row k reads rows k-19..k only.
+
+    Reading row `k-1` after `prior_count()` therefore gives exactly what
+    truncating the intraday frame first and aggregating afterwards gave -
+    which `test_intraday_equity_ranking.py` asserts numerically over every
+    session rather than arguing here.
+    """
+
+    def __init__(self, bars: dict, benchmark: pd.DataFrame | None,
+                 atr_period: int = 14, adv_window: int = 20):
+        self.symbols: dict[str, _SymbolDaily] = {}
+        for symbol, frame in bars.items():
+            daily = _daily_frame(frame)
+            if daily.empty:
+                continue
+            closes = daily["close"]
+            pc = closes.shift(1)
+            tr = np.maximum(daily["high"] - daily["low"],
+                            np.maximum((daily["high"] - pc).abs(),
+                                       (daily["low"] - pc).abs()))
+            atr = tr.ewm(alpha=1 / atr_period, adjust=False).mean()
+            # Turnover is stored RAW and averaged at read time over the same
+            # trailing slice `.tail(20).mean()` took. A precomputed
+            # `rolling(20).mean()` is algebraically the same and differs in
+            # the last ulp - float64 summation order - which showed up as a
+            # 1e-6 discrepancy on values of order 1e10. Harmless, but exact
+            # equality is a far stronger claim to verify against than a
+            # tolerance, so the cheap slice is worth its cost here.
+            self.symbols[symbol] = _SymbolDaily(
+                dates=list(daily.index), closes=closes,
+                atr=atr.to_numpy(dtype=float),
+                turnover=daily["turnover"].to_numpy(dtype=float))
+        self.adv_window = adv_window
+
+        bench = _daily_closes(benchmark)
+        self.bench_closes = bench
+        self.bench_dates = list(bench.index)
+
+    def prior_count(self, dates: list, day: date) -> int:
+        """How many sessions fall strictly before `day`."""
+        return bisect_left(dates, day)
+
+    def bench_upto(self, day: date) -> pd.Series:
+        return self.bench_closes.iloc[:bisect_left(self.bench_dates, day)]
+
+
 def morning_ranks(bars: dict, benchmark: pd.DataFrame, day: date, cfg,
-                  min_prior_sessions: int = 25) -> list[MorningRank]:
+                  min_prior_sessions: int = 25,
+                  history: "DailyHistory | None" = None) -> list[MorningRank]:
     """
     Rank the universe as at the OPEN of `day`, from prior sessions only.
 
@@ -125,22 +200,29 @@ def morning_ranks(bars: dict, benchmark: pd.DataFrame, day: date, cfg,
     this into trap T1 and produce a book that appears to work.
     """
     ie = cfg.intraday_equity
+    if history is None:
+        # Built here when a caller has not supplied one, so there is exactly
+        # ONE code path rather than a fast branch and a slow branch that can
+        # disagree. The backtest builds it once and passes it in; the live
+        # runner's `bars` is a single session, so building it costs nothing.
+        history = DailyHistory(bars, benchmark)
 
-    bench_daily = _daily_closes(benchmark)
-    bench_daily = bench_daily[bench_daily.index < day]
+    bench_daily = history.bench_upto(day)              # <-- see the docstring
     if len(bench_daily) < ie.rs_long_days + 1:
         return []
 
     out: list[MorningRank] = []
-    for symbol, frame in bars.items():
-        prior = frame[frame.index.date < day]          # <-- see the docstring
-        if prior.empty:
+    for symbol in bars:
+        sd = history.symbols.get(symbol)
+        if sd is None:
             continue
-        daily = _daily_frame(prior)
-        if len(daily) < min_prior_sessions:
+        # Sessions strictly before `day` - the entire safety property, now
+        # expressed as a positional bound instead of a boolean mask.
+        k = history.prior_count(sd.dates, day)
+        if k < min_prior_sessions:
             continue
 
-        closes = daily["close"]
+        closes = sd.closes.iloc[:k]
         rs_s = relative_strength(closes, bench_daily, ie.rs_short_days)
         rs_l = relative_strength(closes, bench_daily, ie.rs_long_days)
         if rs_s is None or rs_l is None:
@@ -150,12 +232,8 @@ def morning_ranks(bars: dict, benchmark: pd.DataFrame, day: date, cfg,
         if prev_close <= 0:
             continue
 
-        pc = closes.shift(1)
-        tr = np.maximum(daily["high"] - daily["low"],
-                        np.maximum((daily["high"] - pc).abs(),
-                                   (daily["low"] - pc).abs()))
-        atr = float(tr.ewm(alpha=1 / 14, adjust=False).mean().iloc[-1])
-        adv = float(daily["turnover"].tail(20).mean())
+        atr = float(sd.atr[k - 1])
+        adv = float(sd.turnover[max(0, k - history.adv_window):k].mean())
 
         # Blend, tilted to the shorter window: an intraday book cares more
         # about which names are in play this week than this quarter.
@@ -263,5 +341,5 @@ def volume_ratio(window: pd.DataFrame, lookback: int = 20) -> float | None:
     return float(vol.iloc[-1]) / baseline
 
 
-__all__ = ["MorningRank", "morning_ranks", "prefilter", "bar_score",
+__all__ = ["MorningRank", "DailyHistory", "morning_ranks", "prefilter", "bar_score",
            "relative_strength", "session_position", "volume_ratio"]

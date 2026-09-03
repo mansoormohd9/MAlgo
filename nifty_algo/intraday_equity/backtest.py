@@ -57,6 +57,7 @@ WHAT IT CANNOT MEASURE - printed above every result, never only here.
 from __future__ import annotations
 
 import hashlib
+from bisect import bisect_left
 from dataclasses import dataclass, field, replace
 from datetime import date
 
@@ -66,7 +67,7 @@ import pandas as pd
 from ..backtest import Metrics, compute_metrics
 from ..config import DEFAULT, Config
 from ..positions import ExitKind, ExitLadder
-from . import ranking, scanner, sizing
+from . import diagnostics, ranking, scanner, sizing
 from .costs_intraday import (DEFAULT_INTRADAY_EQUITY_COSTS, VERIFIED_ON,
                              IntradayEquityCostModel)
 
@@ -125,6 +126,16 @@ class IntradayTrade:
     ambiguous: bool = False
     option_type: str = ""
     lots: int = 1
+    #: DIAGNOSTIC ONLY - maximum favourable and adverse excursion, in R off
+    #: the INITIAL risk, over every bar the position was held. These record;
+    #: they never decide, and `test_intraday_equity_diagnostics.py` asserts
+    #: that adding them leaves every `r_multiple` unchanged.
+    #:
+    #: They exist because the headline cannot distinguish "the move never
+    #: came" from "the move came and the square-off took it away", and those
+    #: two call for opposite responses.
+    mfe_r: float = 0.0
+    mae_r: float = 0.0
 
 
 @dataclass
@@ -199,6 +210,12 @@ BOOK_ONLY_FIELDS = frozenset({
     "trail_atr_multiple", "partial_exit_fraction", "breakeven_at_r",
     "mis_leverage", "participation_cap_pct", "max_chase_pct",
     "min_confidence", "enforce_regime_gate",
+    # `force_exit` is read ONLY by `_manage`; `scanner.evaluate_session` reads
+    # `entry_start` and `entry_cutoff` and never this. Leaving it out made the
+    # square-off counterfactual - the single most informative experiment on
+    # this book - pay a full scan pass per value for nothing. `entry_cutoff`
+    # deliberately stays OUT of this set, because the scanner does read it.
+    "force_exit",
     "rs_prefilter_n", "rs_short_days", "rs_long_days",
     "w_setup", "w_relative_strength", "w_reward_risk", "w_volume",
     "w_session_position",
@@ -279,6 +296,9 @@ class _Open:
     realised_r: float = 0.0
     legs: int = 1
     partial_banked: bool = False
+    #: Running excursions, accumulated in `_manage`. Diagnostic only.
+    peak_r: float = 0.0
+    trough_r: float = 0.0
 
 
 def intraday_trade_cfg(cfg: Config):
@@ -303,6 +323,46 @@ def _fill_price(next_bar, cfg, costs) -> float:
     tick = cfg.intraday_equity_broker.tick_size
     raw = float(next_bar["open"]) * slip
     return round(round(raw / tick) * tick, 2) if tick else raw
+
+
+class _SessionIndex:
+    """
+    Positional session boundaries for one symbol, computed once.
+
+    `frame[frame.index.date == day]` builds one Python `date` per row and
+    scans the whole frame, and `run()` did that THREE times per watchlist
+    symbol per session (`== day`, `< day`, then the last prior session).
+    Measured on the India universe that was 485ms a session - 9% of the whole
+    backtest - spent rediscovering boundaries that never move.
+
+    The index is sorted, so every session is a contiguous slice. `bisect`
+    then answers "which rows precede `day`" for a date this symbol does not
+    even have, which the boolean mask also did.
+    """
+    __slots__ = ("days", "bounds")
+
+    def __init__(self, frame: pd.DataFrame):
+        day_vals, starts = np.unique(frame.index.normalize().to_numpy(),
+                                     return_index=True)
+        self.days = [pd.Timestamp(v).date() for v in day_vals]
+        self.bounds = np.append(starts, len(frame))
+
+    def _slice(self, frame, i: int):
+        return frame.iloc[int(self.bounds[i]):int(self.bounds[i + 1])]
+
+    def session(self, frame, day) -> pd.DataFrame | None:
+        """This symbol's bars for `day`, or None if it did not trade."""
+        i = bisect_left(self.days, day)
+        if i >= len(self.days) or self.days[i] != day:
+            return None
+        return self._slice(frame, i)
+
+    def previous(self, frame, day) -> pd.DataFrame | None:
+        """The last full session strictly before `day`."""
+        i = bisect_left(self.days, day)
+        if i == 0:
+            return None
+        return self._slice(frame, i - 1)
 
 
 def run(cfg: Config, bars: dict, benchmark: pd.DataFrame | None = None,
@@ -344,13 +404,20 @@ def run(cfg: Config, bars: dict, benchmark: pd.DataFrame | None = None,
     trail_r = ie.trail_atr_multiple
     stop_pcts: list[float] = []
 
+    # Built ONCE, before the session loop. Both of these replace per-session
+    # rediscovery of facts that do not change; neither alters a decision, and
+    # `test_intraday_equity_ranking.py` asserts that numerically.
+    session_index = {s: _SessionIndex(f) for s, f in bars.items() if len(f)}
+    daily_history = ranking.DailyHistory(bars, benchmark)
+
     for n, day in enumerate(sessions, 1):
         if progress:
             progress(n, len(sessions), day)
         result.stats.days += 1
 
         # ---- the morning cut, from PRIOR sessions only (trap T1) --------
-        ranks = ranking.morning_ranks(bars, benchmark, day, cfg)
+        ranks = ranking.morning_ranks(bars, benchmark, day, cfg,
+                                      history=daily_history)
         watch = ranking.prefilter(ranks, cfg)
         morning = {r.symbol: r for r in ranks}
         if not watch:
@@ -363,13 +430,13 @@ def run(cfg: Config, bars: dict, benchmark: pd.DataFrame | None = None,
             frame = bars.get(symbol)
             if frame is None:
                 continue
-            session = frame[frame.index.date == day]
-            if session.empty:
+            idx = session_index.get(symbol)
+            session = idx.session(frame, day) if idx else None
+            if session is None or session.empty:
                 continue
-            prior = frame[frame.index.date < day]
-            if prior.empty:
+            last = idx.previous(frame, day)
+            if last is None or last.empty:
                 continue
-            last = prior[prior.index.date == prior.index[-1].date()]
 
             hit = cache.get(symbol, day) if cache is not None else None
             if hit is None:
@@ -528,6 +595,11 @@ def _manage(pos: _Open, bar, ts, i: int, ladder: ExitLadder, trail_r: float,
     worst_r = (float(bar["low"]) - entry) / rp
     mark_r = (float(bar["close"]) - entry) / rp
 
+    # Diagnostic accumulation ONLY. Recorded before any exit decision so the
+    # square-off bar's own excursion is captured, and read by nothing below.
+    pos.peak_r = max(pos.peak_r, best_r)
+    pos.trough_r = min(pos.trough_r, worst_r)
+
     # A bar that covers both the stop and the target is AMBIGUOUS, and the
     # ladder resolves it pessimistically - the stop wins, at the level the
     # bar opened with.
@@ -591,7 +663,8 @@ def _close(pos: _Open, price: float, ts, i: int, reason: str, cfg, costs,
         exit_underlying=price, stop_points=rp, outcome=reason,
         bars_held=max(0, i - pos.entry_index), r_multiple=r, reason=reason,
         quantity=qty, net_pnl=net, exit_legs=pos.legs,
-        partial_banked=pos.partial_banked, ambiguous=ambiguous))
+        partial_banked=pos.partial_banked, ambiguous=ambiguous,
+        mfe_r=pos.peak_r, mae_r=pos.trough_r))
     pos.state.lots_remaining = 0
 
 
@@ -601,6 +674,35 @@ __all__ = ["run", "Result", "IntradayTrade", "DayStats", "SignalCache",
 
 
 # --------------------------------------------------------------- CLI
+
+
+def _save_trades(res: Result, market_key: str, cfg: Config) -> str | None:
+    """
+    Persist the finished trades so a new question costs seconds, not an hour.
+
+    A 30-minute pass that prints its conclusions and discards the trades makes
+    every follow-up question - "what did the 13:00 entries do", "how far did
+    the force-exits get" - cost another 30 minutes, which is how a diagnosis
+    turns into a guess. One parquet ends that.
+
+    Written AFTER the report, and a failure to write is logged rather than
+    raised: the analysis is the deliverable, the file is a convenience.
+    """
+    from dataclasses import asdict
+    from pathlib import Path
+
+    if not res.trades:
+        return None
+    path = (Path(cfg.intraday_equity.cache_dir)
+            / f"intraday_trades_{market_key}.parquet")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame([asdict(t) for t in res.trades]).to_parquet(path)
+        print(f"\n{len(res.trades)} trades -> {path}")
+        return str(path)
+    except Exception as e:                                # pragma: no cover
+        print(f"\ncould not persist trades ({e}) - the analysis above stands")
+        return None
 
 
 def _report(res: Result, cfg: Config) -> None:
@@ -651,6 +753,18 @@ def _report(res: Result, cfg: Config) -> None:
     print("  rejection ledger (why nothing fired):")
     for stage, n in sorted(res.rejections.items(), key=lambda kv: -kv[1]):
         print(f"    {stage:<24} {n:,}")
+
+    if res.trades:
+        # WHY the diagnostics print with every result rather than on request:
+        # the headline cannot separate "the move never came" from "the move
+        # came and the square-off took it back", and those two call for
+        # opposite responses. A verdict printed without them invites the
+        # wrong one.
+        print()
+        print("=" * 70)
+        print("DIAGNOSTICS - describing the loss, not selecting from it")
+        print("=" * 70)
+        print(diagnostics.summary(res.trades))
 
 
 def _main(argv=None):    # pragma: no cover
@@ -721,6 +835,7 @@ def _main(argv=None):    # pragma: no cover
               universe_key=market.universe_csv, progress=progress)
     print()
     _report(res, cfg)
+    _save_trades(res, market.cache_suffix, cfg)
     return 0
 
 
