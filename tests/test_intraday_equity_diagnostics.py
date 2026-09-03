@@ -210,3 +210,91 @@ def test_the_summary_renders_without_a_backtest(result):
                      "square-off pessimism", "entry time"):
         assert expected in text
     assert dx.summary([]) == "no trades"
+
+
+# ------------------------------------------------- stop-invariant units
+
+
+def test_percent_excursions_are_invariant_to_the_stop_multiple():
+    """
+    THE TEST THE E4 COMPARISON RESTS ON.
+
+    Two trades with the same price path but different stops must report the
+    same MFE%/MAE% and different MFE_r/MAE_r. If this ever fails, every
+    cross-stop-multiple comparison in the experiment log is meaningless.
+    """
+    wide = _trade(entry_underlying=100.0, stop_points=1.0, mfe_r=0.5, mae_r=-0.3)
+    tight = _trade(entry_underlying=100.0, stop_points=0.5, mfe_r=1.0, mae_r=-0.6)
+
+    assert dx.mfe_pct(wide) == pytest.approx(dx.mfe_pct(tight))
+    assert dx.mae_pct(wide) == pytest.approx(dx.mae_pct(tight))
+    assert dx.mfe_pct(wide) == pytest.approx(0.005)
+    assert wide.mfe_r != tight.mfe_r          # the R view disagrees, as it must
+
+
+def test_percent_attainment_is_unmoved_by_halving_the_stop():
+    """
+    `mfe_attainment` rises when the stop halves even though price did the
+    same thing - that is the denominator. `attainment_pct` must not.
+    """
+    wide = [_trade(entry_underlying=100.0, stop_points=1.0, mfe_r=r)
+            for r in (0.4, 0.8, 1.2, 2.0)]
+    tight = [_trade(entry_underlying=100.0, stop_points=0.5, mfe_r=r * 2)
+             for r in (0.4, 0.8, 1.2, 2.0)]
+
+    assert dx.attainment_pct(wide) == dx.attainment_pct(tight)
+    assert dx.mfe_attainment(wide)[1.0] != dx.mfe_attainment(tight)[1.0]
+
+
+def test_the_derivation_matches_an_independent_computation(result):
+    """
+    `mfe_pct` is derived from `mfe_r` and `stop_points`. Recomputed here from
+    the excursion price implied by those fields, so a transposed factor would
+    show up rather than propagating quietly through every E4 table.
+    """
+    for t in result.trades[:50]:
+        implied_high = t.entry_underlying + t.mfe_r * t.stop_points
+        assert dx.mfe_pct(t) == pytest.approx(
+            implied_high / t.entry_underlying - 1.0)
+
+
+def test_invariant_summary_reports_the_sizing_check(result):
+    """
+    A variant that goes capital-bound risks less per trade, and then neither
+    rupees nor R mean what they did. The check must be present, not implied.
+    """
+    inv = dx.invariant_summary(result.trades)
+    assert inv["median_risk_inr"] > 0
+    for key in ("net_inr", "median_mfe_pct", "median_mae_pct",
+                "median_stop_pct", "attainment_pct"):
+        assert key in inv
+    assert dx.invariant_summary([]) == {}
+
+
+# ------------------------------------------------- the overlap matcher
+
+
+def test_overlap_matches_on_symbol_and_entry_bar():
+    a = [_trade(symbol="AAA", entry_time=pd.Timestamp("2026-01-05 11:45"),
+                r_multiple=-1.0, net_pnl=-1000.0),
+         _trade(symbol="BBB", entry_time=pd.Timestamp("2026-01-05 12:00"),
+                r_multiple=+2.0, net_pnl=+2000.0)]
+    b = [_trade(symbol="AAA", entry_time=pd.Timestamp("2026-01-05 11:45"),
+                r_multiple=-0.5, net_pnl=-400.0),
+         _trade(symbol="CCC", entry_time=pd.Timestamp("2026-01-05 13:00"),
+                r_multiple=+1.0, net_pnl=+800.0)]
+
+    ov = dx.overlap(a, b)
+    assert ov["n"] == 1
+    assert ov["baseline_r"] == pytest.approx(-1.0)
+    assert ov["variant_r"] == pytest.approx(-0.5)
+    assert ov["baseline_inr"] == pytest.approx(-1000.0)
+    assert ov["variant_inr"] == pytest.approx(-400.0)
+    assert ov["share_of_baseline"] == pytest.approx(0.5)
+
+
+def test_overlap_with_no_shared_trades_is_reported_not_crashed():
+    a = [_trade(symbol="AAA")]
+    b = [_trade(symbol="ZZZ")]
+    assert dx.overlap(a, b) == {"n": 0}
+    assert dx.overlap([], [])["n"] == 0

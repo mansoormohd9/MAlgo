@@ -251,6 +251,32 @@ class SessionConfig:
     force_exit: time = time(15, 10)    # flat before close, always
     market_close: time = time(15, 30)
 
+    #: Prior trading days prepended to `Context.bars` so indicators are
+    #: already warm at 09:15.
+    #:
+    #: WHY THIS EXISTS. `Context.bars` is one session (engine.py:165,
+    #: backtest.py:413), so a 30-bar warm-up is spent INSIDE the day: the
+    #: first decidable bar is 11:45 and `entry_start = 09:30` is dead config.
+    #: The book cannot see the open, the opening range break, or the morning
+    #: trend - the most volatile hours of the session, and the ones an option
+    #: BUYER needs, since a long option is long vega and short theta. It also
+    #: means the regime is classified 31 bars in, against a mature 5-minute
+    #: ATR of ~15 points, which is what makes `gap_atr_multiple = 0.5` fire on
+    #: an 8-point overnight move and tag almost every day GAP_DAY.
+    #:
+    #: WHY IT DEFAULTS TO 0. Every result this project has ever produced was
+    #: produced at 0, and turning it on changes what the book trades rather
+    #: than how it sizes. It is a PRE-REGISTERED VARIANT in the sense
+    #: `swing.experiment` means it - measure it against 0 on out-of-sample
+    #: data and keep whichever wins, the same way `regime_ma_days = 0`
+    #: preserves the pre-regime-filter baseline.
+    #:
+    #: SAFE ONLY BECAUSE the session-anchored reads are now day-aware -
+    #: `signals.last_session` / `signals.session_open`. Raising this before
+    #: that change would have made `opening_range` return a finished day's
+    #: range, silently.
+    warmup_sessions: int = 0
+
     opening_range_minutes: int = 15
     bar_interval_minutes: int = 5
 

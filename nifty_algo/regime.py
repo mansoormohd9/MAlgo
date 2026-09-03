@@ -64,8 +64,13 @@ def classify(bars: pd.DataFrame, prev_day_close: float,
         return RegimeReading(Regime.UNKNOWN, 0.0, 0.0, 0.0, "zero atr")
 
     # --- gap ---
-    session_open = float(bars["open"].iloc[0])
-    _, gap_atr = sig.gap_metrics(session_open, prev_day_close, current_atr)
+    # `sig.session_open`, not `bars["open"].iloc[0]` - the frame may carry
+    # warm-up sessions, and the first bar of the frame would then be a
+    # previous day's open, silently turning the gap into a multi-day move.
+    open_px = sig.session_open(bars)
+    if open_px is None:
+        return RegimeReading(Regime.UNKNOWN, 0.0, 0.0, 0.0, "no session open")
+    _, gap_atr = sig.gap_metrics(open_px, prev_day_close, current_atr)
 
     # --- opening range width ---
     orange = sig.opening_range(bars, s.opening_range_minutes, s.bar_interval_minutes)

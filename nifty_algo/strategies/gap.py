@@ -48,8 +48,10 @@ class GapStrategy(BaseStrategy):
         if not ctx.prev_day_close or ctx.prev_day_close <= 0:
             return self._reject("no prior close")
 
-        session_open = float(df["open"].iloc[0])
-        gap_pts, gap_atr = sig.gap_metrics(session_open, float(ctx.prev_day_close),
+        open_px = sig.session_open(df)
+        if open_px is None:
+            return self._reject("no session open")
+        gap_pts, gap_atr = sig.gap_metrics(open_px, float(ctx.prev_day_close),
                                            current_atr)
 
         if abs(gap_atr) < st.gap_min_atr:

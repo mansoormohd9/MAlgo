@@ -167,6 +167,12 @@ class TradingEngine:
             st.last_error = "no bars for the current session"
             return st
 
+        # The frame strategies actually see. Identical to `session_df` at the
+        # default `warmup_sessions = 0`; with warm-up it carries prior days so
+        # indicators are converged at 09:15 instead of at 11:45.
+        strategy_df = self.feed.session_slice_with_warmup(
+            df, self.cfg.session.warmup_sessions)
+
         trading_day = session_df.index[-1].date()
         if self._day != trading_day:
             self.risk.start_day(trading_day)
@@ -182,7 +188,7 @@ class TradingEngine:
 
         prior = self.feed.prior_session(df, trading_day)
         ctx = Context(
-            bars=session_df,
+            bars=strategy_df,
             now=bar_time.time(),
             prev_day_high=prior.high,
             prev_day_low=prior.low,
@@ -191,7 +197,7 @@ class TradingEngine:
         )
 
         # --- regime ---
-        reading = classify(session_df, prior.close, self.cfg)
+        reading = classify(strategy_df, prior.close, self.cfg)
         st.regime = reading
         st.has_volume = sig.has_traded_volume(session_df)
 

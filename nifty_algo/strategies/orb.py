@@ -45,8 +45,11 @@ class OpeningRangeRetestStrategy(BaseStrategy):
             return self._reject("no opening range")
         or_high, or_low = orange
 
+        # Anchored to today, not to the frame: with warm-up sessions
+        # prepended, `df.iloc[or_bars:]` would be "everything after the third
+        # bar of the warm-up window", i.e. almost the whole frame.
         or_bars = max(1, s.opening_range_minutes // s.bar_interval_minutes)
-        after = df.iloc[or_bars:]
+        after = sig.last_session(df).iloc[or_bars:]
         if len(after) < 3:
             return self._reject("too soon after opening range")
 

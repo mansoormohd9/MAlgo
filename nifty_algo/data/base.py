@@ -36,6 +36,11 @@ class PriorSession:
     high: float
     low: float
     close: float
+    #: False when these were FABRICATED from the current session because the
+    #: frame held no prior day. The values are still returned so the engine
+    #: does not crash on a same-day file, but a caller that trades on them is
+    #: trading on invention - see `prior_session`.
+    is_real: bool = True
 
 
 class DataFeed(ABC):
@@ -90,6 +95,29 @@ class DataFeed(ABC):
         return df[df.index.date == target]
 
     @staticmethod
+    def session_slice_with_warmup(df: pd.DataFrame, sessions: int = 0,
+                                  day: Optional[date] = None) -> pd.DataFrame:
+        """
+        The target session, plus `sessions` prior trading days ahead of it.
+
+        `sessions = 0` returns exactly what `session_slice` returns, so the
+        default path is unchanged. Anything above 0 hands strategies a frame
+        whose indicators are already converged at 09:15 - see
+        `SessionConfig.warmup_sessions` for why that matters and what it costs.
+
+        The extra days are WARM-UP, not context to be read positionally. Every
+        session-scoped read goes through `signals.last_session`.
+        """
+        if df.empty:
+            return df
+        target = day or df.index[-1].date()
+        if sessions <= 0:
+            return df[df.index.date == target]
+        days = sorted({d for d in df.index.date if d <= target})
+        keep = set(days[-(sessions + 1):])
+        return df[[d in keep for d in df.index.date]]
+
+    @staticmethod
     def prior_session(df: pd.DataFrame, day: Optional[date] = None) -> PriorSession:
         """
         Prior-day high/low/close for Context.
@@ -98,15 +126,25 @@ class DataFeed(ABC):
         prior day in the frame - a same-day CSV should not crash the engine,
         but the levels it produces are meaningless, so strategies relying on
         them will simply not fire.
+
+        THE FALLBACK IS FLAGGED, because "meaningless" was not enough. The
+        backtester consumed it without asking: for the FIRST day of every
+        window, `prev_day_close` became the close of that same day's first
+        5-minute bar, so `gap_metrics` computed `open[0] - close[0]` - a
+        fraction of an ATR. That day could not be classified GAP_DAY no matter
+        what the index actually did overnight, and `GapStrategy` rejected it
+        as "gap too small" every time. A fabricated fact that reads as a real
+        one is exactly what `research.Fact.unknown` exists to prevent
+        elsewhere; `is_real` is the same idea with one field.
         """
         if df.empty:
-            return PriorSession(0.0, 0.0, 0.0)
+            return PriorSession(0.0, 0.0, 0.0, is_real=False)
         target = day or df.index[-1].date()
         prior = df[df.index.date < target]
         if prior.empty:
             first = df.iloc[0]
             return PriorSession(float(first["high"]), float(first["low"]),
-                                float(first["close"]))
+                                float(first["close"]), is_real=False)
         last_day = prior.index[-1].date()
         pdf = prior[prior.index.date == last_day]
         return PriorSession(

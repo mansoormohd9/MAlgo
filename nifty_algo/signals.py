@@ -281,14 +281,57 @@ def underlying_liquidity_ok(df: pd.DataFrame, lookback: int = 20,
     return baseline > 0 and recent / baseline >= min_ratio
 
 
+# ---------------- session anchoring ----------------
+#
+# THE FRAME IS NOT ALWAYS ONE DAY, AND THREE READS ASSUME IT IS.
+#
+# `opening_range`, the regime classifier's `session_open` and the gap
+# strategies all mean "TODAY'S first bar" when they write `.iloc[0]`. That was
+# true for free while `Context.bars` was a single session (engine.py:165,
+# backtest.py:413) - and it is the reason `config.py` carries an explicit
+# warning never to prepend prior-day bars.
+#
+# The warning is right about the danger and wrong about the remedy. Prepending
+# warm-up bars is the only way this book can trade before ~11:45, because
+# indicator warm-up otherwise consumes the whole morning inside the session.
+# So the fix is to remove the assumption rather than to preserve the
+# constraint: anchor every session-scoped read to the LAST day in the frame,
+# the way `vwap()` already groups by day. Then a multi-day frame is safe, and
+# a single-session frame behaves exactly as it always did.
+#
+# This is the precondition for `SessionConfig.warmup_sessions`. Doing it in
+# the other order reintroduces precisely the silent bug the warning describes:
+# an opening range from a day that is already over, with no error anywhere.
+
+
+def last_session(df: pd.DataFrame) -> pd.DataFrame:
+    """The most recent trading day's bars, from a frame that may hold more."""
+    if df.empty:
+        return df
+    try:
+        days = df.index.date
+    except AttributeError:
+        return df                      # not a DatetimeIndex; caller's problem
+    return df[days == days[-1]]
+
+
+def session_open(df: pd.DataFrame) -> float | None:
+    """Today's opening print, whatever else the frame carries."""
+    s = last_session(df)
+    if s.empty:
+        return None
+    return float(s["open"].iloc[0])
+
+
 # ---------------- opening range ----------------
 
 def opening_range(df: pd.DataFrame, minutes: int = 15,
                   bar_minutes: int = 5) -> tuple[float, float] | None:
+    session = last_session(df)
     bars = max(1, minutes // bar_minutes)
-    if len(df) < bars:
+    if len(session) < bars:
         return None
-    window = df.iloc[:bars]
+    window = session.iloc[:bars]
     return float(window["high"].max()), float(window["low"].min())
 
 

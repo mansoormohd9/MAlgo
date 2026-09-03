@@ -279,6 +279,7 @@ class Backtester:
         self._vix: Optional[pd.Series] = None
         self._days: list[dict] = []
         self._day_outcomes: list[str] = []
+        self._skipped_days: list = []
         self.load_vix()
 
     def run(self, bars: pd.DataFrame, strategy_keys: list[str] | None = None,
@@ -287,6 +288,7 @@ class Backtester:
         self.warnings = []
         self._days = []
         self._day_outcomes = []
+        self._skipped_days = []
 
         if not sig.has_traded_volume(bars):
             self.warnings.append(
@@ -342,6 +344,18 @@ class Backtester:
                 all_trades.extend(trades)
         else:
             all_trades = self._run_window(bars, strategy_keys, mode)
+
+        if self._skipped_days:
+            # Said out loud, because a silently shorter sample is how a
+            # result quietly stops describing the period it claims to.
+            days = ", ".join(str(d) for d in self._skipped_days[:3])
+            more = "" if len(self._skipped_days) <= 3 else f" (+{len(self._skipped_days) - 3} more)"
+            self.warnings.append(
+                f"{len(self._skipped_days)} session(s) skipped for having no "
+                f"prior session in the frame - their gap, PDH/PDL levels and "
+                f"regime would have been built on a fabricated prior close: "
+                f"{days}{more}."
+            )
 
         rr = self.cfg.capital.reward_risk_ratio
         by_strategy: dict[str, Metrics] = {}
@@ -409,15 +423,26 @@ class Backtester:
     def _run_window(self, bars: pd.DataFrame, strategy_keys: list[str] | None,
                     mode: Mode) -> list[BacktestTrade]:
         trades: list[BacktestTrade] = []
+        warm = self.cfg.session.warmup_sessions
         for day in sorted({d for d in bars.index.date}):
-            session = bars[bars.index.date == day]
+            frame = DataFeed.session_slice_with_warmup(bars, warm, day)
+            # Where TODAY starts inside that frame. 0 when there is no
+            # warm-up, which is what keeps the default path identical.
+            session_start = int((frame.index.date < day).sum())
             prior = DataFeed.prior_session(bars, day)
-            trades.extend(self._run_session(session, prior, day,
+            if not prior.is_real:
+                # No prior session in the frame, so the gap, the PDH/PDL
+                # levels and the regime are all built on a fabricated close.
+                # Skipping costs one session; trading it books trades against
+                # numbers that were invented.
+                self._skipped_days.append(day)
+                continue
+            trades.extend(self._run_session(frame, session_start, prior, day,
                                             strategy_keys, mode))
         return trades
 
-    def _run_session(self, session: pd.DataFrame, prior, day: date,
-                     strategy_keys: list[str] | None, mode: Mode
+    def _run_session(self, session: pd.DataFrame, session_start: int, prior,
+                     day: date, strategy_keys: list[str] | None, mode: Mode
                      ) -> list[BacktestTrade]:
         """
         One simulated trading day, INCLUDING the money-management rules.
@@ -445,9 +470,20 @@ class Backtester:
         # BarReplayer is what keeps this honest - see its docstring. The
         # window it yields ends at the decision bar, so find_pivots() cannot
         # see the future bars it would need to confirm a pivot early.
-        replayer = BarReplayer(session, warmup=max(self.cfg.signal.atr_period, 30))
+        #
+        # `start_i` is where the decision loop begins. With no warm-up
+        # sessions that is bar 30 of the day itself - 11:45, and the reason
+        # `entry_start = 09:30` has never once bound. With warm-up sessions
+        # the indicators are already converged, so it is today's FIRST bar
+        # and the entry window becomes the real constraint.
+        required = max(self.cfg.signal.atr_period, 30)
+        start_i = max(session_start, required)
+        # `max_window` must not clip the warm-up off the left edge; that would
+        # silently un-converge the very indicators it was added to converge.
+        replayer = BarReplayer(session, warmup=start_i,
+                               max_window=max(500, len(session)))
 
-        for i in range(replayer.warmup, len(session)):
+        for i in range(start_i, len(session)):
             if gov.entries_taken >= self.cfg.capital.max_entries_per_session:
                 break
             if b.apply_session_governors and gov.evaluate().day_over:
