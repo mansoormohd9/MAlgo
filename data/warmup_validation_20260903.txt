@@ -1,0 +1,60 @@
+74,115 bars | 993 sessions | 2022-09-05 -> 2026-09-03
+
+  running warm=0 ...
+  warm=0 done in 379s (1272 trades)
+  running warm=1 ...
+  warm=1 done in 623s (1951 trades)
+warm  trades  <11:45  first   win%    be%   exp R             95% CI     PF      totR   maxDD folds
+   0    1272       0  11:45  25.4%  27.2%  -0.051 [-0.123,+0.021]   0.91    -65.13   84.50    21
+   1    1951     899  09:30  26.4%  27.1%  -0.019 [-0.077,+0.040]   0.97    -36.21   68.45    21
+  warn: This frame has NO TRADED VOLUME - it is an index series. The participation gates fall back to range expansion and VWAP degrades to a session TWAP (see signals.h
+  warn: 21 session(s) skipped for having no prior session in the frame - their gap, PDH/PDL levels and regime would have been built on a fabricated prior close: 2023-03
+
+PER WALK-FORWARD TEST WINDOW (expectancy R, n)
+
+  fold  window                            warm=0            warm=1
+   0   2023-03-04 -> 2023-05-03       +0.137 (n= 59)    +0.073 (n= 77)
+   1   2023-05-03 -> 2023-07-02       -0.009 (n= 70)    -0.029 (n=103)
+   2   2023-07-02 -> 2023-08-31       -0.192 (n= 71)    -0.211 (n= 96)
+   3   2023-08-31 -> 2023-10-30       -0.110 (n= 60)    -0.011 (n= 96)
+   4   2023-10-30 -> 2023-12-29       +0.413 (n= 59)    +0.282 (n= 94)
+   5   2023-12-29 -> 2024-02-27       -0.058 (n= 61)    -0.176 (n=100)
+   6   2024-02-27 -> 2024-04-27       -0.046 (n= 53)    +0.139 (n= 83)
+   7   2024-04-27 -> 2024-06-26       -0.057 (n= 62)    -0.043 (n= 89)
+   8   2024-06-26 -> 2024-08-25       -0.348 (n= 58)    -0.010 (n= 96)
+   9   2024-08-25 -> 2024-10-24       +0.008 (n= 53)    +0.161 (n= 92)
+  10   2024-10-24 -> 2024-12-23       +0.086 (n= 63)    -0.010 (n= 98)
+  11   2024-12-23 -> 2025-02-21       -0.040 (n= 67)    -0.078 (n=107)
+  12   2025-02-21 -> 2025-04-22       -0.318 (n= 47)    -0.182 (n= 83)
+  13   2025-04-22 -> 2025-06-21       -0.081 (n= 55)    -0.119 (n= 98)
+  14   2025-06-21 -> 2025-08-20       +0.009 (n= 49)    +0.165 (n= 88)
+  15   2025-08-20 -> 2025-10-19       -0.231 (n= 60)    -0.113 (n= 84)
+  16   2025-10-19 -> 2025-12-18       -0.042 (n= 73)    -0.053 (n=100)
+  17   2025-12-18 -> 2026-02-16       -0.037 (n= 65)    -0.066 (n= 96)
+  18   2026-02-16 -> 2026-04-17       -0.080 (n= 64)    +0.042 (n= 90)
+  19   2026-04-17 -> 2026-06-16       -0.126 (n= 62)    -0.199 (n= 94)
+  20   2026-06-16 -> 2026-08-15       +0.015 (n= 61)    +0.111 (n= 87)
+
+  warm=1 beat warm=0 in 10/21 test windows (48%) - coin-flip expectation is 10.5
+
+R BUCKETS (full stop < -0.5 | scratch -0.5..0.1 | win > 0.1)
+
+  warm=0: n= 1272  stop= 657 ( 52%)  scratch= 292 ( 23%)  win= 323 ( 25%)  | reached +1R  48%, converted  53%
+  warm=1: n= 1951  stop= 973 ( 50%)  scratch= 463 ( 24%)  win= 515 ( 26%)  | reached +1R  50%, converted  53%
+
+MORNING vs AFTERNOON (warm=1)
+
+  before 11:45   n=  899  win= 27.4%  exp=+0.015R  CI=[-0.070,+0.100]  total=  +13.64R
+  11:45 onward   n= 1052  win= 25.6%  exp=-0.047R  CI=[-0.127,+0.032]  total=  -49.86R
+
+REGIME MIX
+
+  warm=0: gap_day=1133 (89%)  expansion=139 (11%)
+  warm=1: gap_day=1728 (89%)  expansion=223 (11%)
+
+PER STRATEGY (warm=1, n>=30)
+
+  squeeze                  n=  127  exp=+0.006R  CI=[-0.226,+0.238]  total=   +0.78R  <- CI spans zero
+  level_break              n= 1364  exp=+0.006R  CI=[-0.064,+0.075]  total=   +7.62R  <- CI spans zero
+  vwap_reclaim             n=  315  exp=-0.096R  CI=[-0.243,+0.050]  total=  -30.36R  <- CI spans zero
+  trendline_break          n=  145  exp=-0.098R  CI=[-0.296,+0.100]  total=  -14.25R  <- CI spans zero

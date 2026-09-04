@@ -16,6 +16,8 @@ python -m nifty_algo.brief              # the day's frame + scored chain, CLI fo
 python -m nifty_algo.swing.scanner --market india|us|uk   # the swing book, headless
 python -m nifty_algo.swing.backtest --market india --years 3 --capital 100000   # does the swing book work?
 python -m nifty_algo.swing.experiment --market india --years 3 --capital 100000  # which rule set, chosen out-of-sample
+python -m nifty_algo.experiment_intraday --variants baseline,gapdaily,novwap  # same question for the option book
+python -m nifty_algo.experiment_intraday --report        # the table from the existing ledger, no re-run
 python -m nifty_algo.research macro --market india          # macro fact pack; --json is what a skill reads
 python -m nifty_algo.research risk  --market india --json   # portfolio risk fact pack
 python scripts/fetch_swing_history.py --market india --years 6  # deep daily bars for it
@@ -46,7 +48,7 @@ four steps, in order:
 
 1. **Run the whole suite** - `pytest`, not `-k`, not the one file you touched. The two books share `signals.py`, `CapitalConfig`, `ExitLadder` and the journal; a targeted run is how the other book breaks silently.
 2. **Assume the solution is wrong** - re-read the diff and write down a concrete reason it is broken, with a `file:line` and the input that breaks it, *before* any reason it is right. Every failure this repo has actually suffered was plausible rather than loud.
-3. **Backtest if the traded path moved** - `swing/` or `signals.py` -> the swing backtest; `strategy.py` / `risk.py` / `positions.py` / `governor.py` -> the option backtest, which has no CLI (the Backtest page, or `Backtester(cfg).run(bars)` in process). UI, broker and script changes are not backtestable; say so rather than skipping quietly.
+3. **Backtest if the traded path moved** - `swing/` or `signals.py` -> the swing backtest; `strategy.py` / `risk.py` / `positions.py` / `governor.py` -> the option backtest, now `python -m nifty_algo.experiment_intraday` (or the Backtest page, or `Backtester(cfg).run(bars)` in process). UI, broker and script changes are not backtestable; say so rather than skipping quietly.
 4. **Report** what ran, what failed, what was not backtestable, and any test you modified.
 
 If the change is meant to *improve* something rather than fix it, step 3b also
@@ -297,6 +299,52 @@ gates new longs on the benchmark being above its own moving average.
 `regime_ma_days = 0` disables it, which is how every result before it existed
 was produced. It fails closed: a missing or too-short benchmark blocks rather
 than passes.
+
+## One harness, three books
+
+`experiment_core.py` owns everything about MEASUREMENT rather than about a
+particular book: `Variant`/`set_on`, `Cell`, `Sweep`, the pooling rule, the
+interval, the sign test, `selected_by_train`, the ledger and the table. Each
+book keeps only its `VARIANTS` table and the loop that drives its own
+backtester. Three copies of the statistics is how two books end up unable to
+compare a result.
+
+**Pooled expectancy is TRADE-WEIGHTED**, never a mean of fold means - a fold
+with 3 trades and one with 60 are not equally informative.
+
+**The interval resamples FOLDS, not trades.** Trades inside a fold share a
+regime, a volatility level and often a session. Bootstrapping trades produces a
+reassuringly narrow interval that means nothing.
+
+**The SIGN TEST is the statistic that actually discriminates**, and it is the
+one none of the earlier copies had. Measured on the option book: a warm-up
+variant improved pooled expectancy from -0.051R to -0.019R and nearly halved
+total loss - which reads like a result - and then won **10 of 21** walk-forward
+windows against a coin-flip expectation of 10.5. A pooled average can be
+carried by one good stretch; consistency across independent windows cannot.
+Report both and believe the second.
+
+**The option backtester is packed.** `_run_session` attaches an
+`indicator_cache` pack per session, which is measured at **4.3x** on real bars
+and asserted byte-identical in `tests/test_experiment_intraday.py`. The env
+kill switch is `NIFTY_ALGO_DISABLE_PACK=1`, and `_DISABLED` is read once at
+import - flipping it mid-process needs `refresh_disabled()`.
+
+**A date range bounds what is SCORED, not what is loaded.**
+`Backtester.run(start=, end=)` and `_run_window(score_from=, score_to=)` keep
+every earlier bar visible to `prior_session` and to the warm-up window.
+Slicing the frame instead cost the first session of every window - across a
+21-fold sweep run in two phases that is 42 sessions deleted, quietly, and
+always the same ones.
+
+**What four years of real bars say about the option book.** 993 sessions,
+2022-09 -> 2026-09: `level_break` is +0.006R over 1,364 trades with a 95%
+interval of [-0.064, +0.075]. That is tight enough to rule out any edge above
+~0.075R - a proven negative, not an unproven positive. And it is
+`Mode.UNDERLYING`, which ignores theta and vega, so it is the GENEROUS case: a
+strategy at zero on the underlying is negative once premium decay is paid.
+89% of all trades are tagged `gap_day`, which is why the regime gate is the
+largest untested lever - see the `gapdaily` variant.
 
 ## Holdings, and the research briefings built on them
 

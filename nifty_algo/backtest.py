@@ -61,6 +61,7 @@ from .regime import classify, is_allowed
 from .risk import RiskEngine
 from .strategy import Context
 from .strategies.registry import build_enabled, get_info
+from .intraday_equity import precompute as pre
 
 
 class Mode(str, Enum):
@@ -93,6 +94,14 @@ class BacktestTrade:
     lots: int = 1
     exit_legs: int = 1                # >1 means the runner banked a partial
     partial_banked: bool = False
+    #: Best and worst R the trade ever saw while open, in the SAME units as
+    #: `r_multiple`. Recorded because `diagnostics.mfe_attainment` and
+    #: `capture_ratio` read them through `getattr(t, "mfe_r", 0.0)` - absent,
+    #: they do not fail, they report a confident zero. "How much of the move
+    #: did the ladder actually capture" is unanswerable without these, and it
+    #: is the question a ladder change has to be judged on.
+    mfe_r: float = 0.0
+    mae_r: float = 0.0
     # synthetic-premium mode only
     entry_premium: float = 0.0
     exit_premium: float = 0.0
@@ -283,8 +292,28 @@ class Backtester:
         self.load_vix()
 
     def run(self, bars: pd.DataFrame, strategy_keys: list[str] | None = None,
-            mode: Mode = Mode.UNDERLYING) -> BacktestResult:
+            mode: Mode = Mode.UNDERLYING,
+            start: date | None = None,
+            end: date | None = None) -> BacktestResult:
+        """
+        `start` / `end` bound the sessions SCORED, inclusive, and switch the
+        run to a single pass over that range instead of walk-forward folds.
+
+        A sweep needs this. Today folds are computed internally and only their
+        TEST windows are ever executed - the train dates are carried as labels
+        - so there is no way to ask "how did this variant do on the training
+        window", and therefore no way to select on train and score on test.
+        That is the difference between a description of the past and a choice
+        made out of sample.
+        """
+        # The config is the fallback, not an override: an explicit argument
+        # from the UI or a caller still wins. Without this the sweep's roster
+        # variants would be silently ignored.
+        if strategy_keys is None and self.cfg.backtest.strategy_keys:
+            strategy_keys = list(self.cfg.backtest.strategy_keys)
+
         bars = bars.sort_index()
+        ranged = start is not None or end is not None
         self.warnings = []
         self._days = []
         self._day_outcomes = []
@@ -319,8 +348,8 @@ class Backtester:
                     f"ones, in opposite directions."
                 )
 
-        folds = self._make_folds(bars)
-        if not folds:
+        folds = [] if ranged else self._make_folds(bars)
+        if not folds and not ranged:
             self.warnings.append(
                 f"Not enough history for a "
                 f"{self.cfg.backtest.train_months}/{self.cfg.backtest.test_months}-month "
@@ -332,18 +361,19 @@ class Backtester:
         fold_objs: list[Fold] = []
 
         if folds:
-            for i, (tr_s, tr_e, te_s, te_e) in enumerate(folds):
-                window = bars[(bars.index.date >= te_s) & (bars.index.date <= te_e)]
-                trades = self._run_window(window, strategy_keys, mode)
+            for w in folds:
+                trades = self._run_window(bars, strategy_keys, mode,
+                                          w.test_start, w.test_end)
                 fold_objs.append(Fold(
-                    index=i, train_start=tr_s, train_end=tr_e,
-                    test_start=te_s, test_end=te_e,
+                    index=w.index, train_start=w.train_start,
+                    train_end=w.train_end,
+                    test_start=w.test_start, test_end=w.test_end,
                     metrics=compute_metrics(trades, self.cfg.capital.reward_risk_ratio),
                     trades=trades,
                 ))
                 all_trades.extend(trades)
         else:
-            all_trades = self._run_window(bars, strategy_keys, mode)
+            all_trades = self._run_window(bars, strategy_keys, mode, start, end)
 
         if self._skipped_days:
             # Said out loud, because a silently shorter sample is how a
@@ -393,7 +423,33 @@ class Backtester:
 
     # ---------------- walk-forward split ----------------
 
-    def _make_folds(self, bars: pd.DataFrame):
+    def _make_folds(self, bars: pd.DataFrame) -> list:
+        """
+        Walk-forward splits, from the shared `fold_windows`.
+
+        This used to be a private 30-day-month splitter. It produced two
+        defects the shared one does not: fold i's `test_end` equalled fold
+        i+1's `test_start` and both ends of the filter are INCLUSIVE, so every
+        boundary session was scored in two folds and appeared twice in the
+        pooled trade list; and it dropped the final truncated window, throwing
+        away the most recent data. `fold_windows` subtracts a day at the train
+        boundary and keeps the short tail, and it is the same splitter the
+        other two books use - so a fold means one thing in this repo.
+        """
+        # Imported HERE, not at module scope: `swing/backtest.py` imports
+        # `Metrics` and `compute_metrics` from this module, so a top-level
+        # import closes the cycle. The splitter is genuinely shared - it is
+        # dates only - and moving it to a neutral module is the right fix when
+        # `experiment_core` lands; a local import is the honest interim.
+        from .swing.backtest import fold_windows
+
+        b = self.cfg.backtest
+        days = sorted({d for d in bars.index.date})
+        if not days:
+            return []
+        return fold_windows(days[0], days[-1], b.train_months, b.test_months)
+
+    def _make_folds_legacy(self, bars: pd.DataFrame):
         b = self.cfg.backtest
         days = sorted({d for d in bars.index.date})
         if not days:
@@ -421,10 +477,29 @@ class Backtester:
     # ---------------- one window ----------------
 
     def _run_window(self, bars: pd.DataFrame, strategy_keys: list[str] | None,
-                    mode: Mode) -> list[BacktestTrade]:
+                    mode: Mode, score_from: date | None = None,
+                    score_to: date | None = None) -> list[BacktestTrade]:
+        """
+        `score_from` / `score_to` bound the sessions SCORED. Bars outside them
+        stay loaded and stay visible to `prior_session` and to the warm-up
+        window.
+
+        Slicing the frame instead would cost the first session of every
+        window: with no prior day inside the slice, `prior_session` falls back
+        to a fabricated close and the session is skipped. Across a 21-fold
+        sweep run in two phases that is 42 sessions deleted, quietly, and
+        always the same ones. It is the same reasoning as
+        `SwingConfig.history_days` - the window names what is measured, not
+        what is loaded.
+        """
         trades: list[BacktestTrade] = []
         warm = self.cfg.session.warmup_sessions
-        for day in sorted({d for d in bars.index.date}):
+        days = sorted({d for d in bars.index.date})
+        if score_from is not None:
+            days = [d for d in days if d >= score_from]
+        if score_to is not None:
+            days = [d for d in days if d <= score_to]
+        for day in days:
             frame = DataFeed.session_slice_with_warmup(bars, warm, day)
             # Where TODAY starts inside that frame. 0 when there is no
             # warm-up, which is what keeps the default path identical.
@@ -465,6 +540,22 @@ class Backtester:
 
         trades: list[BacktestTrade] = []
         cooldown_until = -1
+        # ONE vectorised pass per session, then serve prefix views of it.
+        # `signals.py` already routes every call through `indicator_cache`, so
+        # nothing in the strategies or the signal library changes - the frame
+        # simply arrives carrying its own precomputed series. Measured at 2.7x
+        # on the intraday-equity book, and the option book's hot path is the
+        # same shape: ~6 `atr`, 4 `underlying_liquidity_ok`, 3 `volume_surge`,
+        # 2 `vwap` and 2-3 `find_pivots` per decision bar, all on the allowlist.
+        #
+        # Correctness rests on `_matches`: every window `BarReplayer` yields is
+        # a true PREFIX of this frame (guaranteed by `max_window` below), and
+        # every served function is causal - a recursion, a rolling window, or
+        # elementwise - so `series.iloc[:n]` equals recomputing over the first
+        # n bars. `NIFTY_ALGO_DISABLE_PACK=1` turns it off for an A/B.
+        session = pre.attach(session.copy(),
+                             pre.build_pack(session, self.cfg.instrument.symbol,
+                                            self.cfg))
         atr_series = sig.atr(session, self.cfg.signal.atr_period)
 
         # BarReplayer is what keeps this honest - see its docstring. The
@@ -594,6 +685,7 @@ class Backtester:
         exit_time = entry_time
         bars_held = 0
 
+        mfe_r, mae_r = 0.0, 0.0
         last_idx = min(entry_idx + b.max_bars_in_trade, len(session) - 1)
         for j in range(entry_idx + 1, last_idx + 1):
             bar = session.iloc[j]
@@ -608,6 +700,8 @@ class Backtester:
             else:
                 best_r = (entry_price - lo) / stop_pts
                 worst_r = (entry_price - hi) / stop_pts
+            mfe_r = max(mfe_r, best_r)
+            mae_r = min(mae_r, worst_r)
             mark_r = ((close - entry_price) if long_side
                       else (entry_price - close)) / stop_pts
 
@@ -673,7 +767,7 @@ class Backtester:
             r_multiple=r_multiple, reason=sig_out.reason,
             entry_premium=entry_prem, exit_premium=exit_prem,
             quantity=qty, net_pnl=pnl, lots=lots, exit_legs=len(legs),
-            partial_banked=len(legs) > 1,
+            partial_banked=len(legs) > 1, mfe_r=mfe_r, mae_r=mae_r,
         )
 
     def _r_underlying(self, realised_r: float, legs: list[tuple[float, int]],

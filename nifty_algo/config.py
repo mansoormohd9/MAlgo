@@ -505,6 +505,16 @@ class BacktestConfig:
     apply_trade_management: bool = True  # simulate the exit ladder, not a flat 2:1
     apply_session_governors: bool = True  # simulate the day rules, not just signals
 
+    #: Which strategies the backtest runs. Empty means "whatever is
+    #: `default_enabled` in `strategies.registry`", so this book cannot drift
+    #: from the registry - the same contract `IntradayEquityConfig` uses.
+    #:
+    #: It lives on the CONFIG rather than only as a `run()` argument because a
+    #: variant sweep changes the roster the same way it changes any other
+    #: tunable: by mutating a Config. A lever that can only be pulled through a
+    #: function argument cannot be swept.
+    strategy_keys: tuple = ()
+
 
 @dataclass
 class HalalConfig:

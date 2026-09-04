@@ -1,0 +1,49 @@
+74,115 bars | 993 sessions | 2022-09-05 -> 2026-09-03
+
+variants: baseline, gapdaily, novwap, warm1, ladder1r, noregime
+
+  baseline     as shipped
+
+  gapdaily     gap measured against a DAILY range
+
+  novwap       drop vwap_reclaim
+
+  warm1        one warm-up session
+
+  ladder1r     full exit at +1R, no runner
+
+  noregime     regime gate off
+
+
+
+                                                                              
+variant          train R      n    TEST R      n      gap          95% CI (test)    vs base       p
+
+warm1             -0.021   6028    -0.024   1992   +0.003       [-0.070, +0.027]      12/21   0.664
+
+novwap            -0.035   3754    -0.051   1229   +0.016       [-0.110, +0.012]      10/21   1.000
+
+gapdaily          -0.039   3971    -0.058   1298   +0.019       [-0.118, +0.007]          -       -
+
+baseline          -0.039   3971    -0.058   1298   +0.019       [-0.118, +0.007]          -       -
+
+noregime          -0.039   3971    -0.058   1298   +0.019       [-0.118, +0.007]          -       -
+
+ladder1r          -0.067   4275    -0.073   1399   +0.007       [-0.124, -0.023]      11/21   1.000
+
+
+
+walk-forward SELECTION paid -0.039R over 1635 trades, against a baseline of -0.058R.
+
+If selection is worse, train expectancy has no predictive power here and the honest move is to stop choosing and run the baseline.
+
+
+
+READ THE TEST COLUMN. The gap is how much of a variant was fitting.
+
+'vs base' is folds won against the baseline and 'p' its two-sided sign test - a variant that wins on pooled R but not on folds was carried by one stretch.
+
+
+
+ledger -> data\experiments\sweep_intraday_20260903-231102_baseline-gapdaily-novwap-warm1-ladder1r-.parquet
+
