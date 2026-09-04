@@ -145,6 +145,13 @@ class CapitalConfig:
     swing_capital_inr: float = 0.0
     foreign_capital_inr: float = 0.0
     intraday_equity_capital_inr: float = 0.0
+    #: The monthly factor sleeve. A FIFTH balance, not a fifth formula -
+    #: and unlike the other four it is not risk-sized at all: the sleeve is
+    #: equal-weight across `top_n` names, so it reads this balance and never
+    #: touches `risk_per_trade_pct`. Kept separate for the same reason the
+    #: others are: one balance funding two books means a drawdown in one
+    #: silently shrinks the other.
+    factor_capital_inr: float = 0.0
     short_premium_capital_inr: float = 0.0
 
     @property
@@ -173,6 +180,7 @@ class CapitalConfig:
         "foreign": ("foreign_capital_inr", "foreign (LRS) pool"),
         "intraday_equity": ("intraday_equity_capital_inr",
                             "intraday equity (MIS) pot"),
+        "factor": ("factor_capital_inr", "monthly factor sleeve"),
         "short_premium": ("short_premium_capital_inr",
                           "intraday short-premium pot"),
     }
@@ -1202,6 +1210,58 @@ class ShortPremiumBrokerConfig:
 
 
 @dataclass
+class FactorConfig:
+    """
+    The monthly cross-sectional momentum sleeve. The FIFTH book.
+
+    Every field here is a lever the sweep may move, and the two that matter
+    most are `band` and `formation` - both PRE-REGISTERED with a null
+    (`random`) rather than chosen by inspection, because 65% of published
+    anomalies fail a t>1.96 hurdle and 82% fail a multiple-testing one.
+
+    THE BAND IS A QUANTILE, NOT A RUPEE THRESHOLD. Indian momentum evidence
+    puts the alpha in LOW-turnover names, and a fixed floor cannot express
+    that over a decade: Rs 50cr was a large stock in 2015 and is a mid-cap
+    now, so a constant threshold silently changes which band it selects as
+    the market grows. Measured on the existing Nifty 100 universe the swing
+    book's Rs 25cr floor rejects NOTHING - the least liquid name trades Rs
+    69cr - which is why this book needs its own, wider universe.
+
+    NO RISK-PER-TRADE. The sleeve is equal-weight across `top_n`, so it reads
+    the `factor` capital pool and never touches `risk_per_trade_pct`. That is
+    not a second risk formula; it is the absence of one, because a rebalancing
+    book has no per-trade stop to size against.
+    """
+    market: str = "india"
+    cache_dir: str = "data/cache"
+    cache_name: str = "factor_daily_india.parquet"
+
+    #: How many names the sleeve holds. Equal-weight.
+    top_n: int = 20
+    #: One of `factor.universe.BANDS`.
+    band: str = "all"
+    #: One of `factor.momentum.FORMATIONS`.
+    formation: str = "mom12_1"
+    #: Months between rebalances. 1 is monthly, 3 quarterly.
+    hold_months: int = 1
+
+    # --- eligibility, all applied point-in-time ---
+    min_price: float = 20.0
+    min_turnover_inr: float = 1.0e7      # Rs 1cr/day - a tradability floor
+    min_history_sessions: int = 300      # enough to form a 12-1 signal
+    adv_window: int = 60
+
+    #: Restrict to names already listed when the window opened. NOT a
+    #: survivorship fix - a bound on it. The gap between this and the
+    #: unrestricted run is a LOWER bound on the inflation.
+    listed_only: bool = False
+
+    #: Set to an int to replace the signal with noise - the null. Everything
+    #: else in the book runs identically, so the difference is the signal.
+    random_seed: int | None = None
+
+
+@dataclass
 class Config:
     capital: CapitalConfig = field(default_factory=CapitalConfig)
     instrument: InstrumentConfig = field(default_factory=InstrumentConfig)
@@ -1224,6 +1284,7 @@ class Config:
         default_factory=ShortPremiumConfig)
     short_premium_broker: ShortPremiumBrokerConfig = field(
         default_factory=ShortPremiumBrokerConfig)
+    factor: FactorConfig = field(default_factory=FactorConfig)
     portfolio: PortfolioConfig = field(default_factory=PortfolioConfig)
 
 

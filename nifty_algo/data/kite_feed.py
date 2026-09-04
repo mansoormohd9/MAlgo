@@ -47,6 +47,14 @@ INTERVALS = {
     15: "15minute",
     30: "30minute",
     60: "60minute",
+    # A trading day, expressed in minutes so one map serves every caller.
+    # `MAX_DAYS_PER_REQUEST` has carried "day" since the beginning; only this
+    # entry was missing, so the daily bars Kite has always served were
+    # unreachable through this class. The factor book needs them, and adding
+    # the key here is what stops it introducing a SECOND way to build a bar -
+    # two bar builders that disagree is a class of bug this repo avoids on
+    # purpose (see `bars.fetch_today`).
+    1440: "day",
 }
 
 # Kite caps how much history one request may span, per interval. Exceeding it
