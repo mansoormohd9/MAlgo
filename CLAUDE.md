@@ -20,6 +20,7 @@ python -m nifty_algo.experiment_intraday --variants baseline,gapdaily,novwap  # 
 python -m nifty_algo.experiment_intraday --report        # the table from the existing ledger, no re-run
 python -m nifty_algo.intraday_equity.signal_grid --market india  # E5: is there ANY edge on 5m equity bars? (~35 min)
 python -m nifty_algo.factor.verdict --seeds 500 --slippage 0.0025   # F1: is the factor sleeve real? (~40 min)
+python -m nifty_algo.factor.drawdown                        # F2: does ANY drawdown instrument beat holding less? (~45s)
 python scripts/run_s1_swing_null.py --seeds 40 --years 6 --capital 200000  # S1: does the swing book beat chance? (~55 min)
 python -m nifty_algo.intraday_equity.signal_grid --horizon sessions   # E6: do intraday signals predict DAYS? (~40 min)
 python -m nifty_algo.research macro --market india          # macro fact pack; --json is what a skill reads
@@ -32,7 +33,7 @@ python scripts/fetch_history.py         # real 5m NIFTY history (resumable)
 python scripts/fetch_vix.py             # India VIX, for SYNTHETIC_PREMIUM backtests
 ```
 
-Tests (887: 882 passing, 5 skipped; pytest, `pythonpath = . tests` so `nifty_algo` and the conftest helpers both import without an install step):
+Tests (904: 898 passing, 5 skipped, 1 failing only while you are logged in to Kite - see below; pytest, `pythonpath = . tests` so `nifty_algo` and the conftest helpers both import without an install step):
 
 ```bash
 pytest                                                     # the only run that counts as done
@@ -563,6 +564,115 @@ honest fills is **+18.8%**, and the survivorship-lean bound is **+15.5%** - whic
 is ordinary published-Indian-momentum territory rather than double it. Window,
 slippage and survivorship, in that order.
 
+## F2: the drawdown instruments are CRASH INSURANCE, and the sleeve's edge is window-dependent
+
+[factor/drawdown.py](nifty_algo/factor/drawdown.py) scores 8 pre-declared arms -
+a per-name stop at two widths x two bases, a benchmark-MA regime gate at two
+lengths, and a static cash blend - on ONE axis: drawdown removed per point of
+CAGR surrendered. It was then re-run on **India 2005-2016**, a window no
+parameter in this package had seen, fetched with `--out` so the file the
+recorded results came from was never touched.
+
+**THE TWO WINDOWS DISAGREE, AND THE DISAGREEMENT IS THE RESULT.**
+
+| | sleeve CAGR | NIFTY | excess | maxDD | recovery |
+| --- | --- | --- | --- | --- | --- |
+| 2016-2026, where F1 was measured | +18.79% | +10.85% | **+7.94pp** | -57.2% | 35m |
+| 2005-2016, never used | +12.39% | +11.79% | **+0.60pp** | **-78.5%** | **81m** |
+| 2005-2026, all of it | +17.86% | +11.18% | +6.69pp | -78.5% | 81m |
+
+**The momentum edge is 0.60pp over the index on the unseen decade.** F1's
+p = 0.002 was measured entirely inside 2016-2026, and 2005-2016 is not a
+confirmation of it. Pre-2016 survivorship is WORSE - 2008's casualties are
+absent from today's listed set - so the sleeve is flattered there and the true
+excess is likely negative. Quote both windows or neither.
+
+**F2b's KILL TEST FIRED.** The pre-committed rule was: if the drawdown on unseen
+data exceeds 65%, rebuild the allocation on the worse figure. It is **-78.5%
+with an 81-month recovery** - nearly seven years underwater, against the 35
+months the calibration window showed. So the planning figure is 90%, not 66%,
+and every allocation drops by about a third: tolerate a 15% portfolio drawdown
+and the sleeve gets **17% of net worth, not 23%**; tolerate 20% and it gets
+22%, not 30%. This too is a LOWER bound.
+
+**THE INSTRUMENTS ARE INSURANCE, WHICH IS WHY ONE WINDOW COULD NOT SCORE THEM.**
+On 2016-2026 `regime50` cost **-17.0%** compounded and lost to the cash line;
+on 2005-2016 it made **+39.6%** and cut the drawdown from -78.5% to -35.1%. The
+per-year attribution says exactly why:
+
+| | 2008 | every other year |
+| --- | --- | --- |
+| `regime50` | **+203.4%** | negative in 8 of 10 |
+| `stop15r` | +89.8% | negative in 7 of 10 |
+
+`stop15r` on 2016-2026 is the same shape with a smaller crash: **2023 is +14.5%
+and the whole decade is +14.5%** - every other year nets to nothing.
+
+**So "the three best months carry it" is a DESCRIPTION of insurance, not a
+verdict on it.** The consistency check in `consistency()` is the right lens for
+an edge and the wrong one for a hedge, whose payoff is concentrated by
+construction. Reported together, and neither alone decides. What can be said
+without a forecast: the unconditional cost of `regime50` is about 17% per calm
+decade, and its payoff needs a 2008.
+
+**By the letter of the pre-registered criterion, `regime50` SURVIVES** - it
+passed on 2016-2026 and passes again on 2005-2016 and on the full 21 years. That
+is not a licence to arm it. It is a statement that the gate could not separate
+insurance from edge, which is a fact about the gate.
+
+**A stop in a monthly-rebalanced book is a DELAY, not an exit.** The sleeve
+re-ranks monthly and re-buys anything still in the top 20 - 430 distinct names
+across 121 marks - so a stop costs a round trip and a gap, never the position.
+Which is also why "stops truncate the right tail momentum depends on" is the
+wrong mechanism: `reweight` cuts every winner back to 1/20 every month and
+*beats* drift (+19.7% vs +18.8%). The tail comes from re-selection.
+
+**THE GATE'S THRESHOLD DECIDED THE ANSWER ONCE, so it needs a threshold-free
+companion.** On 2016-2026 `regime50` was the sole PASS while `cash70` FAILED by
+0.02pp of CAGR with the best ratio in the table. `cash_frontier` asks the same
+question without a round number - at the drawdown each arm actually achieved,
+what does simply holding less pay? - and on that window it inverts the verdict.
+**Cash is the null hypothesis for a drawdown instrument the way random scoring
+is the null for a signal.**
+
+**REJECTING THE SPLIT DAY IS NOT ENOUGH.** `MAX_SESSION_MOVE` stops a 1:10 split
+being traded as a -90% session, but a stop compares against a BASIS, and after
+the split the position still holds a pre-split basis against a post-split price -
+so it fires on the next session instead. One day late, same wrong trade, no
+longer near an obvious -90% move. `_stop_price` returns the factor and the caller
+rebases with it; worth 0.8pp of CAGR on the `stop15e` arm. Regression:
+`test_a_split_sized_move_does_not_trigger_the_stop`.
+
+**Twenty positions is ~3.2 independent bets.** Mean pairwise monthly correlation
+across 400 NSE names is **0.28**, so effective N = 1/(rho + (1-rho)/20) = 3.2 and
+thirty names reaches only 3.4. Position count is not a survival lever - and a
+per-name stop in a crash is one market call wearing twenty costumes, paying
+twenty round trips for it.
+
+**SELLS ARE COUNTED, NOT INFERRED FROM TURNOVER.** `avg_turnover` is the fraction
+of book value that changed hands and every rebalance trades both legs, so reading
+sell legs off it doubles them - which doubled the flat-DP floor to Rs 2,056/yr
+when the counted figure is **65 sells and Rs 992**. At Rs 5,00,000 that is
+0.20%/yr, not 0.41%. `FactorResult.sells` exists so it is read, not derived.
+
+**RELATIVE PERFORMANCE COMPOUNDS AS A WEALTH RATIO, NOT AS A DIFFERENCE.**
+`prod(1 + r_arm - r_base)` is not `prod(1+r_arm)/prod(1+r_base)`, and with
+monthly returns of +-20% the gap is large: an ad-hoc attribution built the wrong
+way reported a whole-window +2.6% where the ratio gives +14.5%. `consistency()`
+uses the ratio; anything computed beside it must too.
+
+**Sizing is arithmetic, not a fitted parameter.** Ruin here is not mathematical -
+long-only, unlevered, no margin - so the failure modes are abandonment at the
+trough and needing the money before the recovery, and both are governed by the
+sleeve's share of net worth. `sizing_report` maps a measured drawdown onto that
+share and nothing in it is fitted, which is exactly why the whole recommendation
+moved when the measured drawdown did.
+
+**And the margin over the index is 3-5 names.** Remove the top contributor and
+the 2016-2026 CAGR is 15.96%; the top three, 13.30%; the top five, 11.20% -
+against the index at 10.88% on identical marks. Reason to size it small and never
+lever it.
+
 ## Holdings, and the research briefings built on them
 
 `nifty_algo/portfolio/` answers "what do I own", broker-agnostically.
@@ -689,6 +799,38 @@ reads as armed and does nothing is the failure this repo refuses elsewhere.
 
 Tests: [test_auth.py](tests/test_auth.py). Every UI `AppTest` must call
 `conftest.sign_in(at)` or it renders the login form and nothing else.
+
+## The suite reads your live brokerage account if you are logged in
+
+`pytest` is green from a cold machine and fails one test on a trading morning,
+and the failing test is the messenger rather than the bug.
+
+`tests/test_auth.py` drives the console through Streamlit's `AppTest`, which
+runs `app.py` - so `load_dotenv()` and `bridge_secrets()` execute and copy the
+real `.env` keys into `os.environ` **for the rest of the process**. Both are
+doing exactly what they were written to do; nothing resets them afterwards.
+`tests/test_portfolio_connectors.py::test_an_enabled_but_unconfigured_connector_is_unavailable`
+then asserts that Kite is unconfigured, reaches a genuinely configured Kite,
+and reads the **live account** - real positions, a fresh FX rate.
+
+    pytest tests/test_portfolio_connectors.py     # 22 passed
+    pytest tests/test_auth.py tests/test_portfolio_connectors.py   # 1 failed
+
+That two-file reproduction is the whole diagnosis: it is ORDER dependence, not
+the login on its own, and not any of the factor work.
+
+Two separate things follow, and the smaller one is the test. **The suite makes
+authenticated network calls to Zerodha with real credentials and pulls real
+holdings into a test process.** It places no orders - `dry_run` defaults hold -
+but a repo whose entire design is about keeping code away from money by
+accident should not have its test run reach the account at all. The fix is
+isolation at the boundary that leaks: restore `os.environ` around the AppTest
+tests, or have the portfolio connectors read configuration from an injected
+mapping rather than from process-wide state.
+
+Until then a full run on a logged-in machine reports one failure that is not a
+regression, which is precisely the kind of noise that trains you to skim a red
+suite.
 
 ## Data and secrets
 

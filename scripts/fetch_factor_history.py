@@ -109,12 +109,20 @@ def main(argv: list[str] | None = None) -> int:
                    help="fetch only the first N symbols, for a smoke test")
     p.add_argument("--full", action="store_true",
                    help="ignore the cache and refetch everything")
+    p.add_argument("--out", default="",
+                   help="write to this filename inside the cache directory "
+                        "instead of the default. USE IT for any fetch over a "
+                        "different window: a recorded result is reproducible "
+                        "only against the exact bars that produced it, and "
+                        "Kite re-adjusts history for corporate actions, so "
+                        "refetching the same decade in place can move a "
+                        "published number with nothing to say it did.")
     args = p.parse_args(argv)
 
     end = date.today()
     start = max(EARLIEST, end - timedelta(days=int(args.years * 365)))
     cache_dir = Path(cfg.intraday_equity.cache_dir)
-    path = cache_dir / CACHE_NAME
+    path = cache_dir / (args.out or CACHE_NAME)
 
     try:
         session = KiteSession()
@@ -174,6 +182,25 @@ def main(argv: list[str] | None = None) -> int:
     jobs = [("__BENCHMARK__", NIFTY_50_TOKEN)] + [
         (s, universe[s]) for s in wanted if s not in held]
     print(f"{len(jobs) - 1:,} still to fetch\n")
+
+    # RESUMING MEANS SKIPPING, NOT EXTENDING. A cached symbol is not refetched
+    # at all, so asking for a LONGER window than the cache holds silently
+    # returns the cache: `--years 21` over a ten-year file fetches the
+    # BENCHMARK and nothing else, then reports "2,437 symbols" over the old
+    # dates under the new label. That is not a hypothetical - it is what this
+    # script did before this check existed. Only `--full`, or a fresh `--out`,
+    # actually widens a symbol's history.
+    if held and not args.full:
+        cached_from = min((d.index.min() for d in held.values()
+                           if not d.empty), default=None)
+        if cached_from is not None and cached_from.date() > start:
+            print(f"  REFUSING: the cache starts {cached_from.date()} and you "
+                  f"asked for {start}.")
+            print("  Resuming skips every cached symbol, so this run would "
+                  "report the OLD window under the new label.")
+            print("  Use --full, and --out to keep the existing cache "
+                  "reproducible.")
+            return 2
 
     done = 0
     try:

@@ -1344,6 +1344,37 @@ class FactorConfig:
     #: signal.
     slippage_pct: float = 0.0025
 
+    # --- F2a: the three drawdown instruments, all no-ops at their defaults ---
+    #: Sell a held name intra-month once it is this far below its basis.
+    #: None disables the check entirely, which is how every factor result
+    #: before F2a was produced.
+    #:
+    #: A STOP IN THIS BOOK IS NOT AN EXIT, IT IS A DELAY. The sleeve re-ranks
+    #: monthly and re-buys anything still in the top `top_n`, so a stopped
+    #: name comes straight back at the next rebalance. What a stop costs is a
+    #: round trip plus whatever the price did in between - never the position.
+    stop_pct: float | None = None
+
+    #: What `stop_pct` measures from. "entry" is the original fill and
+    #: "rebalance" is the last month-end mark.
+    #:
+    #: THE TWO ARE NOT A TUNING CHOICE, THEY ARE DIFFERENT HYPOTHESES. On a
+    #: book that holds a winner for months the entry basis drifts far below
+    #: the market and the stop stops firing - so "entry" alone would test a
+    #: rule that barely triggers and would prove nothing. "rebalance" is the
+    #: strict form and the one that can actually cut a drawdown.
+    stop_basis: str = "entry"
+
+    #: Hold cash while the benchmark is below its own `n`-day moving average.
+    #: 0 disables it, matching how `SwingConfig.regime_ma_days` already reads.
+    #:
+    #: This is the SAME instrument as a per-name stop, priced honestly. At a
+    #: mean pairwise monthly correlation of 0.28 across NSE, 20 positions are
+    #: ~3.2 independent bets, so in a crash a per-name stop fires on most of
+    #: the book at once - one market call wearing 20 costumes and paying 20
+    #: round trips for it. Fails closed: too short a benchmark history blocks.
+    regime_ma_days: int = 0
+
 
 @dataclass
 class Config:

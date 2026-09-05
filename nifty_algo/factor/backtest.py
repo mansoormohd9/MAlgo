@@ -38,6 +38,7 @@ no halal screen is replayed - the same limit the swing backtest carries.
 from __future__ import annotations
 
 import math
+from bisect import bisect_left
 from dataclasses import dataclass, field
 from datetime import date
 
@@ -77,6 +78,16 @@ class Position:
     shares: int
     entry_price: float
     entry_day: date
+    #: What `stop_pct` measures from. Separate from `entry_price` because
+    #: `_mark` falls back to `entry_price` for a name that stopped trading,
+    #: and refreshing THAT every rebalance would quietly re-value the book.
+    #: Set to the fill price at purchase and left alone unless
+    #: `stop_basis="rebalance"` moves it to each month-end mark.
+    basis_price: float = 0.0
+
+    def __post_init__(self) -> None:
+        if self.basis_price <= 0:
+            self.basis_price = self.entry_price
 
 
 @dataclass
@@ -97,6 +108,16 @@ class FactorResult:
     #: still held at the final mark. Exists to answer ONE question that the
     #: headline CAGR cannot: how much of the result is one or two names.
     contribution: dict = field(default_factory=dict)
+    #: F2a diagnostics. `stops_fired` counts intra-month stop sells;
+    #: `regime_flat` counts rebalances the regime gate stood down. Both stay
+    #: 0 unless the corresponding instrument is switched on.
+    stops_fired: int = 0
+    regime_flat: int = 0
+    #: Sell legs only. `trades` counts both sides, and the flat DP charge is
+    #: levied per scrip PER SELL - so the minimum-capital arithmetic needs
+    #: this number and cannot be derived from `trades` without assuming the
+    #: book is balanced, which a reweighting book is not.
+    sells: int = 0
 
     @property
     def final_value(self) -> float:
@@ -239,6 +260,64 @@ def _charge(costs, price: float, shares: float, sell: bool,
     return leg + price * shares * slippage_pct
 
 
+def _stop_price(universe: FactorUniverse, symbol: str, day: date):
+    """
+    `(close on day, split factor)` for the intra-month stop check.
+
+    Counters are deliberately untouched. `_tradeable_price` is the right check
+    at a rebalance, where a missing bar is a fact worth counting; here it would
+    fire on every session a held name happens not to trade - twenty names
+    across two thousand sessions - and bury the rebalance diagnostics.
+
+    THE CORPORATE-ACTION GUARD IS NOT OPTIONAL, AND SKIPPING THE DAY IS NOT
+    ENOUGH. Unadjusted bars make a 1:10 split look like a -90% session, and a
+    stop is precisely a rule that sells on a big down move. Rejecting the split
+    day alone leaves the position holding a PRE-split basis against a POST-split
+    price, so the stop fires on the very next session instead - one day late,
+    same wrong trade, and no longer anywhere near an obvious -90% move. So the
+    factor is returned and the caller rebases with it.
+
+    Returns `(None, None)` when there is no usable bar, and `(price, factor)`
+    with a non-None factor exactly on the session a corporate action is
+    detected - on which nothing may be traded.
+    """
+    price = universe.price_on(symbol, day)
+    if price is None or price <= 0:
+        return None, None
+    prior = universe.price_at(symbol, day)
+    if prior and prior > 0 and abs(price / prior - 1.0) > MAX_SESSION_MOVE:
+        return price, price / prior
+    return price, None
+
+
+def _regime_gate(benchmark, ma_days: int):
+    """
+    `day -> may the sleeve hold equities?`, from the benchmark's own average.
+
+    Uses closes STRICTLY BEFORE `day`, the same footing `score_universe` ranks
+    on. The fill happens at `day`'s close, so reading it here would be
+    defensible - but then the gate and the ranking would sit on two different
+    definitions of "now", and only one of them would be tested.
+
+    FAILS CLOSED, like `swing/market_regime.py`: no benchmark, or not enough
+    history to form the average, blocks. A gate that passes when it cannot see
+    is a gate that reads as armed and is not.
+    """
+    if benchmark is None or ma_days <= 0:
+        return None
+    closes = benchmark["close"].to_numpy(dtype=float)
+    days = [t.date() if hasattr(t, "date") else t for t in benchmark.index]
+
+    def ok(day: date) -> bool:
+        i = bisect_left(days, day)
+        if i < ma_days:
+            return False
+        window = closes[i - ma_days:i]
+        return bool(window[-1] > float(np.mean(window)))
+
+    return ok
+
+
 def run(bars: dict, starting_capital: float, top_n: int = 20,
         band: str = "all", formation: str = "mom12_1",
         hold_months: int = 1, min_price: float = 20.0,
@@ -249,12 +328,21 @@ def run(bars: dict, starting_capital: float, top_n: int = 20,
         universe: FactorUniverse | None = None,
         listed_before: date | None = None,
         reweight: bool = False,
-        slippage_pct: float = 0.0) -> FactorResult:
+        slippage_pct: float = 0.0,
+        stop_pct: float | None = None,
+        stop_basis: str = "entry",
+        regime_ma_days: int = 0,
+        benchmark=None) -> FactorResult:
     """
     Replay the sleeve month by month.
 
     `seed` switches the signal to `momentum.random_scores` - the null. Every
     other mechanism is untouched, so a comparison isolates the signal.
+
+    `stop_pct` and `regime_ma_days` are the two active F2a instruments and are
+    OFF by default, so every result produced before they existed reproduces
+    byte-identically. `benchmark` is a daily frame with a `close` column and
+    is required by, and only by, the regime gate.
 
     `universe` accepts a PREBUILT `FactorUniverse`. Building it costs 5.6s on
     2,437 symbols and it does not depend on the window, the variant or the
@@ -284,6 +372,15 @@ def run(bars: dict, starting_capital: float, top_n: int = 20,
     anchor = listed_before or dates[0]
     restrict = universe.listed_before(anchor) if listed_only else None
     rng = np.random.default_rng(seed) if seed is not None else None
+    regime_ok = _regime_gate(benchmark, regime_ma_days)
+    if regime_ma_days > 0 and regime_ok is None:
+        # Fails closed rather than silently running as `none`: a regime arm
+        # with no benchmark that quietly reproduced the baseline is exactly
+        # the "variant did nothing and said nothing" failure this repo has
+        # already paid for once, in `swing/experiment.py`.
+        raise ValueError("regime_ma_days is set but no benchmark was passed")
+    # Sessions between one rebalance and the next, for the intra-month stop.
+    marks = [bisect_left(sessions, d) for d in dates]
 
     cash = float(starting_capital)
     held: dict[str, Position] = {}
@@ -303,6 +400,14 @@ def run(bars: dict, starting_capital: float, top_n: int = 20,
                                           formation))
         wanted = set(mom.top_n(scores, top_n))
 
+        # ---- the regime gate stands the whole sleeve down ---------------
+        # Emptying `wanted` reuses the sell loop below rather than adding a
+        # second liquidation path, so a stood-down month pays exactly the
+        # charges a normal exit pays and is counted in the same turnover.
+        if regime_ok is not None and not regime_ok(day):
+            wanted = set()
+            result.regime_flat += 1
+
         # ---- sell what is no longer wanted -----------------------------
         for symbol in sorted(set(held) - wanted):
             price = _tradeable_price(universe, symbol, day, result)
@@ -314,6 +419,7 @@ def run(bars: dict, starting_capital: float, top_n: int = 20,
             cash += gross - charge
             result.costs_paid += charge
             result.trades += 1
+            result.sells += 1
             result.turnover_sum += gross
             result.contribution[symbol] = (
                 result.contribution.get(symbol, 0.0) + gross - charge)
@@ -353,6 +459,7 @@ def run(bars: dict, starting_capital: float, top_n: int = 20,
                     shed = -delta
                     charge = _charge(costs, price, shed, True, slippage_pct)
                     cash += price * shed - charge
+                    result.sells += 1
                     flow = price * shed - charge
                 result.contribution[symbol] = (
                     result.contribution.get(symbol, 0.0) + flow)
@@ -360,7 +467,7 @@ def run(bars: dict, starting_capital: float, top_n: int = 20,
                 result.trades += 1
                 result.turnover_sum += price * abs(delta)
                 held[symbol] = Position(symbol, target, pos.entry_price,
-                                        pos.entry_day)
+                                        pos.entry_day, pos.basis_price)
 
         buys = sorted(wanted - set(held))
         if buys and budget > 0:
@@ -388,6 +495,50 @@ def run(bars: dict, starting_capital: float, top_n: int = 20,
         result.equity.append((day, value))
         result.holdings_log.append((day, sorted(held)))
         result.rebalances += 1
+
+        # ---- F2a: the intra-month stop ---------------------------------
+        # Runs AFTER the mark, so the equity curve is still sampled at
+        # month-ends only and its drawdown stays comparable, arm to arm, with
+        # every factor result this repo has already published.
+        if stop_pct and held:
+            if stop_basis == "rebalance":
+                for symbol, pos in held.items():
+                    pos.basis_price = _mark(universe, symbol, day, pos)
+            # Sessions AFTER the final rebalance are never marked again, so
+            # trading them would spend charges and move `contribution` in a
+            # stretch the equity curve cannot see. The interval is empty by
+            # construction rather than by luck about where the cache ends.
+            if n >= len(marks):
+                continue
+            for sd in sessions[marks[n - 1] + 1:marks[n]]:
+                if not held:
+                    break
+                for symbol in sorted(held):
+                    pos = held[symbol]
+                    price, split = _stop_price(universe, symbol, sd)
+                    if price is None or pos.basis_price <= 0:
+                        continue
+                    if split is not None:
+                        # Carry the basis through the corporate action rather
+                        # than trading on it, which is what a broker does to
+                        # a resting stop and what keeps the NEXT session from
+                        # firing on a price that only looks like a collapse.
+                        pos.basis_price *= split
+                        continue
+                    if price > pos.basis_price * (1.0 - stop_pct):
+                        continue
+                    del held[symbol]
+                    gross = price * pos.shares
+                    charge = _charge(costs, price, pos.shares, True,
+                                     slippage_pct)
+                    cash += gross - charge
+                    result.costs_paid += charge
+                    result.trades += 1
+                    result.sells += 1
+                    result.turnover_sum += gross
+                    result.stops_fired += 1
+                    result.contribution[symbol] = (
+                        result.contribution.get(symbol, 0.0) + gross - charge)
 
     # CLOSE THE CONTRIBUTION LEDGER. Everything still held at the end is
     # marked and credited to its own name, so the contributions sum to
