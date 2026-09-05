@@ -272,3 +272,108 @@ def test_force_exit_time_overrides_everything():
                          now=time(15, 10))
     assert [a.kind for a in actions] == [ExitKind.FORCE_EXIT]
     assert mgr.open_lots == 0
+
+
+# ------------------------------------------- trailing without the partial
+
+def _trail_cfg(trail_from_r=None, partial_at=2.0, breakeven_at=1.0):
+    cfg = Config()
+    cfg.trade.trail_from_r = trail_from_r
+    cfg.trade.partial_exit_at_r = partial_at
+    cfg.trade.breakeven_at_r = breakeven_at
+    return cfg
+
+
+def test_trail_is_unreachable_without_the_partial_when_unset():
+    """
+    PINS THE TRAP. `LadderMode.TRAIL` used to be reachable only through the
+    partial rung, so a book that removed its target by raising
+    `partial_exit_at_r` also removed ALL trailing and sat on its initial stop
+    - silently, with no error. `ShortPremiumConfig` records this costing a
+    whole book its trail.
+
+    With `trail_from_r` unset that is still exactly what happens, and this
+    test says so out loud rather than letting a future reader rediscover it.
+    """
+    ladder = ExitLadder(_trail_cfg(trail_from_r=None, partial_at=99.0))
+    st = ladder.new_state(10)
+    for best in (0.5, 1.5, 3.0, 8.0):
+        ladder.advance(st, mark_r=best, best_r=best, trail_distance_r=0.5)
+    assert st.mode is not LadderMode.TRAIL
+    assert st.stop_r == pytest.approx(0.0)      # breakeven only, never trailed
+
+
+def test_trail_from_r_arms_without_banking_a_partial():
+    """The new path: TRAIL reached with no PARTIAL_EXIT and nothing sold."""
+    ladder = ExitLadder(_trail_cfg(trail_from_r=0.0, partial_at=99.0,
+                                   breakeven_at=99.0))
+    st = ladder.new_state(10)
+    out = ladder.advance(st, mark_r=0.1, best_r=0.1, trail_distance_r=0.4)
+    assert st.mode is LadderMode.TRAIL
+    assert ExitKind.PARTIAL_EXIT not in kinds(out)
+    assert st.lots_remaining == 10               # nothing banked
+    assert sum(d.exit_lots for d in out) == 0
+
+
+def test_arming_the_trail_does_not_jump_the_stop_to_breakeven():
+    """
+    The partial rung sets `stop_r` to 0.0 because a banked partial has already
+    paid for the trade. Arming a trail has not, and forcing breakeven here
+    would de-risk a position the instant it opened - converting losers into
+    scratches and flattering the book for a reason nobody chose.
+    """
+    ladder = ExitLadder(_trail_cfg(trail_from_r=0.0, partial_at=99.0,
+                                   breakeven_at=99.0))
+    st = ladder.new_state(10)
+    ladder.advance(st, mark_r=0.0, best_r=0.0, trail_distance_r=0.0)
+    assert st.stop_r == pytest.approx(-1.0)      # still the original stop
+
+
+def test_the_trail_only_ever_ratchets_up():
+    ladder = ExitLadder(_trail_cfg(trail_from_r=0.0, partial_at=99.0,
+                                   breakeven_at=99.0))
+    st = ladder.new_state(10)
+    ladder.advance(st, mark_r=2.0, best_r=2.0, trail_distance_r=0.5)
+    high = st.stop_r
+    assert high == pytest.approx(1.5)
+    ladder.advance(st, mark_r=0.2, best_r=0.2, trail_distance_r=0.5)
+    assert st.stop_r == pytest.approx(high), "the trail loosened"
+
+
+def test_trail_from_r_supersedes_the_breakeven_rung():
+    """
+    Promotion leaves INITIAL behind and the breakeven shift only fires from
+    INITIAL, so the rung stops mattering. Asserted because it is an
+    interaction a reader would otherwise have to derive from two files.
+    """
+    ladder = ExitLadder(_trail_cfg(trail_from_r=0.0, partial_at=99.0,
+                                   breakeven_at=1.0))
+    st = ladder.new_state(10)
+    out = ladder.advance(st, mark_r=1.5, best_r=1.5, trail_distance_r=0.5)
+    assert ExitKind.STOP_TO_BREAKEVEN not in kinds(out)
+    assert st.mode is LadderMode.TRAIL
+
+
+def test_unset_trail_from_r_leaves_the_shipped_ladder_identical():
+    """
+    THE REGRESSION. `ExitLadder` is shared by four books; the new field must
+    be a no-op until something asks for it.
+
+    Asserted as the ORDER the shipped ladder guarantees rather than as a
+    hardcoded list of decisions - the number of trail ratchets depends on how
+    many bars are fed, and pinning that would make the test brittle without
+    making it stricter.
+    """
+    ladder = ExitLadder(Config())
+    st = ladder.new_state(2)
+    seen = []
+    for best in (0.5, 1.0, 1.6, 2.0, 2.5, 3.0):
+        seen += kinds(ladder.advance(st, mark_r=best, best_r=best,
+                                     trail_distance_r=0.5))
+
+    assert seen[0] is ExitKind.STOP_TO_BREAKEVEN
+    assert seen[1] is ExitKind.PARTIAL_EXIT
+    # nothing trails before the partial - that IS the shipped ladder
+    assert ExitKind.TRAIL_UPDATE not in seen[:2]
+    assert set(seen[2:]) == {ExitKind.TRAIL_UPDATE}
+    assert st.mode is LadderMode.TRAIL

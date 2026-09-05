@@ -265,3 +265,69 @@ def test_shifting_preserves_the_firing_count():
     valid = np.ones((2, 20, 4))
     n = sg._xcorr_all_shifts(mask, valid)
     assert np.allclose(n, float(mask.sum()))
+
+
+# ----------------------------------------------- E6: multi-session horizons
+
+def test_session_forward_reads_the_same_clock_h_sessions_later():
+    """
+    The whole point of holding the clock fixed: a 10-day hold entered at 11:00
+    must be measured against 11:00 ten sessions on, so the leave-one-out
+    (symbol, clock) control still removes intraday seasonality.
+    """
+    close = np.arange(2 * 5 * 3, dtype=np.float32).reshape(2, 5, 3)
+    out = sg._forward_sessions(close, 2)
+    # close[s, d, c] -> close[s, d+2, c]
+    expect = close[0, 2, 1] / close[0, 0, 1] - 1.0
+    assert out[0, 0, 1] == pytest.approx(expect)
+    assert np.isnan(out[:, -2:, :]).all()      # nothing past the last session
+
+
+def test_session_forward_never_borrows_another_symbol():
+    close = np.zeros((2, 4, 2), dtype=np.float32)
+    close[0] = 1.0
+    close[1] = 100.0
+    out = sg._forward_sessions(close, 1)
+    assert np.nanmax(np.abs(out[0])) == pytest.approx(0.0)
+    assert np.nanmax(np.abs(out[1])) == pytest.approx(0.0)
+
+
+def test_the_two_axes_are_different_measurements():
+    """A clock horizon and a session horizon of the same number must differ."""
+    p = _panel(S=6, D=40, C=75, seed=8)
+    clock = sg.excess_forward(p, 3, axis="clock")
+    session = sg.excess_forward(p, 3, axis="session")
+    both = np.isfinite(clock) & np.isfinite(session)
+    assert both.any()
+    assert not np.allclose(clock[both], session[both])
+
+
+def test_session_excess_columns_still_sum_to_zero():
+    """
+    The leave-one-out control must hold on the session axis too - it is what
+    makes the circular-shift null exactly centred, and E6 shifts along the
+    same axis its returns now span.
+    """
+    p = _panel(S=4, D=40, C=20, seed=15)
+    e = sg.excess_forward(p, 3, axis="session")
+    col = np.nansum(e, axis=1)
+    assert np.allclose(col[np.isfinite(col)], 0.0, atol=1e-9)
+
+
+@pytest.mark.parametrize("seed", [0, 1, 2])
+def test_session_axis_null_is_still_calibrated(seed, monkeypatch):
+    """
+    Overlapping returns (E[d] and E[d+1] share h-1 sessions) make the null
+    draws correlated and inflate the naive t further still. The permutation
+    null must absorb that - if it does not, E6 manufactures a discovery the
+    way a per-cell t-test would.
+    """
+    monkeypatch.setattr(sg, "MIN_FIRINGS", 200)
+    p = _panel(seed=seed)
+    cells = sg.run_grid(p, horizons=(3, 10), signals=sg.SIGNALS,
+                        windows=(("all", p.clocks[0], time(23, 59)),),
+                        axis="session")
+    res = sg.family_wise(cells)
+    assert res.family_p > 0.01, (
+        f"noise cleared a 0.01 gate on the session axis at seed {seed} "
+        f"(p={res.family_p})")

@@ -35,6 +35,7 @@ re-scan, because they genuinely produce different signals.
 from __future__ import annotations
 
 import argparse
+import copy
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from typing import Callable, Optional
@@ -132,6 +133,44 @@ VARIANTS: tuple[Variant, ...] = (
             "the cheapest entry of the four, and the one that needs the trend "
             "to be real rather than recent",
             _set(enabled_setups=("pullback",))),
+
+    # L5 - the horizon constraint. Not a tuning knob: a book held for ten
+    # trading days is a different PRODUCT from one that trails for two months,
+    # and the two cannot be compared on expectancy alone. This also answers
+    # how much of the book's return came from holds longer than ten days.
+    Variant("hold10", "Hard time stop at 10 trading days",
+            "the stated horizon, encoded - and a measurement of what the long "
+            "tail of holds was actually contributing",
+            _set(max_hold_days=10)),
+
+    # L6 - a TIGHTER stop, tested rather than assumed. It runs three ways
+    # against the book: cash per ticket is risk/stop% so a tighter stop needs
+    # MORE money per position, friction in R is 0.284%/stop% so it gets worse,
+    # and at 0.75x ATR the stop sits inside one day's normal range.
+    # `stopwide` (1.5-2.5x) was already measured and rejected at +0.043R.
+    Variant("stoptight", "Stop band 0.75-1.0 ATR",
+            "the tighter stop the horizon seems to want, priced against the "
+            "three things that make it expensive",
+            _set(swing_atr_stop_min_multiple=0.75, swing_atr_stop_multiple=1.0)),
+
+    # L7 - the proposed exit: no target, no partial, no breakeven rung, an ATR
+    # stop trailed from entry, hard exit at 10 days.
+    #
+    # `trail_from_r` is what makes this expressible at all. Raising
+    # `partial_exit_at_r` alone removes the target AND every trailing update,
+    # because `LadderMode.TRAIL` was reachable only through the partial rung -
+    # the position would sit on its initial stop and nothing would say so.
+    #
+    # Two of its three components were already measured alone and both were
+    # WORSE than the baseline (`beoff` and `be20`, +0.058R against +0.114R),
+    # and that baseline loses to a random-scoring null over six years. This is
+    # pre-registered because it was asked for and is cheap, not because the
+    # prior is good.
+    Variant("puretrail", "ATR trail from entry, no target, 10-day cap",
+            "bank whatever the move gives instead of waiting for 2R, and stop "
+            "holding once the idea has had ten sessions to work",
+            _set(trail_from_r=0.0, breakeven_at_r=99.0,
+                 partial_exit_at_r=99.0, max_hold_days=10)),
 
     # The two most promising levers together, which is the only combination
     # worth pre-registering: everything else would be a search.
@@ -331,6 +370,111 @@ def sweep(cfg: Config, market, bars: dict, benchmark=None, stocks=None,
                 out.cells.append(_cell(v, w, phase, result, settle_days))
                 done += 1
     return out
+
+
+# --------------------------------------------------- the null, walk-forward
+
+def walk_forward_null(cfg: Config, market, bars: dict, benchmark=None,
+                      stocks=None, n_seeds: int = 40, seed0: int = 20260904,
+                      train_months: Optional[int] = None,
+                      test_months: Optional[int] = None,
+                      window_start: Optional[date] = None,
+                      settle_days: int = 60,
+                      variant: Optional[Variant] = None,
+                      progress: Optional[Callable] = None):
+    """
+    S1. Rank the book inside a distribution of random-scoring nulls, per
+    out-of-sample window.
+
+    THE QUESTION THIS BOOK HAS NEVER BEEN ASKED. All twelve variants in
+    `VARIANTS` compare against `baseline`; none asks whether the SCORING beats
+    chance. On the intraday equity book the equivalent null BEAT the four
+    strategies on four metrics, and nobody has checked whether the same is true
+    on daily bars.
+
+    Only TEST windows are run. Train windows exist to choose between variants,
+    and nothing is being chosen here - the question is whether one fixed rule
+    beats noise consistently.
+
+    ONE SCAN PASS SERVES EVERYTHING. `random_seed` is in
+    `BOOK_ONLY_SWING_FIELDS`, so the book and all `n_seeds` nulls hash to the
+    same scan signature and share a single `ScanCache`. That is what makes a
+    40-draw null affordable at all.
+    """
+    from .. import experiment_core as ec
+
+    sessions_index = bt.all_sessions(bars)
+    sessions = list(sessions_index)
+    if len(sessions) < 2:
+        return ec.WalkForward(folds=[], slippage_pct=0.0)
+
+    train_months = train_months or cfg.backtest.train_months
+    test_months = test_months or cfg.backtest.test_months
+    first = sessions[0].date()
+    if window_start is not None and window_start > first:
+        first = window_start
+    windows = bt.fold_windows(first, sessions[-1].date(),
+                              train_months, test_months)
+
+    base_cfg = (variant or VARIANTS[0]).configure(cfg)
+    signature = bt.scan_signature(base_cfg, market)
+    cache = bt.ScanCache(signature=signature)
+
+    def expectancy(run_cfg, w) -> tuple:
+        res = bt.run(run_cfg, market, bars, benchmark, stocks=stocks,
+                     start=w.test_start, end=w.test_end, scan_cache=cache,
+                     sessions_index=sessions_index, settle_days=settle_days)
+        m = res.metrics
+        return ((m.expectancy_r if m else 0.0), res.trades)
+
+    folds = []
+    for i, w in enumerate(windows):
+        if progress:
+            progress(i + 1, len(windows), f"{w.test_start}..{w.test_end}")
+        real, trades = expectancy(base_cfg, w)
+        nulls = []
+        for j in range(n_seeds):
+            c = copy.deepcopy(base_cfg)
+            c.swing.random_seed = seed0 + i * 1000 + j
+            nulls.append(expectancy(c, w)[0])
+        # `trades` rides along because `bars_held` is the number the horizon
+        # question turns on, and because a window too thin to mean anything
+        # must be excluded rather than averaged in.
+        folds.append(ec.Fold(index=i, start=w.test_start, end=w.test_end,
+                             score=real, nulls=nulls, trades=trades))
+    return ec.WalkForward(folds=folds)
+
+
+def hold_stats(wf) -> str:
+    """
+    How long the book actually held, and what each exit reason earned.
+
+    Asked for explicitly and computed nowhere else: "average days to target"
+    cannot be read off an expectancy table, and a book pitched at a ten-day
+    horizon that in fact trails for six weeks is a different product from the
+    one described.
+    """
+    trades = [t for f in getattr(wf, "folds", []) for t in getattr(f, "trades", [])]
+    if not trades:
+        return "  no trades - nothing to describe"
+    lines = [f"  {'exit':<12}{'n':>6}{'share':>8}{'mean R':>9}"
+             f"{'mean days':>11}{'median days':>13}"]
+    import statistics as _st
+    by: dict = {}
+    for t in trades:
+        by.setdefault(t.outcome, []).append(t)
+    for reason, group in sorted(by.items(), key=lambda kv: -len(kv[1])):
+        held = [t.bars_held for t in group]
+        lines.append(
+            f"  {reason:<12}{len(group):>6}{len(group)/len(trades):>8.0%}"
+            f"{sum(t.r_multiple for t in group)/len(group):>9.3f}"
+            f"{sum(held)/len(held):>11.1f}{_st.median(held):>13.0f}")
+    allheld = [t.bars_held for t in trades]
+    lines.append(f"  {'ALL':<12}{len(trades):>6}{1.0:>8.0%}"
+                 f"{sum(t.r_multiple for t in trades)/len(trades):>9.3f}"
+                 f"{sum(allheld)/len(allheld):>11.1f}"
+                 f"{_st.median(allheld):>13.0f}")
+    return "\n".join(lines)
 
 
 # ------------------------------------------------------------------- ledger

@@ -20,6 +20,8 @@ python -m nifty_algo.experiment_intraday --variants baseline,gapdaily,novwap  # 
 python -m nifty_algo.experiment_intraday --report        # the table from the existing ledger, no re-run
 python -m nifty_algo.intraday_equity.signal_grid --market india  # E5: is there ANY edge on 5m equity bars? (~35 min)
 python -m nifty_algo.factor.verdict --seeds 500 --slippage 0.0025   # F1: is the factor sleeve real? (~40 min)
+python scripts/run_s1_swing_null.py --seeds 40 --years 6 --capital 200000  # S1: does the swing book beat chance? (~55 min)
+python -m nifty_algo.intraday_equity.signal_grid --horizon sessions   # E6: do intraday signals predict DAYS? (~40 min)
 python -m nifty_algo.research macro --market india          # macro fact pack; --json is what a skill reads
 python -m nifty_algo.research risk  --market india --json   # portfolio risk fact pack
 python scripts/fetch_swing_history.py --market india --years 6  # deep daily bars for it
@@ -30,7 +32,7 @@ python scripts/fetch_history.py         # real 5m NIFTY history (resumable)
 python scripts/fetch_vix.py             # India VIX, for SYNTHETIC_PREMIUM backtests
 ```
 
-Tests (859: 854 passing, 5 skipped; pytest, `pythonpath = . tests` so `nifty_algo` and the conftest helpers both import without an install step):
+Tests (887: 882 passing, 5 skipped; pytest, `pythonpath = . tests` so `nifty_algo` and the conftest helpers both import without an install step):
 
 ```bash
 pytest                                                     # the only run that counts as done
@@ -224,6 +226,100 @@ trades" and reads like tight gates. At Rs 1,00,000 the India run refuses **795
 entries for want of cash against 282 taken** - the pot decides *which* trades
 the book gets, not merely their size, so two runs at different `--capital` are
 two different experiments.
+
+## S1: the swing book lost to its own null, and the +0.114R was a window
+
+**Every book in this repo is now tested against a null that shares its
+machinery**, and the swing book was the last to face one. `SwingConfig.random_seed`
+replaces `scanner._score` with noise and changes nothing else - same gates,
+trigger, stop, ladder, sizing, sector cap and charges - so a seeded run differs
+in the SCORING alone. It is applied in `_apply_null` AFTER the scan cache is
+read, and `random_seed` is in `BOOK_ONLY_SWING_FIELDS`, so 41 runs per fold cost
+**one** scan pass. Without that the 40-draw null is unaffordable.
+
+Result over 33 out-of-sample windows at Rs 2,00,000: **12/33 folds won against
+16.5 expected by chance, mean percentile 42%, sign-test p = 0.163.** The null
+did not tie the book, it beat it - the same verdict the intraday equity book
+got, now on daily bars.
+
+**THE +0.114R WAS THE LAST TWO YEARS.** Identical code and data:
+
+| window | folds | trades | expectancy |
+| --- | --- | --- | --- |
+| 2024-09 -> 2026-09 | 9 | 74 | **+0.111R** |
+| 2020-09 -> 2026-09 | 33 | 361 | **-0.094R** |
+
+The fold table shows the shape: the book wins the **last seven folds straight**
+(percentiles 90/60/88/92/50/82/80) and loses nearly everything from 2022-09 to
+2025-07 (8-35%). Capital is not the explanation - Rs 1L and Rs 2L agree to
+0.01R. A `git stash` A/B over the same window reproduced **+0.111037R over 74
+trades on both sides, trade for trade**, so it is not a code change either.
+This is exactly the "carried by one good stretch" failure the sign test exists
+to catch, and it went unnoticed because the book had never been scored against
+anything but itself.
+
+**THE HOLDING-PERIOD ANSWER: median 5 days, mean 8.2 - and NOT ONE `target`
+EXIT in 356 trades.** Every exit is the initial, breakeven or trailing stop; the
+structural target is never reached. "Average days to target" is unanswerable
+because there are no targets, and a 2R reward:risk that never pays 2R is a
+design figure rather than an outcome.
+
+**`walk_forward_report` takes a `unit` because the two books measure different
+things.** The factor sleeve scores a window in chained period return; the swing
+book in expectancy. Formatting the second as a percent printed +0.369R as
+"+36.90%" - complete, plausible, a hundredfold wrong.
+
+## S2 and E6: the exit was not the problem, and neither was the horizon
+
+**S2 tested the exit rule directly** - an ATR stop trailed from entry, no
+breakeven rung, no partial, no target, hard 10-day cap - against its own 40-draw
+null on the same 33 folds:
+
+| | baseline | `puretrail` |
+| --- | --- | --- |
+| folds won vs median null | 12/33 | **8/33** |
+| two-sided sign p | 0.163 | **0.005, in the WRONG direction** |
+| mean percentile | 42% | 41% |
+| expectancy | -0.103R | -0.099R |
+
+The exit made it **worse**. 89% of trades stop out at -0.292R in a median 3
+sessions; the 11% reaching the cap show +1.423R, which is survivorship - those
+are simply the trades that had not stopped, and the cap truncates them.
+
+**"TRAIL FROM ENTRY" WAS NOT EXPRESSIBLE, AND REMOVING THE TARGET WOULD HAVE
+KILLED THE TRAIL SILENTLY.** `LadderMode.TRAIL` was reachable only through the
++2R partial rung, so raising `partial_exit_at_r` removed every trailing update
+and left positions on their initial stop - the trap `ShortPremiumConfig` already
+records for another book. `TradeManagementConfig.trail_from_r` (None = no-op) is
+the fix and `tests/test_positions.py` pins the old behaviour so it cannot
+return. Note it SUPERSEDES the breakeven rung and, at 1.0 ATR trail against a
+1.5 ATR stop, tightens the stop from -1.0R to -0.667R the moment a trade opens.
+
+**A `SwingConfig` field can silently do nothing.** `partial_exit_at_r` lives on
+`TradeManagementConfig`; a variant setting it on `SwingConfig` changed nothing
+while its name claimed the partial was gone. Only printing the RESOLVED trade
+config caught it. `test_swing_overrides_actually_reach_the_ladder` now asserts
+every override arrives.
+
+**THE SIGN TEST IS TWO-SIDED - ASSERT THE DIRECTION SEPARATELY.** 8/33 folds
+scores p = 0.005 and a gate testing the p alone printed **PASS**.
+"Significantly different from chance" is not "better than chance".
+
+**E6 asked whether an intraday signal predicts DAYS**, since E5 only ever looked
+100 minutes ahead. Same signals and null, shifted along the SESSION axis at
+horizons of 1/3/5/10 sessions:
+
+| | E5 (100 min) | E6 (1-10 sessions) |
+| --- | --- | --- |
+| best excess | +0.0154% | **+0.0829%** |
+| family-wise p | 0.0108 | **0.0731 - fails** |
+| toll to clear | 0.0827% MIS | **0.3378% DELIVERY** |
+| shortfall | 5.4x | **4.1x** |
+
+**The move got 5x bigger and so did the toll**: an overnight hold is CNC, so STT
+lands on both legs and the flat DP charge applies. The friction argument for a
+longer hold was right about the numerator and wrong to ignore the denominator.
+The family-wise p also got WORSE, not better.
 
 ## Choosing between rule sets: the yardstick and the folds
 

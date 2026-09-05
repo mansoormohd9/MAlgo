@@ -52,6 +52,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from ..experiment_core import Fold, WalkForward, walk_forward_report
 from ..swing.costs_equity import DEFAULT_EQUITY_COSTS
 from . import backtest as fb
 
@@ -364,86 +365,11 @@ if __name__ == "__main__":        # pragma: no cover
     raise SystemExit(_main())
 
 
-# ------------------------------------------------- the walk-forward check
+# ------------------------------------------- the walk-forward driver
 
-@dataclass
-class Fold:
-    """One out-of-sample window: momentum's rank inside the null spread."""
-    index: int
-    start: object
-    end: object
-    momentum: float                 # period-chained return over the window
-    nulls: list = field(default_factory=list)
-
-    @property
-    def null_median(self) -> float:
-        return statistics.median(self.nulls) if self.nulls else float("nan")
-
-    @property
-    def percentile(self) -> float:
-        """
-        Share of null draws momentum beat in THIS window.
-
-        Under the hypothesis that the signal is noise this is Uniform(0,1),
-        which is what makes the fold-level numbers combinable. A single-seed
-        null gives only a coin flip per fold and throws that away.
-        """
-        if not self.nulls:
-            return float("nan")
-        return sum(1 for c in self.nulls if self.momentum > c) / len(self.nulls)
-
-    @property
-    def won(self) -> bool:
-        return self.momentum > self.null_median
-
-
-@dataclass
-class WalkForward:
-    folds: list
-    slippage_pct: float
-
-    @property
-    def wins(self) -> int:
-        return sum(1 for f in self.folds if f.won)
-
-    @property
-    def sign_p(self) -> float:
-        """Two-sided exact binomial on folds won against the median null."""
-        import math
-        n = len(self.folds)
-        if not n:
-            return float("nan")
-        k = max(self.wins, n - self.wins)
-        tail = sum(math.comb(n, i) for i in range(k, n + 1)) / (2.0 ** n)
-        return min(1.0, 2.0 * tail)
-
-    @property
-    def mean_percentile(self) -> float:
-        ps = [f.percentile for f in self.folds if f.percentile == f.percentile]
-        return sum(ps) / len(ps) if ps else float("nan")
-
-    @property
-    def combined_p(self) -> float:
-        """
-        One p for the whole walk-forward, from the per-fold percentiles.
-
-        THIS IS THE STATISTIC THE SIGN TEST CANNOT SEE. A sign test throws
-        away magnitude: momentum sitting at the 95th percentile of the null in
-        every window scores identically to momentum scraping past the median in
-        every window. Under H0 each percentile is Uniform(0,1), so their mean
-        is approximately Normal(0.5, 1/sqrt(12n)) and the z below uses that.
-
-        Reported ALONGSIDE the sign test, never instead of it - it assumes the
-        folds are independent, and adjacent windows share regimes.
-        """
-        import math
-        ps = [f.percentile for f in self.folds if f.percentile == f.percentile]
-        n = len(ps)
-        if n < 3:
-            return float("nan")
-        z = (sum(ps) / n - 0.5) / (1.0 / math.sqrt(12.0 * n))
-        return 0.5 * math.erfc(z / math.sqrt(2.0))       # one-sided
-
+# `Fold`, `WalkForward` and `walk_forward_report` moved to `experiment_core`
+# when the swing book wanted the same statistic. What stays here is the loop
+# that drives THIS book's backtester - the split the shared module documents.
 
 def walk_forward(bars: dict, capital: float, cfg_factor, windows,
                  n_seeds: int = 40, slippage_pct: float = 0.0025,
@@ -481,40 +407,10 @@ def walk_forward(bars: dict, capital: float, cfg_factor, windows,
         if progress:
             progress(i + 1, len(windows), f"{w.test_start}..{w.test_end}")
         out.append(Fold(index=i, start=w.test_start, end=w.test_end,
-                        momentum=one(None),
+                        score=one(None),
                         nulls=[one(seed0 + i * 1000 + j)
                                for j in range(n_seeds)]))
     return WalkForward(folds=out, slippage_pct=slippage_pct)
-
-
-def walk_forward_report(wf: WalkForward) -> str:
-    lines = [
-        f"WALK-FORWARD: momentum against {len(wf.folds[0].nulls) if wf.folds else 0}"
-        f" null draws per window, at {wf.slippage_pct:.2%}/leg",
-        "",
-        "  Chained period return per window - never an annualised short window.",
-        "",
-        f"  {'fold':>5}  {'window':<26}{'momentum':>10}{'null med':>10}"
-        f"{'pctile':>8}  won",
-    ]
-    for f in wf.folds:
-        lines.append(
-            f"  {f.index:>5}  {str(f.start) + '..' + str(f.end):<26}"
-            f"{f.momentum:>+10.2%}{f.null_median:>+10.2%}"
-            f"{f.percentile:>8.0%}  {'Y' if f.won else '.'}")
-    lines += [
-        "",
-        f"  folds won vs the median null: {wf.wins}/{len(wf.folds)}"
-        f"   sign-test p = {wf.sign_p:.3f}",
-        f"  mean percentile within the null: {wf.mean_percentile:.0%} "
-        f"(0.50 under the null)   combined p = {wf.combined_p:.4f}",
-        "",
-        "  The SIGN TEST is the conservative read and the repo's own rule says",
-        "  to believe it over a pooled average. The combined p uses the same",
-        "  folds without discarding magnitude, and assumes independence the",
-        "  sign test does not - so report both and let them disagree in public.",
-    ]
-    return "\n".join(lines)
 
 
 __all__ += ["Fold", "WalkForward", "walk_forward", "walk_forward_report"]

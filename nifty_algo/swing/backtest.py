@@ -334,6 +334,11 @@ BOOK_ONLY_SWING_FIELDS = frozenset({
     # and `regime_ma_days` are exactly the two levers this cache exists to
     # sweep cheaply. `enabled_setups` is NOT here: `setup.detect` reads it.
     "breakeven_at_r", "regime_ma_days",
+    # `random_seed` replaces the SCORE, which `rank_and_size` reads at t[4]
+    # AFTER the cache is consulted - so the null and the real book share one
+    # scan pass. `max_hold_days` is read only by `_manage`. Both are provably
+    # outside the cached unit, which is the bar this list sets.
+    "random_seed", "max_hold_days",
     # never read by the backtest at all
     "markets", "default_market", "cache_dir", "history_days", "halal",
     "price_cache_hours", "fundamentals_cache_days",
@@ -439,6 +444,11 @@ def run(cfg: Config, market, bars: dict[str, pd.DataFrame],
         return result
 
     ladder = ExitLadder(cfg, trade=swing_trade(cfg))
+    # ONE generator per backtest, so the null is reproducible from its seed and
+    # consecutive sessions draw different numbers. Seeding per day would hand
+    # every session the same permutation - noise with a pattern in it.
+    rng = (np.random.default_rng(cfg.swing.random_seed)
+           if cfg.swing.random_seed is not None else None)
     sectors = {s.symbol: s.sector for s in (stocks or [])}
     by_symbol = {s.symbol: s for s in (stocks or [])}
     budget = cfg.capital.risk_inr(market.capital_pool)
@@ -527,6 +537,8 @@ def run(cfg: Config, market, bars: dict[str, pd.DataFrame],
                            open_trades, by_symbol, sectors, scan_cache)
         if not scored:
             continue
+
+        scored = _apply_null(scored, cfg, day, rng)
 
         picks = scanner_mod.rank_and_size(
             scored, cfg, market, _unit_rate(), day.date(), top_n=room)
@@ -647,6 +659,33 @@ def _scan_day(bars, benchmark, day, cfg, market, warmup, open_trades,
     return [row for row in scored if row[0].symbol not in open_trades]
 
 
+def _apply_null(scored, cfg, day, rng):
+    """
+    THE NULL. Replace the score with noise, and change nothing else.
+
+    `rank_and_size` ranks on `t[4]`, so overwriting that one element hands the
+    book a random ordering of exactly the same candidates - same gates, same
+    triggers, same stops, same sizing, same sector cap, same ladder, same
+    charges. A run with a seed and a run without differ in the SCORING and in
+    nothing else, which is what makes the comparison a test of the scoring.
+
+    APPLIED AFTER THE CACHE IS READ, deliberately. `_scan_day` stores the
+    scored rows, so randomising inside it would either poison the cache for
+    the real book or force the null to pay its own full scan pass. Here the
+    null is nearly free and `scan_signature` stays identical - see
+    `BOOK_ONLY_SWING_FIELDS`.
+
+    THE RNG IS THREADED THROUGH `run`, not created here. One generator per
+    backtest means the null is reproducible from its seed and that consecutive
+    sessions draw different numbers; a generator seeded per day would give
+    every session the same permutation, which is a very orderly kind of noise.
+    """
+    if rng is None:
+        return scored
+    return [(stock, found, metrics, n, float(rng.normal()), parts)
+            for stock, found, metrics, n, _total, parts in scored]
+
+
 def _try_open(pick, bars, sessions, i, open_trades, ladder, cfg, stats,
               capital: float):
     """
@@ -721,6 +760,33 @@ def _try_open(pick, bars, sessions, i, open_trades, ladder, cfg, stats,
         return
 
 
+class _TimeStopKind:
+    """`.value` is all `_close` reads off an unmapped exit kind."""
+    value = "time_stop"
+
+
+TIME_STOP_KIND = _TimeStopKind()
+
+
+@dataclass
+class _TimeStop:
+    """
+    A decision-shaped stand-in for the time stop.
+
+    `_close` reads `.kind` and `.detail` off whatever the ladder produced. The
+    time stop is not a ladder rung - it is a constraint applied from outside -
+    so rather than teach `ExitLadder` about calendars, or teach `_close` a
+    second exit vocabulary, it presents the same two attributes.
+
+    The kind carries its own `.value` so the trade is labelled `time_stop`
+    rather than the generic `closed`. That distinction is the entire point of
+    the variant: "how many trades did the clock end, and what did they earn"
+    is unanswerable if they are pooled with every other non-stop exit.
+    """
+    kind: object = TIME_STOP_KIND
+    detail: str = "time stop"
+
+
 def _manage(open_trades, bars, day, ladder, cfg, costs, result, sectors):
     """Advance every open position through today's bar."""
     for symbol in list(open_trades):
@@ -744,6 +810,7 @@ def _manage(open_trades, bars, day, ladder, cfg, costs, result, sectors):
             worst_r=t.r_of(float(bar["low"])),
             trail_distance_r=trail_r,
         )
+        closed_here = False
         for d in decisions:
             if not d.exit_lots:
                 continue
@@ -755,7 +822,23 @@ def _manage(open_trades, bars, day, ladder, cfg, costs, result, sectors):
                 result.trades.append(
                     _close(t, day, fill, d, costs, sectors))
                 del open_trades[symbol]
+                closed_here = True
                 break
+
+        # THE TIME STOP, AND IT RUNS LAST ON PURPOSE. The ladder is given the
+        # bar first, so a position that reached its stop or its target on the
+        # final permitted day is booked at THAT level rather than at the close.
+        # Running the clock first would convert real stops into time exits and
+        # quietly improve the loss distribution - a flattering rewrite of what
+        # happened, with no error anywhere.
+        limit = cfg.swing.max_hold_days
+        if limit and not closed_here and t.bars_held >= limit:
+            fill = float(bar["close"])
+            remaining = t.state.lots_remaining
+            t.realised += (fill - t.entry) * remaining
+            result.trades.append(
+                _close(t, day, fill, _TimeStop(), costs, sectors))
+            del open_trades[symbol]
 
 
 def _close(t: _Open, day, fill: float, decision, costs, sectors) -> SwingTrade:

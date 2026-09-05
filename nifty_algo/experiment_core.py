@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import copy
 import math
+import statistics
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
@@ -388,4 +389,188 @@ def report(sw: Sweep, baseline_key: str = "baseline") -> str:
     lines.append("'vs base' is folds won against the baseline and 'p' its "
                  "two-sided sign test - a variant that wins on pooled R but "
                  "not on folds was carried by one stretch.")
+    return "\n".join(lines)
+
+
+# ------------------------------------------- walk-forward against a null
+
+# WHY THIS LIVES HERE. The factor book grew it first, to rank momentum inside a
+# distribution of null draws in every out-of-sample window. The swing book then
+# wanted exactly the same question asked of its scoring. That is the second
+# consumer, which is the point at which a statistic belongs in the shared
+# module rather than in one book - this file already owns the pooling rule, the
+# interval and the sign test for the same reason.
+#
+# What each book keeps is its DRIVER: the loop that runs its own backtester and
+# fills in `Fold.momentum` and `Fold.nulls`. Only the arithmetic is shared.
+#
+# A SINGLE-SEED NULL IS A COIN FLIP PER FOLD AND THROWS AWAY MOST OF THE
+# EVIDENCE. Ranking the book inside `n` draws makes each fold a percentile,
+# which under the null is Uniform(0,1) and therefore combinable across folds.
+
+@dataclass
+class Fold:
+    """
+    One out-of-sample window: the book's rank inside the null spread.
+
+    `score` is whatever the driving book measures a window in - a chained
+    period return for the factor sleeve, an expectancy in R for the swing
+    book. It is deliberately NOT given a unit here: this type owns the
+    ranking arithmetic, which is unit-free, and `walk_forward_report` is told
+    how to format it. Baking a `%` in was how a swing expectancy of +0.369R
+    first printed as "+36.90%".
+
+    `trades` is carried so a window too thin to mean anything can be excluded
+    rather than silently averaged in - `fold_windows` keeps a truncated final
+    window, and a two-week one produced a null median of -1.15R.
+    """
+    index: int
+    start: object
+    end: object
+    score: float
+    nulls: list = field(default_factory=list)
+    trades: list = field(default_factory=list)
+
+    @property
+    def n_trades(self) -> int:
+        return len(self.trades)
+
+    @property
+    def momentum(self) -> float:
+        """Back-compatible alias: the factor book named this `momentum`."""
+        return self.score
+
+    @property
+    def null_median(self) -> float:
+        return statistics.median(self.nulls) if self.nulls else float("nan")
+
+    @property
+    def percentile(self) -> float:
+        """
+        Share of null draws momentum beat in THIS window.
+
+        Under the hypothesis that the signal is noise this is Uniform(0,1),
+        which is what makes the fold-level numbers combinable. A single-seed
+        null gives only a coin flip per fold and throws that away.
+        """
+        if not self.nulls:
+            return float("nan")
+        return sum(1 for c in self.nulls if self.score > c) / len(self.nulls)
+
+    @property
+    def won(self) -> bool:
+        return self.score > self.null_median
+
+
+@dataclass
+class WalkForward:
+    folds: list
+    slippage_pct: float = 0.0
+    #: A window with fewer trades than this is reported and then EXCLUDED
+    #: from both statistics. `fold_windows` deliberately keeps a truncated
+    #: final window, and on the swing book a two-week one produced a null
+    #: median of -1.15R off a handful of trades - noise with a fold's worth
+    #: of voting power.
+    min_trades: int = 5
+
+    @property
+    def scored(self) -> list:
+        """The folds that actually vote."""
+        return [f for f in self.folds
+                if f.nulls and (not f.trades or f.n_trades >= self.min_trades)]
+
+    @property
+    def wins(self) -> int:
+        return sum(1 for f in self.scored if f.won)
+
+    @property
+    def sign_p(self) -> float:
+        """Two-sided exact binomial on folds won against the median null."""
+        n = len(self.scored)
+        if not n:
+            return float("nan")
+        k = max(self.wins, n - self.wins)
+        tail = sum(math.comb(n, i) for i in range(k, n + 1)) / (2.0 ** n)
+        return min(1.0, 2.0 * tail)
+
+    @property
+    def mean_percentile(self) -> float:
+        ps = [f.percentile for f in self.scored if f.percentile == f.percentile]
+        return sum(ps) / len(ps) if ps else float("nan")
+
+    @property
+    def combined_p(self) -> float:
+        """
+        One p for the whole walk-forward, from the per-fold percentiles.
+
+        THIS IS THE STATISTIC THE SIGN TEST CANNOT SEE. A sign test throws
+        away magnitude: momentum sitting at the 95th percentile of the null in
+        every window scores identically to momentum scraping past the median in
+        every window. Under H0 each percentile is Uniform(0,1), so their mean
+        is approximately Normal(0.5, 1/sqrt(12n)) and the z below uses that.
+
+        Reported ALONGSIDE the sign test, never instead of it - it assumes the
+        folds are independent, and adjacent windows share regimes.
+        """
+        ps = [f.percentile for f in self.scored if f.percentile == f.percentile]
+        n = len(ps)
+        if n < 3:
+            return float("nan")
+        z = (sum(ps) / n - 0.5) / (1.0 / math.sqrt(12.0 * n))
+        return 0.5 * math.erfc(z / math.sqrt(2.0))       # one-sided
+
+
+def walk_forward_report(wf: WalkForward, label: str = "book",
+                        unit: str = "pct") -> str:
+    """
+    The fold table and both statistics.
+
+    `unit` EXISTS BECAUSE THE TWO BOOKS MEASURE DIFFERENT THINGS. The factor
+    sleeve's window score is a chained period return and reads as a percent;
+    the swing book's is an expectancy in R. Formatting the second with a `%`
+    printed +0.369R as "+36.90%" - a number that is complete, plausible and a
+    hundredfold wrong. The unit is now the caller's to declare.
+    """
+    if not wf.folds:
+        return "no folds - not enough history for one out-of-sample window"
+
+    def fmt(v: float) -> str:
+        if v != v:
+            return f"{'n/a':>10}"
+        return f"{v:>+10.2%}" if unit == "pct" else f"{v:>+10.3f}R"
+
+    thin = [f for f in wf.folds if f not in wf.scored]
+    lines = [
+        f"WALK-FORWARD: {label} against {len(wf.folds[0].nulls)} null draws "
+        f"per window",
+        "",
+        f"  {'fold':>5}  {'window':<26}{label[:8]:>10}{'null med':>11}"
+        f"{'pctile':>8}{'n':>6}  won",
+    ]
+    for f in wf.folds:
+        skipped = f in thin
+        lines.append(
+            f"  {f.index:>5}  {str(f.start) + '..' + str(f.end):<26}"
+            f"{fmt(f.score)}{fmt(f.null_median)}"
+            f"{f.percentile:>8.0%}{f.n_trades:>6}  "
+            f"{'-' if skipped else ('Y' if f.won else '.')}")
+    if thin:
+        lines += ["",
+                  f"  {len(thin)} window(s) marked '-' had fewer than "
+                  f"{wf.min_trades} trades and are EXCLUDED from both "
+                  f"statistics.",
+                  "  `fold_windows` keeps a truncated final window; a "
+                  "two-week one is noise, not evidence."]
+    lines += [
+        "",
+        f"  folds won vs the median null: {wf.wins}/{len(wf.scored)}"
+        f"   sign-test p = {wf.sign_p:.3f}",
+        f"  mean percentile within the null: {wf.mean_percentile:.0%} "
+        f"(0.50 under the null)   combined p = {wf.combined_p:.4f}",
+        "",
+        "  The SIGN TEST is the conservative read and the repo's own rule says",
+        "  to believe it over a pooled average. The combined p uses the same",
+        "  folds without discarding magnitude, and assumes independence the",
+        "  sign test does not - so report both and let them disagree in public.",
+    ]
     return "\n".join(lines)

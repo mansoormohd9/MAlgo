@@ -203,6 +203,26 @@ class ExitLadder:
         """One transition, or None when the ladder has settled for this bar."""
         t = self.trade
 
+        # --- arm the trail directly, no partial required ---
+        # THE ONLY OTHER WAY INTO `LadderMode.TRAIL`. Without this the mode is
+        # reachable solely through the partial rung below, so a book that
+        # removes its target - by raising `partial_exit_at_r` - also removes
+        # its trailing stop and never learns it did.
+        #
+        # Deliberately does NOT touch `stop_r`. The partial rung sets it to
+        # breakeven because a banked partial has already paid for the trade;
+        # arming a trail has not, and forcing the stop to 0.0 here would jump
+        # a position straight to breakeven the moment it opened. The trail
+        # block below computes the level, and it only ever ratchets up.
+        if (getattr(t, "trail_from_r", None) is not None
+                and st.mode is not LadderMode.TRAIL
+                and best >= t.trail_from_r - _EPS):
+            st.mode = LadderMode.TRAIL
+            return LadderDecision(
+                kind=ExitKind.TRAIL_UPDATE, new_stop_r=st.stop_r,
+                detail=f"trail armed at +{t.trail_from_r:.2f}R",
+            )
+
         # --- breakeven shift at +1R ---
         if st.mode is LadderMode.INITIAL and best >= t.breakeven_at_r - _EPS:
             st.mode = LadderMode.BREAKEVEN

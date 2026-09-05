@@ -183,7 +183,34 @@ def _forward(close: np.ndarray, h: int) -> np.ndarray:
         return nxt / close - 1.0
 
 
-def excess_forward(panel: Panel, h: int) -> np.ndarray:
+#: E6's horizons, in SESSIONS rather than bars. A 10-day hold entered on an
+#: intraday signal is the "few-day book, timed intraday" idea; these are the
+#: horizons it would actually run over.
+SESSION_HORIZONS: tuple[int, ...] = (1, 3, 5, 10)
+
+
+def _forward_sessions(close: np.ndarray, h: int) -> np.ndarray:
+    """
+    Return from this bar to the SAME CLOCK `h` sessions later.
+
+    E5 asked whether an intraday signal predicts the next 100 minutes and
+    found a real effect a tenth the size of its own costs. This asks the
+    different question the friction maths actually favours: whether it
+    predicts the next ten DAYS, where the same delivery charge is paid against
+    a move roughly 2.22% x sqrt(10) wide instead of a 0.257% one.
+
+    Holding the clock fixed keeps the entry time-of-day constant, so the
+    leave-one-out (symbol, clock) control still removes intraday seasonality
+    exactly as it does for E5.
+    """
+    nxt = np.full_like(close, np.nan)
+    if h < close.shape[1]:
+        nxt[:, :-h, :] = close[:, h:, :]
+    with np.errstate(invalid="ignore", divide="ignore"):
+        return nxt / close - 1.0
+
+
+def excess_forward(panel: Panel, h: int, axis: str = "clock") -> np.ndarray:
     """
     (S, D, C) forward return, benchmark-subtracted then de-meaned per
     (symbol, clock) by a LEAVE-ONE-OUT mean.
@@ -197,8 +224,12 @@ def excess_forward(panel: Panel, h: int) -> np.ndarray:
     cell scores only by choosing WHICH sessions to fire on. That is what makes
     the circular-shift null exactly centred rather than approximately so.
     """
-    raw = _forward(panel.close, h)
-    bench = _forward(panel.bench_close, h)[None, :, :]
+    fwd = _forward if axis == "clock" else _forward_sessions
+    raw = fwd(panel.close, h)
+    # The benchmark is (D, C); `_forward_sessions` expects (S, D, C), so it is
+    # given a length-1 symbol axis and squeezed back.
+    bench = (fwd(panel.bench_close, h)[None, :, :] if axis == "clock"
+             else fwd(panel.bench_close[None, :, :], h))
     with np.errstate(invalid="ignore"):
         ex = raw - bench
 
@@ -440,7 +471,8 @@ def _cell_stats(mask: np.ndarray, e: np.ndarray, valid: np.ndarray
 
 
 def run_grid(panel: Panel, horizons=DEFAULT_HORIZONS, signals=SIGNALS,
-             windows=WINDOWS, progress=None) -> list[GridCell]:
+             windows=WINDOWS, progress=None,
+             axis: str = "clock") -> list[GridCell]:
     """
     Every cell, each carrying the full distribution of its own null.
 
@@ -457,7 +489,7 @@ def run_grid(panel: Panel, horizons=DEFAULT_HORIZONS, signals=SIGNALS,
     total = len(horizons) * len(signals) * len(windows)
     done = 0
     for h in horizons:
-        e = excess_forward(panel, h)
+        e = excess_forward(panel, h, axis=axis)
         valid = np.isfinite(e)
         e = np.where(valid, e, 0.0)
         for wname, lo, hi in windows:
@@ -530,7 +562,25 @@ def family_wise(cells: list) -> GridResult:
 FRICTION_PCT = 0.0016
 
 
-def friction_reference() -> dict:
+def delivery_friction_pct(ticket_inr: float = 100_000.0) -> float:
+    """
+    E6's gate: the DELIVERY round trip, because a multi-day hold is CNC and
+    not MIS.
+
+    Derived from `swing/costs_equity` rather than written down, so it tracks
+    the same rate card the swing book pays. It is a different and much larger
+    number than E5's intraday floor - STT lands on both legs and the flat
+    Rs 15.34 DP charge does not shrink - and that is exactly the trade E6 is
+    pricing: a bigger toll against a far bigger move.
+    """
+    from ..swing.costs_equity import EquityCostModel
+    c = EquityCostModel()
+    px = 500.0
+    q = ticket_inr / px
+    return c.friction(px, px, q) / ticket_inr
+
+
+def friction_reference(delivery: bool = False) -> dict:
     """
     What the cost model says, so the frozen gate can be sanity-checked
     against it without becoming it.
@@ -540,24 +590,44 @@ def friction_reference() -> dict:
     get under, so an excess below THAT is untradeable under any assumption
     about fills at all.
     """
-    from .costs_intraday import IntradayEquityCostModel
-    c = IntradayEquityCostModel()
-    px, q = 1000.0, 100.0
+    if delivery:
+        # A MULTI-DAY HOLD IS CNC, NOT MIS. Quoting the intraday card beside a
+        # session-horizon result understates the toll by ~3.4x and made the
+        # best E6 cell read "1.0x short" when against the charge it would
+        # actually pay it is 4.1x short.
+        from ..swing.costs_equity import EquityCostModel
+        c = EquityCostModel()
+        px, q = 500.0, 200.0
+    else:
+        from .costs_intraday import IntradayEquityCostModel
+        c = IntradayEquityCostModel()
+        px, q = 1000.0, 100.0
     notional = px * q
     return {
         "statutory_only": c.round_trip(px, px, q) / notional,
         "with_slippage": c.friction(px, px, q) / notional,
         "gate": FRICTION_PCT,
+        "source": "delivery (CNC)" if delivery else "intraday (MIS)",
     }
 
 
-def report(res: GridResult, top: int = 12) -> str:
-    """The table, the gate, and nothing that decides anything."""
+def report(res: GridResult, top: int = 12, title: str = "",
+           gate_pct: float | None = None, horizon_unit: str = "bars") -> str:
+    """
+    The table, the gate, and nothing that decides anything.
+
+    `gate_pct` is passed rather than read from a constant because E5 and E6
+    pay different tolls for the same signal: E5 exits intraday and pays MIS
+    charges, E6 holds for days and pays DELIVERY, which is ~3.4x larger. A
+    shared gate would have quietly judged one book by the other's cost model.
+    """
+    gate = FRICTION_PCT if gate_pct is None else gate_pct
     lines = [
-        "E5 - does ANY signal on 5-minute Nifty 100 bars produce excess "
-        "forward return?",
+        title or ("E5 - does ANY signal on 5-minute Nifty 100 bars produce "
+                  "excess forward return?"),
         "",
-        "  Excess = forward return, minus NIFTY over the identical bars,",
+        f"  Horizons are in {horizon_unit}.",
+        "  Excess = forward return, minus NIFTY over the identical window,",
         "  minus the leave-one-out mean for the same (symbol, clock).",
         "  Each column sums to zero, so a cell scores only by choosing which",
         "  SESSIONS to fire on. Signal bar excluded: the mask is shifted one",
@@ -626,18 +696,18 @@ def report(res: GridResult, top: int = 12) -> str:
         "  THE GATE, committed before the run:",
     ]
     sig_ok = res.family_p <= 0.05
-    trade_ok = b.mean_excess > FRICTION_PCT
+    trade_ok = b.mean_excess > gate
     lines += [
         f"    1. family-wise p <= 0.05 ......... "
         f"{'PASS' if sig_ok else 'FAIL'}  (p = {res.family_p:.4f})",
-        f"    2. excess > {FRICTION_PCT:.2%} of price ...... "
+        f"    2. excess > {gate:.2%} of price ...... "
         f"{'PASS' if trade_ok else 'FAIL'}  "
         f"(best = {b.mean_excess * 100:+.4f}%)",
         "",
     ]
-    ref = friction_reference()
+    ref = friction_reference(delivery=horizon_unit == "sessions")
     lines += [
-        f"  friction reference (from costs_intraday, NOT the gate):",
+        f"  friction reference - {ref['source']} round trip, NOT the gate:",
         f"    statutory only ... {ref['statutory_only']:.4%} of notional "
         f"-> best cell is {ref['statutory_only'] / max(b.mean_excess, 1e-12):.1f}x short",
         f"    with slippage .... {ref['with_slippage']:.4%} of notional "
@@ -709,6 +779,11 @@ def _main(argv=None) -> int:      # pragma: no cover
     p.add_argument("--market", default="india")
     p.add_argument("--interval", type=int, default=5)
     p.add_argument("--top", type=int, default=12)
+    p.add_argument("--horizon", default="bars", choices=("bars", "sessions"),
+                   help="'bars' is E5 (intraday, MIS charges); 'sessions' is "
+                        "E6 (multi-day hold, DELIVERY charges)")
+    p.add_argument("--ticket", type=float, default=100_000.0,
+                   help="ticket size the E6 delivery gate is computed at")
     args = p.parse_args(argv)
 
     try:
@@ -740,23 +815,39 @@ def _main(argv=None) -> int:      # pragma: no cover
     S, D, C = panel.shape
     print(f"panel {S} symbols x {D} sessions x {C} clocks "
           f"({panel.dates[0]} -> {panel.dates[-1]})", flush=True)
+    sessions_mode = args.horizon == "sessions"
+    horizons = SESSION_HORIZONS if sessions_mode else DEFAULT_HORIZONS
+    unit = "sessions" if sessions_mode else "bars"
+    gate = (delivery_friction_pct(args.ticket) if sessions_mode
+            else FRICTION_PCT)
+    title = ("E6 - does an intraday signal predict a MULTI-DAY forward return?"
+             if sessions_mode else
+             "E5 - does ANY signal on 5-minute Nifty 100 bars produce excess "
+             "forward return?")
     print(f"grid  {len(SIGNALS)} signals x {len(WINDOWS)} windows x "
-          f"{len(DEFAULT_HORIZONS)} horizons = "
-          f"{len(SIGNALS) * len(WINDOWS) * len(DEFAULT_HORIZONS)} cells, "
+          f"{len(horizons)} horizons ({unit}) = "
+          f"{len(SIGNALS) * len(WINDOWS) * len(horizons)} cells, "
           f"null = {D - 1} exact circular shifts", flush=True)
+    print(f"gate  excess must clear {gate:.4%} of price "
+          f"({'delivery' if sessions_mode else 'intraday MIS'} round trip)",
+          flush=True)
 
     started = _clock.time()
 
     def progress(n, total, label):
         print(f"  [{n}/{total}] {label}", flush=True)
 
-    cells = run_grid(panel, progress=progress)
+    cells = run_grid(panel, horizons=horizons,
+                     progress=progress,
+                     axis='session' if sessions_mode else 'clock')
     res = family_wise(cells)
     print(f"\ndone in {_clock.time() - started:.0f}s\n", flush=True)
-    print(report(res, top=args.top))
+    print(report(res, top=args.top, title=title,
+                 gate_pct=gate, horizon_unit=unit))
     try:
         print("")
-        print(f"ledger -> {write_ledger(res)}")
+        print(f"ledger -> "
+              f"{write_ledger(res, prefix='e6_session_grid' if sessions_mode else 'e5_signal_grid')}")
     except Exception as e:
         print(f"could not write the ledger ({e}) - the table above stands")
     return 0

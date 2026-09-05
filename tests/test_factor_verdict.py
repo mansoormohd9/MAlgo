@@ -90,7 +90,7 @@ def test_report_states_both_gates_and_the_survivorship_note():
 # ------------------------------------------------------- walk-forward stats
 
 def _fold(i, momentum, nulls):
-    return fv.Fold(index=i, start=None, end=None, momentum=momentum,
+    return fv.Fold(index=i, start=None, end=None, score=momentum,
                    nulls=list(nulls))
 
 

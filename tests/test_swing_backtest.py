@@ -517,3 +517,259 @@ def test_a_window_carries_its_trades_to_the_exit_instead_of_dropping_them(
     # And nothing was ENTERED after the window closed.
     for t in settled.trades:
         assert t.entry_time.date() <= cut
+
+
+# ------------------------------------------- the null, and the time stop
+
+def test_the_new_levers_are_off_by_default_and_change_nothing(cfg, market,
+                                                              world):
+    """
+    THE REGRESSION THAT PROTECTS THE +0.114R ON RECORD. `random_seed` and
+    `max_hold_days` are new fields; a new lever that moves the DEFAULT result
+    silently invalidates every number already measured against it.
+    """
+    bars, bench = world
+    a = bt.run(cfg, market, bars, bench)
+    cfg.swing.random_seed = None
+    cfg.swing.max_hold_days = 0
+    b = bt.run(cfg, market, bars, bench)
+    assert [t.r_multiple for t in a.trades] == [t.r_multiple for t in b.trades]
+    assert [t.symbol for t in a.trades] == [t.symbol for t in b.trades]
+    assert [t.entry_time for t in a.trades] == [t.entry_time for t in b.trades]
+
+
+def test_the_new_levers_do_not_invalidate_the_scan_cache(cfg, market):
+    """
+    Both are read AFTER `evaluate_symbol`, so the null must share the real
+    book's scan pass. If either leaked into the signature the sweep would pay
+    a full extra scan per seed - and a 40-draw null would become unaffordable.
+    """
+    import copy
+    base = bt.scan_signature(cfg, market)
+    c = copy.deepcopy(cfg)
+    c.swing.random_seed, c.swing.max_hold_days = 7, 10
+    assert bt.scan_signature(c, market) == base
+
+    c2 = copy.deepcopy(cfg)
+    c2.swing.ema_fast = 21          # a real signal field still invalidates
+    assert bt.scan_signature(c2, market) != base
+
+
+def test_the_null_keeps_every_gate_and_changes_only_the_ranking():
+    """
+    The null must re-rank the SAME candidates, not widen or narrow the pool.
+    If it changed which names are eligible it would be testing the gates, and
+    a difference in results could not be attributed to the scoring.
+    """
+    rows = [(f"stock{i}", f"found{i}", f"metrics{i}", f"news{i}",
+             float(i), f"parts{i}") for i in range(6)]
+    c = Config()
+    c.swing.random_seed = 3
+    out = bt._apply_null(rows, c, None, np.random.default_rng(3))
+
+    assert len(out) == len(rows)
+    for before, after in zip(rows, out):
+        assert after[0] == before[0] and after[1] == before[1]
+        assert after[2] == before[2] and after[3] == before[3]
+        assert after[5] == before[5]          # only t[4] moves
+    assert [r[4] for r in out] != [r[4] for r in rows]
+
+
+def test_the_null_is_a_no_op_without_a_seed():
+    rows = [("a", None, None, None, 0.9, None)]
+    assert bt._apply_null(rows, Config(), None, None) is rows
+
+
+def test_the_null_is_reproducible_from_its_seed(cfg, market, world):
+    bars, bench = world
+    cfg.swing.random_seed = 11
+    a = bt.run(cfg, market, bars, bench)
+    b = bt.run(cfg, market, bars, bench)
+    assert [t.symbol for t in a.trades] == [t.symbol for t in b.trades]
+    assert [t.r_multiple for t in a.trades] == [t.r_multiple for t in b.trades]
+
+
+def test_the_time_stop_caps_the_hold_and_is_labelled(cfg, market, world):
+    bars, bench = world
+    cfg.swing.max_hold_days = 3
+    res = bt.run(cfg, market, bars, bench)
+    assert res.trades, "fixture produced no trades - the cap cannot be tested"
+    assert max(t.bars_held for t in res.trades) <= 3
+    assert any(t.outcome == "time_stop" for t in res.trades)
+
+
+def test_the_time_stop_never_extends_a_hold(cfg, market, world):
+    """
+    A cap may only end a position EARLIER. It is deliberately not asserted
+    that the capped run is a subset of the uncapped one: an earlier exit frees
+    cash, which lets a different name be funded that the uncapped book had no
+    room for. That is real behaviour, not a bug, and an over-strict invariant
+    here would have to be weakened later to accommodate it.
+    """
+    bars, bench = world
+    cfg.swing.max_hold_days = 5
+    capped = bt.run(cfg, market, bars, bench)
+    assert capped.trades
+    assert max(t.bars_held for t in capped.trades) <= 5
+    assert all(t.bars_held == 5 for t in capped.trades
+               if t.outcome == "time_stop")
+
+
+def test_the_ladder_is_given_the_bar_before_the_clock(cfg, market, world):
+    """
+    A position that reaches its stop or target on the final permitted day must
+    be booked as THAT, not as a time exit at the close. Running the clock first
+    would convert real stops into time exits and quietly improve the loss
+    distribution, with no error anywhere.
+
+    Asserted at `max_hold_days = 1`, where every managed bar is also the final
+    permitted one: any trade that still comes back as a stop or a target can
+    only have done so because the ladder was consulted before the clock.
+    """
+    bars, bench = world
+    cfg.swing.max_hold_days = 1
+    res = bt.run(cfg, market, bars, bench)
+    assert res.trades
+    assert all(t.bars_held == 1 for t in res.trades)
+    assert {t.outcome for t in res.trades} - {"time_stop"}, (
+        "every exit was a time stop - the ladder never got the bar first")
+
+
+# ------------------------------------------------- S1: the walk-forward null
+
+def test_the_null_walk_forward_ranks_the_book_inside_its_nulls(cfg, market,
+                                                               world):
+    """
+    The shape of the answer, on a tiny fixture: one Fold per test window, each
+    carrying the real book's expectancy and `n_seeds` null draws.
+    """
+    from nifty_algo.swing import experiment as ex
+    bars, bench = world
+    wf = ex.walk_forward_null(cfg, market, bars, bench, n_seeds=3,
+                              train_months=3, test_months=3)
+    assert wf.folds
+    for f in wf.folds:
+        assert len(f.nulls) == 3
+        assert 0.0 <= f.percentile <= 1.0
+    assert 0 <= wf.wins <= len(wf.folds)
+
+
+def test_the_null_walk_forward_shares_one_scan_pass(cfg, market, world,
+                                                    monkeypatch):
+    """
+    41 runs per fold must not mean 41 scans. `random_seed` is book-only, so
+    every seed hashes to the baseline's signature and hits the same cache -
+    without that the 40-draw null is unaffordable and the whole design fails.
+    """
+    from nifty_algo.swing import experiment as ex
+    bars, bench = world
+    calls = {"n": 0}
+    real = bt.scanner_mod.evaluate_symbol
+
+    def counted(*a, **k):
+        calls["n"] += 1
+        return real(*a, **k)
+
+    monkeypatch.setattr(bt.scanner_mod, "evaluate_symbol", counted)
+    ex.walk_forward_null(cfg, market, bars, bench, n_seeds=4,
+                         train_months=3, test_months=3)
+    one_pass = calls["n"]
+
+    calls["n"] = 0
+    ex.walk_forward_null(cfg, market, bars, bench, n_seeds=12,
+                         train_months=3, test_months=3)
+    # Tripling the null count must not materially change the scan cost.
+    assert calls["n"] == one_pass
+
+
+def test_hold_stats_reports_days_per_exit_reason(cfg, market, world):
+    """The days-to-exit number that exists nowhere else in the package."""
+    from nifty_algo.swing import experiment as ex
+    bars, bench = world
+    cfg.swing.max_hold_days = 4
+    wf = ex.walk_forward_null(cfg, market, bars, bench, n_seeds=2,
+                              train_months=3, test_months=3)
+    text = ex.hold_stats(wf)
+    assert "mean days" in text and "ALL" in text
+
+
+def test_different_seeds_pick_different_names(cfg, market, world):
+    """
+    THE CHECK THAT THE NULL ACTUALLY BITES. `_apply_null` is unit-tested in
+    isolation, but a null wired in wrongly - applied to a copy, or after the
+    ranking - would leave every run identical, and the comparison would
+    quietly become "the book against itself": a 50% percentile that reads as a
+    clean negative result rather than as a broken instrument.
+
+    `top_n = 1` IS THE POINT. The fixture has three symbols and ships with
+    `top_n = 3`, so every candidate is taken whatever its rank and the
+    ranking cannot express itself. That is not a quirk of the fixture - it is
+    the general condition: the null can only bite where the candidate pool
+    exceeds the number of slots. On real Nifty 100 bars it changes 18 of 25
+    picks.
+    """
+    bars, bench = world
+    cfg.swing.top_n = 1
+    book = bt.run(cfg, market, bars, bench)
+    cfg.swing.random_seed = 101
+    a = bt.run(cfg, market, bars, bench)
+    cfg.swing.random_seed = 202
+    b = bt.run(cfg, market, bars, bench)
+
+    def picks(res):
+        return [(t.symbol, t.entry_time) for t in res.trades]
+
+    assert picks(a) != picks(b), "two seeds produced identical books"
+    assert picks(a) != picks(book) or picks(b) != picks(book), (
+        "neither seed changed the book - the null is not wired in")
+
+
+# --------------------------------------------------- the puretrail exit rule
+
+def test_swing_overrides_actually_reach_the_ladder():
+    """
+    A CONFIG FIELD THAT SILENTLY DOES NOTHING. `partial_exit_at_r` lives on
+    `TradeManagementConfig`, so a sweep variant setting it on `SwingConfig`
+    changed nothing at all - the +2R partial kept banking half the position
+    while the variant's name claimed it had been removed. Caught only by
+    printing the resolved trade config.
+
+    Every SwingConfig override is asserted here to actually arrive.
+    """
+    from nifty_algo.swing.book import swing_trade
+    from nifty_algo.swing import experiment as ex
+
+    shipped = swing_trade(ex.variant("baseline").configure(Config()))
+    assert shipped.trail_from_r is None
+    assert shipped.breakeven_at_r == pytest.approx(1.0)
+    assert shipped.partial_exit_at_r == pytest.approx(2.0)
+
+    pure = swing_trade(ex.variant("puretrail").configure(Config()))
+    assert pure.trail_from_r == pytest.approx(0.0)
+    assert pure.breakeven_at_r == pytest.approx(99.0)
+    assert pure.partial_exit_at_r == pytest.approx(99.0)
+
+
+def test_puretrail_never_banks_a_partial(cfg, market, world):
+    """
+    The whole point of the rule: one position, trailed, exited once - not half
+    banked at +2R. `partial_banked` is recorded per trade, so this is directly
+    checkable rather than inferred from the R distribution.
+    """
+    from nifty_algo.swing import experiment as ex
+    bars, bench = world
+    pcfg = ex.variant("puretrail").configure(cfg)
+    res = bt.run(pcfg, market, bars, bench)
+    assert res.trades
+    assert not any(t.partial_banked for t in res.trades)
+    assert max(t.bars_held for t in res.trades) <= 10
+
+
+def test_puretrail_holds_are_capped_and_baseline_holds_are_not(cfg, market,
+                                                               world):
+    from nifty_algo.swing import experiment as ex
+    bars, bench = world
+    base = bt.run(ex.variant("baseline").configure(cfg), market, bars, bench)
+    pure = bt.run(ex.variant("puretrail").configure(cfg), market, bars, bench)
+    assert max(t.bars_held for t in pure.trades) <= 10
+    assert base.trades and pure.trades

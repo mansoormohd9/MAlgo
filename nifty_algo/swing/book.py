@@ -855,6 +855,12 @@ def swing_trade(cfg: Config):
         "trail_atr_multiple": cfg.swing.trail_atr_multiple,
         "partial_exit_fraction": cfg.swing.partial_exit_fraction,
     }
+    # Same None-inherits rule as `breakeven_at_r` below, for the same reason:
+    # unset must leave the shipped book byte-identical.
+    if cfg.swing.trail_from_r is not None:
+        overrides["trail_from_r"] = cfg.swing.trail_from_r
+    if cfg.swing.partial_exit_at_r is not None:
+        overrides["partial_exit_at_r"] = cfg.swing.partial_exit_at_r
     # None means "inherit the intraday rung", so the default swing book is
     # byte-identical to what it was before this override existed.
     if cfg.swing.breakeven_at_r is not None:

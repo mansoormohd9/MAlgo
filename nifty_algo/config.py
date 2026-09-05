@@ -397,6 +397,31 @@ class TradeManagementConfig:
 
     trail_atr_multiple: float = 1.0    # runner trails 1 ATR behind the underlying
 
+    #: Arm the trailing stop at this R, WITHOUT waiting for the partial.
+    #:
+    #: None is today's behaviour and must stay the default: the ladder reaches
+    #: `LadderMode.TRAIL` in exactly one place - the partial rung - so raising
+    #: `partial_exit_at_r` to remove a target silently removes ALL trailing and
+    #: leaves the position sitting on its initial stop. That is not
+    #: hypothetical; `ShortPremiumConfig` below records the same trap costing a
+    #: whole book its trail, with no error anywhere.
+    #:
+    #: Set it (0.0 = from entry) and the trail arms on its own, which is what
+    #: "an ATR stop trailed from the start, no target" actually requires.
+    #:
+    #: IT SUPERSEDES THE BREAKEVEN RUNG. Promotion to TRAIL leaves
+    #: `LadderMode.INITIAL` behind, and the breakeven shift only fires from
+    #: INITIAL - so with this set, `breakeven_at_r` stops mattering. Disable
+    #: that rung explicitly rather than relying on the interaction.
+    #:
+    #: AND IT CAN TIGHTEN THE STOP IMMEDIATELY. The trail is a ratchet that
+    #: only raises the stop, and at `trail_atr_multiple = 1.0` against a
+    #: 1.5-ATR stop the trail sits 0.667R behind the peak - so arming at 0.0R
+    #: moves the stop from -1.0R to -0.667R at once. That is inherent to
+    #: trailing from entry, not a bug, and it is why the variant using this
+    #: must report its stop distribution rather than assume one.
+    trail_from_r: float | None = None
+
     # NSE requires order quantities in exact multiples of the lot size, so a
     # partial exit is impossible on a single lot. Size two by default and fall
     # back to one - with the runner disabled - when two will not fit the risk
@@ -864,6 +889,43 @@ class SwingConfig:
     cache_dir: str = "data/cache"
     top_n: int = 3
     history_days: int = 400            # ~1 trading year plus the 200d warm-up
+
+    #: Set to an int to replace the SCORE with noise - the null.
+    #:
+    #: Every gate, trigger, stop, ladder rung, sizing rule and charge stays
+    #: exactly as it is; only the ranking becomes random. So the difference
+    #: between a seeded run and an unseeded one is the SCORING and nothing
+    #: else, which is the same construction `factor/momentum.random_scores`
+    #: uses. This book has ten variants and every one of them compares against
+    #: `baseline` - none has ever asked whether the scoring beats chance, and
+    #: on the intraday equity book a randomised null BEAT the strategies.
+    #:
+    #: Applied after the scan cache is read, so the null costs no extra scan.
+    random_seed: int | None = None
+
+    #: Arm the trail at this R without waiting for the partial rung. None
+    #: inherits `TradeManagementConfig.trail_from_r`, which is also None, so
+    #: the shipped swing book is unchanged.
+    trail_from_r: float | None = None
+
+    #: Where the +2R rung sits. None inherits the intraday book's 2.0.
+    #:
+    #: Overridable HERE because it is the only way to express "no target and
+    #: no partial" for this book alone - it lives on
+    #: `TradeManagementConfig`, so a sweep variant setting it on `SwingConfig`
+    #: was silently doing nothing and the partial kept banking half the
+    #: position at +2R while the variant claimed to have removed it.
+    partial_exit_at_r: float | None = None
+
+    #: Close any position still open after this many managed sessions. 0
+    #: disables it, which is the shipped behaviour - positions run until the
+    #: stop or the ladder ends them, and a winner can trail for weeks.
+    #:
+    #: A time stop is not a tuning knob here, it is a CONSTRAINT: a book meant
+    #: to be held for about ten trading days is a different product from one
+    #: that trails for two months, and the two cannot be compared on
+    #: expectancy alone.
+    max_hold_days: int = 0
 
     # --- trend / setup, on DAILY bars ---
     # 20/50 rather than the intraday 9/21: a 9-day EMA on daily bars is a
