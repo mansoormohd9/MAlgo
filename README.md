@@ -449,6 +449,64 @@ the fill. The engine holds the stop and sends a SELL when it triggers.
 **Which means the stop only exists while the engine is running.** That is a real
 dependency, and you should know it rather than discover it.
 
+## Deploying the console to Streamlit Community Cloud
+
+The console is gated. `nifty_algo/ui/auth.py` runs in `app.py` **between**
+`st.set_page_config()` and the `page_*` imports, and calls `st.stop()`, so an
+unauthenticated visitor never imports a page module and therefore never
+constructs the engine, the feed, the journal, the broker or the auto-refresh
+fragment. A crawler's visit costs one text form. That placement is the point:
+inside `main()` the gate would still reject the visitor, and all of the above
+would already have been built for anyone who loaded the URL.
+
+**It fails closed.** With `APP_PASSWORD` unset the app refuses to open rather
+than waving everyone through, because an unconfigured gate looks exactly like
+a working one to the person who deployed it — they know the password and never
+see the difference. The single escape hatch is an explicit `APP_AUTH_DISABLED=1`.
+
+```bash
+# local: .env, alongside the broker keys
+APP_USERNAME=you
+APP_PASSWORD=a long random passphrase
+```
+
+On Cloud the same two keys go in **Settings → Secrets**; `auth.bridge_secrets()`
+copies every flat secret into `os.environ` at startup, never overwriting one
+that is already set, so all fourteen existing `os.getenv` readers — `KITE_*`,
+`TELEGRAM_*`, `SMTP_*`, `FYERS_*`, `DHAN_*` — work unchanged with no `.env`.
+Rotate by editing `APP_PASSWORD` there; the app reboots and the old one stops
+working.
+
+**Set the app to Private and invite only yourself.** Streamlit's own viewer
+allowlist rejects unauthenticated traffic before this script ever runs, so bots
+never reach the login form at all. The password is then the second factor, not
+the only one. This is also the answer to search indexing: a `<meta robots>` tag
+emitted through `st.markdown` is stripped by the frontend sanitiser, and
+Community Cloud serves its own `index.html`, so there is no honest way to do it
+from Python — a tag that reads as armed and does nothing is worse than none.
+
+**Failed sign-ins are throttled per client**, backing off to a five-minute
+lockout at five failures. Never globally: a global lockout is a self-DoS any
+stranger could trigger. `X-Forwarded-For` is client-supplied, so the throttle
+is a cost-reducer rather than a control — buckets are created only by a failed
+attempt, expired ones are pruned, and the table is capped, or the bot traffic
+it resists would itself be the memory leak.
+
+**Leave `KITE_API_SECRET` out of the Cloud secrets.** The whole app sits behind
+one password, so the password is the only thing between a stranger and the
+broker; without that secret `KiteSession` cannot authenticate, the chain falls
+back to synthetic, and no order path can reach the account even if the gate is
+defeated. `.streamlit/config.toml` also sets `showErrorDetails = "none"`, since
+this app raises through broker, filesystem and credential paths.
+
+**Expect degraded pages, and that is correct.** `data/nifty_5m.csv`,
+`data/cache/*.parquet`, `data/settings.json` and `.kite_session.json` are all
+gitignored, so on Cloud the default CSV feed reports itself unavailable, the
+swing / portfolio / research / backtest pages have no cached price history, the
+capital pots fall back to `config.py` defaults, and `journal/` is created empty
+and is **ephemeral** — wiped on every restart and redeploy. Nothing recorded on
+a Cloud deployment survives it. Do not treat the deployed journal as a record.
+
 ## Non-negotiables
 
 | # | Rule | Where it is enforced |

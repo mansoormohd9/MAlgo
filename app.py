@@ -16,6 +16,13 @@ press a button is not a stop.
 
 `BrokerConfig.dry_run` defaults to True, so even a confirmed entry only logs
 the payload until you deliberately turn it off.
+
+THE LOGIN GATE IS AT MODULE LEVEL, NOT INSIDE `main()`. `auth.require_login()`
+sits above the `page_*` imports and calls `st.stop()`, so an unauthenticated
+session never imports a page module and therefore never builds the engine, the
+feed, the journal, the broker or the auto-refresh fragment. Inside `main()` it
+would still be correct, and every one of those would already have been
+constructed for anybody who loaded the URL. See `nifty_algo/ui/auth.py`.
 """
 from __future__ import annotations
 
@@ -30,6 +37,11 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+from nifty_algo.ui import auth                           # noqa: E402
+
+auth.bridge_secrets()   # st.secrets -> os.environ, so every os.getenv reader works
+auth.require_login()    # NOTHING below this line runs until you are signed in
 
 from nifty_algo.ui.theme import CSS, get_palette          # noqa: E402
 from nifty_algo.ui import (page_live, page_brief, page_swing,        # noqa: E402
@@ -70,6 +82,8 @@ def main() -> None:
         # there, so reading the Daily brief meant the engine was never
         # evaluated at all for as long as you stayed on it.
         refresh.sidebar_controls(cfg)
+
+        auth.logout_control()
 
         st.divider()
         st.caption(

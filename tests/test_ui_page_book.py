@@ -17,7 +17,7 @@ from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
-from conftest import daily_bars, seed_offline_broker, trending
+from conftest import daily_bars, seed_offline_broker, sign_in, trending
 from streamlit.testing.v1 import AppTest
 
 from nifty_algo.config import Config
@@ -78,6 +78,7 @@ def _world(tmp_path, *, with_open=True, with_armed=True, with_closed=True):
 
 def _render(cfg, journal, bars):
     at = AppTest.from_file(APP, default_timeout=180)
+    sign_in(at)          # app.py gates on auth.require_login()
     at.session_state["cfg"] = cfg
     at.session_state["journal"] = journal
     at.session_state["swing_bars_india"] = bars

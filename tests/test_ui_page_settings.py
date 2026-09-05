@@ -20,7 +20,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from conftest import seed_offline_broker
+from conftest import seed_offline_broker, sign_in
 from streamlit.testing.v1 import AppTest
 
 from nifty_algo import settings_store
@@ -39,6 +39,7 @@ def _fresh() -> Config:
 
 def _open(cfg) -> AppTest:
     at = AppTest.from_file(APP, default_timeout=180)
+    sign_in(at)          # app.py gates on auth.require_login()
     at.session_state["cfg"] = cfg
     seed_offline_broker(at, cfg)      # never a real broker - see conftest
     at.run()

@@ -20,5 +20,6 @@ feedparser>=6.0     # swing scanner: news RSS, no API key needed
 # Alerts
 plyer>=2.1           # Windows desktop toast
 
-# Tests
-pytest>=8.0
+# Tests - NOT a runtime dependency. Streamlit Cloud installs this file on
+# every boot, so keep it to what the app itself imports.
+#   pip install pytest>=8.0

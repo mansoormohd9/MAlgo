@@ -30,7 +30,7 @@ python scripts/fetch_history.py         # real 5m NIFTY history (resumable)
 python scripts/fetch_vix.py             # India VIX, for SYNTHETIC_PREMIUM backtests
 ```
 
-Tests (816: 811 passing, 5 skipped; pytest, `pythonpath = . tests` so `nifty_algo` and the conftest helpers both import without an install step):
+Tests (859: 854 passing, 5 skipped; pytest, `pythonpath = . tests` so `nifty_algo` and the conftest helpers both import without an install step):
 
 ```bash
 pytest                                                     # the only run that counts as done
@@ -554,6 +554,45 @@ the round trip is ~Rs 48, about 0.1R of a Rs 500 risk budget. Rates carry
 - [test_lookahead.py](tests/test_lookahead.py) is the suite that matters most. `find_pivots()` uses a **centred** window, so live you only learn a pivot `lookback` bars later; `BarReplayer` enforces that delay and these tests assert it. Every other failure gives a wrong answer you can see - look-ahead bias gives a flattering one you cannot.
 - Ties resolve pessimistically: intrabar, the stop wins (including for the trailing stop). A swing outcome where one daily bar covers both stop and target is recorded `ambiguous` and counted as a **loss**.
 - Both books consume `signals.py`, `CapitalConfig` and `ExitLadder`, which is why the whole suite runs before anything is called done - see **Definition of done** above.
+
+## The console is gated, and the gate is above the imports
+
+`nifty_algo/ui/auth.py` runs in `app.py` **between** `st.set_page_config()` and
+the `page_*` imports, and calls `st.stop()`. That ordering is the whole
+control: an unauthenticated session never imports a page module, so it never
+builds the engine, the feed, the journal, the broker or the `st.fragment(
+run_every=...)` poller. Inside `main()` the gate would reject the same visitor
+*after* constructing all of it. `nifty_algo/ui/__init__.py` is a bare docstring,
+which is what keeps importing `auth` free.
+
+**It fails closed and says so.** No `APP_PASSWORD` means the app refuses to
+open, never that no password is needed - an unconfigured gate is invisible to
+the person who deployed it, because they know the password. `APP_AUTH_DISABLED=1`
+is the one escape hatch, and deciding "am I deployed?" by sniffing the hostname
+was rejected: that makes the safe path depend on a guess.
+
+**`bridge_secrets()` is why no call site changed.** There is no `.env` on
+Cloud and fourteen readers use `os.getenv`, so flat `st.secrets` keys are
+copied into `os.environ` once at startup, never overwriting - env stays
+authoritative, and the two sources cannot disagree about which won.
+
+**The throttle is per-client, bounded, and NOT the security control.**
+`X-Forwarded-For` is client-supplied, so it is evadable by anyone who can forge
+a header; it exists to make brute force expensive, not to stop it. Three things
+it must never do: lock out globally (a self-DoS any stranger can trigger),
+allocate a bucket on a mere page load (the bot traffic becomes the memory
+leak), or let a truthy non-string out of `client_key()` - a non-`str` key can
+never equal `UNKNOWN_CLIENT`, so it would silently promote an unidentified
+client out of the capped shared bucket into the full lockout.
+
+**Search-indexing is not solvable from Python here.** A `<meta robots>` through
+`st.markdown` survives the server and is stripped by the frontend sanitiser,
+and Community Cloud serves its own `index.html`. Use the Cloud private-app
+viewer allowlist, which rejects traffic before the script runs. A tag that
+reads as armed and does nothing is the failure this repo refuses elsewhere.
+
+Tests: [test_auth.py](tests/test_auth.py). Every UI `AppTest` must call
+`conftest.sign_in(at)` or it renders the login form and nothing else.
 
 ## Data and secrets
 

@@ -153,3 +153,18 @@ def seed_offline_broker(at, cfg=None, journal=None):
     at.session_state["kite_session"] = OfflineSession()
     at.session_state["equity_broker"] = offline_broker(cfg, journal)
     return at
+
+
+def sign_in(at):
+    """Put an `AppTest` past the login gate before it runs.
+
+    `app.py` calls `auth.require_login()` above the page imports, so without
+    this an AppTest renders the sign-in form and nothing else - every page
+    assertion would fail on an app that is working correctly. Setting the
+    session flag is the same thing a correct password does, and it is
+    preferred over `APP_AUTH_DISABLED` because that env var would leak across
+    tests and switch the gate off for the one file that tests the gate.
+    """
+    from nifty_algo.ui import auth
+    at.session_state[auth._SIGNED_IN] = True
+    return at

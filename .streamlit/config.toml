@@ -1,0 +1,20 @@
+# Deployment hardening for Streamlit Community Cloud.
+#
+# showErrorDetails is the security-relevant one: this app raises through
+# broker, filesystem and credential paths, and a traceback rendered to a
+# stranger who reached the login page leaks absolute paths and, in a
+# repr, occasionally a value that was meant to stay in secrets.toml.
+#
+# toolbarMode hides the deploy / view-source menu. It is not a control -
+# the repo is public either way - it just stops advertising the source of
+# an app whose whole point is that only one person uses it.
+#
+# Secrets themselves live in .streamlit/secrets.toml, which is gitignored;
+# see secrets.toml.example beside this file.
+
+[client]
+showErrorDetails = "none"
+toolbarMode = "minimal"
+
+[browser]
+gatherUsageStats = false

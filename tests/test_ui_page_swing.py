@@ -31,7 +31,7 @@ from datetime import date, datetime
 from pathlib import Path
 
 import pytest
-from conftest import daily_bars, seed_offline_broker, trending
+from conftest import daily_bars, seed_offline_broker, sign_in, trending
 from streamlit.testing.v1 import AppTest
 
 from nifty_algo.config import Config
@@ -146,6 +146,7 @@ def _build_result(monkeypatch, market_key: str, symbols, price: float):
 def _render(cfg, market_key, result, bars):
     """Boot the app with the result already in session state, open the page."""
     at = AppTest.from_file(APP, default_timeout=180)
+    sign_in(at)          # app.py gates on auth.require_login()
     at.session_state["cfg"] = cfg
     at.session_state["swing_market"] = market_key
     at.session_state[f"swing_result_{market_key}"] = result
