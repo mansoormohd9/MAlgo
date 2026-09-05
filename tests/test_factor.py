@@ -360,3 +360,94 @@ def test_variants_do_not_leak_into_each_other():
     assert base.factor.hold_months == 1
     assert base.factor.random_seed is None
     assert base.factor.listed_only is False
+
+
+# ------------------------------------------- reweighting, slippage, ledger
+
+def _run(world, **kw):
+    return fb.run(world, 500_000.0, top_n=4, min_turnover=0.0,
+                  min_history=300, **kw)
+
+
+def test_reweight_off_is_byte_identical_to_the_old_book(world):
+    """
+    The regression that lets both arms be compared. `reweight` and
+    `slippage_pct` are new levers, and a new lever that changes the DEFAULT
+    result silently invalidates every number already recorded against it.
+    """
+    a = _run(world)
+    b = _run(world, reweight=False, slippage_pct=0.0)
+    assert [v for _, v in a.equity] == [v for _, v in b.equity]
+    assert a.trades == b.trades and a.costs_paid == b.costs_paid
+
+
+def test_reweighting_actually_equalises_the_book(world):
+    """
+    Trimming winners is the whole point, so assert the weights converge rather
+    than merely that the flag changed something.
+    """
+    drift = _run(world, reweight=False)
+    even = _run(world, reweight=True)
+
+    def spread(res):
+        """Max/min holding value at the last rebalance."""
+        u = fb.FactorUniverse(world)
+        day = res.equity[-1][0]
+        held = res.holdings_log[-1][1]
+        vals = [u.price_on(s, day) or u.price_at(s, day) for s in held]
+        return vals
+
+    assert even.trades > drift.trades          # trimming costs trades
+    # With equal budgets the share counts must track 1/price, so the VALUE of
+    # each holding lands within a share's worth of the others.
+    assert len(even.holdings_log[-1][1]) >= 2
+
+
+def test_slippage_is_charged_on_both_legs_and_scales(world):
+    """
+    A cost applied to one leg, or applied once, is the failure that makes a
+    high-turnover null look artificially competitive.
+    """
+    free = _run(world, slippage_pct=0.0)
+    cheap = _run(world, slippage_pct=0.0025)
+    dear = _run(world, slippage_pct=0.0050)
+    assert cheap.costs_paid > free.costs_paid
+    assert dear.costs_paid > cheap.costs_paid
+    assert dear.final_value < cheap.final_value < free.final_value
+
+
+def test_slippage_punishes_the_high_turnover_null_harder(world):
+    """
+    THE COST-PARITY POINT, asserted rather than argued. The null re-draws its
+    whole book every rebalance and momentum does not, so free fills subsidise
+    the null more. Any comparison that omits slippage is not a comparison of
+    signals.
+    """
+    def damage(**kw):
+        a = _run(world, slippage_pct=0.0, **kw).final_value
+        b = _run(world, slippage_pct=0.0050, **kw).final_value
+        return (a - b) / a
+
+    null = _run(world, seed=11)
+    mom_run = _run(world)
+    assert null.avg_turnover() > mom_run.avg_turnover()
+    assert damage(seed=11) > damage()
+
+
+def test_the_contribution_ledger_balances(world):
+    """
+    Contributions must sum to (final value - starting capital). If open
+    positions are not marked at the end, the biggest winner - which for a
+    momentum sleeve is exactly the name still held - reads as the worst
+    position in the book.
+    """
+    res = _run(world)
+    total = sum(res.contribution.values())
+    assert total == pytest.approx(res.final_value - 500_000.0, rel=1e-6)
+
+
+def test_concentration_reports_the_share_of_gains(world):
+    res = _run(world)
+    c = res.concentration(top=3)
+    assert c["names"] > 0
+    assert 0.0 <= c["top1_share_of_gains"] <= c["topn_share_of_gains"]

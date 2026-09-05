@@ -1,0 +1,100 @@
+2,437 symbols loaded from data\cache\factor_daily_india.parquet
+WHAT THIS BACKTEST CANNOT SEE
+  1. SURVIVORSHIP, AND IT RUNS ONE WAY. The symbol list is TODAY'S listed set,
+     so companies delisted inside the window are absent from the universe AND
+     from the history. Momentum's mechanism is losers continuing to lose, and
+     the worst losers are the names that stopped being listed, so this
+     flatters a long-only momentum book by an unknown amount. Re-run with
+     `listed_only=True` for a lower bound on the inflation.
+  2. NO HALAL SCREEN. No point-in-time fundamentals exist, so the screen
+     cannot be replayed. This tests a LARGER universe than a live book trades.
+  3. NO CORPORATE-ACTION ADJUSTMENT beyond what the feed supplies. A split
+     shows up as a return, and the return filter below drops the session
+     rather than trading it.
+  4. PUBLISHED MOMENTUM FIGURES ARE NOT A BENCHMARK FOR THIS. Post-publication
+     returns run about half of in-sample ones, so a result matching a paper is
+     evidence of a bug or of survivorship before it is evidence of an edge.
+
+  [1/42] momentum (drift weights)
+  [2/42] momentum (equal weight)
+  [3/42] null seed 0
+  [4/42] null seed 1
+  [5/42] null seed 2
+  [6/42] null seed 3
+  [7/42] null seed 4
+  [8/42] null seed 5
+  [9/42] null seed 6
+  [10/42] null seed 7
+  [11/42] null seed 8
+  [12/42] null seed 9
+  [13/42] null seed 10
+  [14/42] null seed 11
+  [15/42] null seed 12
+  [16/42] null seed 13
+  [17/42] null seed 14
+  [18/42] null seed 15
+  [19/42] null seed 16
+  [20/42] null seed 17
+  [21/42] null seed 18
+  [22/42] null seed 19
+  [23/42] null seed 20
+  [24/42] null seed 21
+  [25/42] null seed 22
+  [26/42] null seed 23
+  [27/42] null seed 24
+  [28/42] null seed 25
+  [29/42] null seed 26
+  [30/42] null seed 27
+  [31/42] null seed 28
+  [32/42] null seed 29
+  [33/42] null seed 30
+  [34/42] null seed 31
+  [35/42] null seed 32
+  [36/42] null seed 33
+  [37/42] null seed 34
+  [38/42] null seed 35
+  [39/42] null seed 36
+  [40/42] null seed 37
+  [41/42] null seed 38
+  [42/42] null seed 39
+
+done in 168s
+
+F1 - the factor sleeve against its own null, at 0.10%/leg slippage
+
+  All figures are GEOMETRIC CAGR from a single continuous run.
+  Never `(1 + mean monthly)^12 - 1`: that is arithmetic, it carries
+  volatility drag, and it inflates the higher-variance arm more.
+
+  arm                            CAGR  Sharpe   maxDD  recov   turn    costs Rs
+  momentum (drift weights)     +19.9%    0.75  -56.3%    34m    56%     178,355
+  momentum (equal weight)      +21.4%    0.80  -57.1%    39m    73%     260,551
+  null (n=40)                   +5.7%  median
+    null range                  +0.9% .. +11.1%   p10 +3.3%  p90 +9.5%
+
+  CONCENTRATION (drift arm): top name = 13% of all gains, top 3 = 23%, across 432 names traded.
+
+  THE GATE, committed before the run:
+    1. beat >= 95% of null seeds ..... PASS  (beat 40/40, empirical p = 0.024)
+    2. equal-weight keeps >= 67% of the excess ... PASS  (excess +14.2% -> +15.7%, retained 110%)
+
+  BOTH PASS - the sleeve is distinguishable from its null and is not carried by concentration.
+
+THE SURVIVORSHIP BOUND, AND WHY `listedonly` IS NOT IT
+  `listed_only` restricts to names already listed when the window opened. That
+  bounds look-ahead about which companies came to EXIST. It says nothing about
+  which SURVIVED, and survival is the half that matters here: the universe is
+  today's Kite dump, so a company delisted mid-window is absent from the symbol
+  list AND from every bar. A long-only book holding the top of a wide mid-cap
+  cross-section is holding precisely where suspensions and collapses live.
+  The measured `listedonly` gap (~1.7pp of CAGR) therefore bounds the SMALL
+  half and must never be quoted as the survivorship correction.
+
+  THE BETTER BOUND IS THE LIQUIDITY BAND, and it is already in the ledger. A
+  top-turnover-quintile name essentially cannot delist inside a decade, so
+  `band="liquid"` is the closest thing to a survivorship-free measurement this
+  data can produce. It scored 1.94%/month against the baseline's 2.90% - a 33%
+  haircut, not 1.7pp. Treat that as the scale of the problem.
+
+
+ledger -> data\experiments\f1_verdict_20260904-191937_slip10bp.parquet

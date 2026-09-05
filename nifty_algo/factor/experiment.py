@@ -151,7 +151,13 @@ def _run_window(cfg: Config, bars: dict, capital: float,
         min_turnover=f.min_turnover_inr, min_history=f.min_history_sessions,
         listed_only=f.listed_only, seed=f.random_seed,
         start=start, end=end, universe=universe,
-        listed_before=listed_before)
+        listed_before=listed_before,
+        # THESE TWO MUST BE FORWARDED OR THE SWEEP MEASURES A DIFFERENT BOOK
+        # FROM THE ONE THE CONFIG DESCRIBES. `reweight` and `slippage_pct`
+        # were added to `FactorConfig` and to `fb.run`; a `_run_window` that
+        # does not pass them silently keeps running the old free-fills,
+        # never-trim regime while every printed header claims otherwise.
+        reweight=f.reweight, slippage_pct=f.slippage_pct)
 
 
 def sweep(base: Config, bars: dict, capital: float,
@@ -243,7 +249,15 @@ def report(sw: ec.Sweep, baseline_key: str = "baseline") -> str:
     # only -36% - and it read +65.6% where a single continuous run over the
     # same window gives +30.6%. Annualise the pooled monthly figure, or run
     # the window continuously; never average annualised short windows.
-    lines.append(f"  {'variant':<12}{'monthly':>10}{'annualised':>12}"
+    lines.append("  'ann(arith)' is (1 + mean monthly)^12 - 1 and is NOT a "
+                 "CAGR: it carries")
+    lines.append("  volatility drag and inflates the higher-variance arm more "
+                 "- it read +41.0%")
+    lines.append("  for the baseline where a continuous run gives +30.6%. For "
+                 "a real CAGR run")
+    lines.append("  `python -m nifty_algo.factor.verdict`.")
+    lines.append("")
+    lines.append(f"  {'variant':<12}{'monthly':>10}{'ann(arith)':>12}"
                  f"{'95% CI (test)':>24}{'vs random':>12}{'p':>8}{'worst DD':>10}")
     pooled = sw.pooled()
     test = pooled[pooled["phase"] == "test"].set_index("variant")

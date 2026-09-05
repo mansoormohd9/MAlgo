@@ -18,6 +18,8 @@ python -m nifty_algo.swing.backtest --market india --years 3 --capital 100000   
 python -m nifty_algo.swing.experiment --market india --years 3 --capital 100000  # which rule set, chosen out-of-sample
 python -m nifty_algo.experiment_intraday --variants baseline,gapdaily,novwap  # same question for the option book
 python -m nifty_algo.experiment_intraday --report        # the table from the existing ledger, no re-run
+python -m nifty_algo.intraday_equity.signal_grid --market india  # E5: is there ANY edge on 5m equity bars? (~35 min)
+python -m nifty_algo.factor.verdict --seeds 500 --slippage 0.0025   # F1: is the factor sleeve real? (~40 min)
 python -m nifty_algo.research macro --market india          # macro fact pack; --json is what a skill reads
 python -m nifty_algo.research risk  --market india --json   # portfolio risk fact pack
 python scripts/fetch_swing_history.py --market india --years 6  # deep daily bars for it
@@ -28,7 +30,7 @@ python scripts/fetch_history.py         # real 5m NIFTY history (resumable)
 python scripts/fetch_vix.py             # India VIX, for SYNTHETIC_PREMIUM backtests
 ```
 
-Tests (617: 613 passing, 4 skipped; pytest, `pythonpath = . tests` so `nifty_algo` and the conftest helpers both import without an install step):
+Tests (816: 811 passing, 5 skipped; pytest, `pythonpath = . tests` so `nifty_algo` and the conftest helpers both import without an install step):
 
 ```bash
 pytest                                                     # the only run that counts as done
@@ -345,6 +347,125 @@ interval of [-0.064, +0.075]. That is tight enough to rule out any edge above
 strategy at zero on the underlying is negative once premium decay is paid.
 89% of all trades are tagged `gap_day`, which is why the regime gate is the
 largest untested lever - see the `gapdaily` variant.
+
+## Searching for an edge, and paying for the search
+
+**E5 closed the intraday equity book as a CATEGORY**, and it is the template
+for how a search gets scored here.
+[intraday_equity/signal_grid.py](nifty_algo/intraday_equity/signal_grid.py)
+asks the prior question a backtest cannot: is there excess forward return after
+ANY simple signal on these bars? 13 pre-registered signals x 3 session windows
+x 6 horizons over 100 symbols x 739 sessions, with no scanner, ladder, sizing
+or cost model in the path. Because it reads raw bars it can also see the
+09:30-11:45 window the engine structurally cannot reach.
+
+The answer: a REAL effect, an order of magnitude too small.
+Family-wise **p = 0.0108**; best excess **+0.0154%** against **0.0827%**
+statutory friction (**5.4x short**) and **0.1827%** with slippage (**11.9x**).
+The book never failed for want of a signal - the largest honest edge on these
+bars is a tenth of the cost of taking it. Two priors died with it: the morning
+window really does carry the biggest excess (+0.0334%, so `warmseed` was
+justified) and is still 2.5x short at zero slippage; and cross-section was the
+WEAKEST of the four families, not the strongest.
+
+**THE NAIVE t ON PANEL DATA IS INFLATED ~5x, and this is measured, not
+asserted.** The winning cell's t was **+10.78** - and 7 of 738 circular shifts
+of the same data produced a maximum t above it. Firings cluster across symbols
+and sessions, so the effective sample is a small fraction of the row count and
+a per-cell `t > 1.96` screen would have returned dozens of discoveries.
+
+**So the statistic is the MAXIMUM across the whole grid, against the
+distribution of that same maximum.** Never the best cell's own p. The null
+circular-shifts the SIGNAL along the session axis, the same shift for every
+symbol at once - which preserves the signal's autocorrelation, its time-of-day
+distribution and the cross-sectional clustering of firings, and breaks only the
+alignment being tested. Shuffling per symbol destroys that clustering and gives
+a null far too narrow, which is how a diagnostic manufactures a discovery. On
+12 pure-noise panels it calibrates to mean p **0.476** with full spread.
+
+**Exhaustive, not sampled, because an FFT makes it free.** The statistic at
+every shift is a circular cross-correlation, so all 738 come out of one
+`irfft(conj(rfft(mask)) * rfft(y))` - seconds instead of ~10^12 operations.
+`test_signal_grid.py` checks it against a brute-force loop, because a conjugate
+on the wrong operand yields a complete, symmetric, entirely wrong null.
+
+**Multiplicity is counted across BOOKS, not within one.** ~30 variants have now
+been measured against zero across four books; the expected minimum p over that
+many near-independent tests is ~1/31 = 0.032, and the best p anywhere in the
+repo is 0.077. Any new search carries its own family-wise correction or it is
+not evidence.
+
+## The factor sleeve, after its four defects were fixed
+
+**F1 is the gate the sleeve had to clear**
+([factor/verdict.py](nifty_algo/factor/verdict.py)): both momentum arms and
+**500** null draws, run CONTINUOUSLY over the whole window rather than fold by
+fold, because the two defects it measures are invisible inside a 6-month fold.
+Result at 0.25%/leg: **+18.8% CAGR against a null median of +3.1%, beating
+500/500 seeds, empirical p = 0.002** - which is the family-wise threshold, not
+the per-book one. Equal-weight rebalancing RETAINS 106% of the excess, so the
+result is not concentration.
+
+**The four defects, and which way each ran:**
+
+1. **The book never reweighted.** Winners were never trimmed, so the sleeve was
+   momentum plus an unregistered let-winners-run overlay. `FactorConfig.reweight`
+   runs the other arm; it turns out to *help* (+19.7% vs +18.8%), so this one
+   ran AGAINST the book rather than for it.
+2. **No slippage was charged at all** - `run()` called `buy_cost`/`sell_cost`,
+   which exclude it, rather than `friction`. This ran hard in the null's favour:
+   the null turns **1.78x** the book per rebalance against momentum's **0.56x**,
+   so free fills subsidised it ~3x as much. Charging both identically at
+   0.25%/leg costs momentum 1.9pp and the null 5.5pp, and **widens** the excess
+   from +12.7pp to +16.3pp. The excess grows monotonically with slippage.
+3. **The null was ONE SEED** - a single draw compared against, not a
+   distribution. At 40 seeds the best achievable p is 1/41 = 0.024, which does
+   not clear a family-wise bar; 500 seeds is what gets to 0.002.
+4. **`listed_only` bounds the WRONG HALF of survivorship** - look-ahead about
+   which companies came to EXIST, not which survived, and survival is the half
+   that matters for a long-only book holding the tail. There is no fix inside
+   this data. The usable bound is the liquidity band: **liquid +15.5% against
+   all at +18.8%, a 3.3pp / 17% haircut.** All four bands land within 3pp, so
+   the edge is not confined to names too illiquid to trade.
+
+**THE WALK-FORWARD DOES NOT AGREE WITH THE POOLED TEST, AND THAT IS THE
+FINDING.** `verdict.walk_forward` re-ran the 16 out-of-sample windows in the new
+cost regime, ranking momentum inside a 40-draw null distribution in each:
+
+| regime | folds won | sign p | mean pctile | combined p |
+| --- | --- | --- | --- | --- |
+| 0.25%/leg, drift | 11/16 | **0.210** | 69% | **0.0039** |
+| 0.00%/leg, drift | 10/16 | 0.454 | 62% | 0.0477 |
+| 0.25%/leg, reweight | 11/16 | **0.210** | 69% | 0.0050 |
+
+Fixing the costs moves it in the right direction (10/16 -> 11/16, combined
+0.048 -> 0.004) and still does not clear the sign test. **13 of 16 is what
+p<0.05 needs.**
+
+The two statistics disagree because the percentile distribution is BIMODAL, not
+because either is wrong: 8 folds sit at or above the 92nd percentile of their
+null and 5 sit at or below the 32nd. Momentum wins most windows overwhelmingly
+and loses the rest badly. A sign test cannot see that; a mean percentile cannot
+see that adjacent windows share a regime. **Report both.**
+
+**The losing windows are not random - they are momentum crashes.** Fold 3
+(2020-03 -> 2020-09, the COVID collapse) is the 98th percentile; fold 4
+(2020-09 -> 2021-03, the junk rally off the bottom) is the **2nd**. That is the
+documented failure mode of the factor, arriving exactly where the literature
+says it does. It is evidence the effect is real momentum rather than noise -
+and equally, evidence that the -57% drawdown is structural rather than bad luck.
+
+**READ THE DRAWDOWN BEFORE THE CAGR.** -57.2% peak-to-trough with a **35-month**
+recovery, and that is measured on MONTH-END marks, so the true intra-month
+figure is worse. On a Rs 5,00,000 pot that is Rs 2.85 lakh down and nearly three
+years to get back. The CAGR is the reason to look; the drawdown is the reason
+most people would not hold it.
+
+**And the headline that started this is dead.** The +30.6% widely quoted earlier
+was an 8-year window with free fills. The same book over the full window with
+honest fills is **+18.8%**, and the survivorship-lean bound is **+15.5%** - which
+is ordinary published-Indian-momentum territory rather than double it. Window,
+slippage and survivorship, in that order.
 
 ## Holdings, and the research briefings built on them
 

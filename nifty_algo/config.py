@@ -1260,6 +1260,28 @@ class FactorConfig:
     #: else in the book runs identically, so the difference is the signal.
     random_seed: int | None = None
 
+    #: Trim winners and top up laggards back to an equal weight every
+    #: rebalance.
+    #:
+    #: FALSE IS NOT THE NEUTRAL CHOICE, IT IS A SECOND STRATEGY. With it off,
+    #: a name that stays in the top `top_n` is never trimmed, so its weight
+    #: compounds unbounded and the sleeve is momentum PLUS an unpre-registered
+    #: let-winners-run overlay. Published momentum indices reweight; a result
+    #: that does not is not comparable to them, and can be carried by one or
+    #: two names. Both arms are run and reported.
+    reweight: bool = False
+
+    #: Charged on BOTH legs of every fill, on top of the statutory rates in
+    #: `swing/costs_equity.py`.
+    #:
+    #: The backtest used to call `buy_cost`/`sell_cost` directly, which
+    #: exclude slippage entirely - so every fill happened at the close for
+    #: free. That flatters a high-turnover book far more than a low-turnover
+    #: one, and the NULL turns 1.78x the book per rebalance against momentum's
+    #: 0.634x. Costing them identically is what makes the comparison about the
+    #: signal.
+    slippage_pct: float = 0.0025
+
 
 @dataclass
 class Config:

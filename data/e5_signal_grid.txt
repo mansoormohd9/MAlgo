@@ -1,0 +1,74 @@
+100 symbols, 5m bars from cache; 496 sessions dropped by integrity gates
+panel 100 symbols x 739 sessions x 90 clocks (2023-09-04 -> 2026-09-02)
+grid  13 signals x 3 windows x 6 horizons = 234 cells, null = 738 exact circular shifts
+C:\Users\Orion\Downloads\Work\Algo\nifty_algo\intraday_equity\signal_grid.py:267: RuntimeWarning: All-NaN slice encountered
+  out[..., i] = np.nanmax(high[..., i - n:i], axis=-1)
+  [20/234] h=1 book rev_6
+  [40/234] h=2 morning cont_3
+  [60/234] h=2 book rev_12
+  [80/234] h=4 morning cont_6
+  [100/234] h=4 book below_vwap
+  [120/234] h=8 morning cont_12
+  [140/234] h=8 book range_exp
+  [160/234] h=12 morning break_12
+  [180/234] h=12 book vol_surge
+  [200/234] h=20 morning break_24
+  [220/234] h=20 book xs_top
+
+done in 2030s
+
+E5 - does ANY signal on 5-minute Nifty 100 bars produce excess forward return?
+
+  Excess = forward return, minus NIFTY over the identical bars,
+  minus the leave-one-out mean for the same (symbol, clock).
+  Each column sums to zero, so a cell scores only by choosing which
+  SESSIONS to fire on. Signal bar excluded: the mask is shifted one
+  bar forward, matching the backtest's next-bar fill.
+
+  signal         window   h        n   excess %       t
+  cont_6           book  12  140,258     0.0154   10.78
+  cont_6           book   8  140,573     0.0121   10.15
+  cont_6           book  20  103,071     0.0202    9.91
+  cont_3           book  12  145,326     0.0133    9.81
+  cont_12          book  12  140,461     0.0139    9.81
+  cont_3           book   8  145,710     0.0106    9.46
+  rev_6            late   4   43,526     0.0156    9.41
+  cont_3           book  20  106,470     0.0174    8.91
+  rev_12           late   4   40,974     0.0149    8.91
+  cont_12          book  20  104,708     0.0170    8.49
+  cont_6           book   4  140,589     0.0071    8.36
+  cont_12       morning  20   31,556     0.0334    8.18
+  cont_3           book   4  145,731     0.0062    7.54
+  cont_12          book   8  140,740     0.0087    7.39
+  break_12      morning  20   72,371     0.0187    7.36
+  ...                                                  
+  below_vwap       book  20  389,596    -0.0167  -17.34
+
+  window      cells   best excess %   best t  best cell
+  morning        78          0.0334     8.18  cont_12/h=20
+  book           78          0.0202    10.78  cont_6/h=20
+  late           52          0.0156     9.41  rev_6/h=4
+
+  family           best excess %   best t
+  continuation            0.0334    10.78
+  reversal                0.0156     9.41
+  vol/flow                0.0187     6.44
+  cross-section           0.0117     6.15
+
+  grid: 234 cells, 208 with 500+ firings
+  best: cont_6 / book / h=12  t = +10.78, excess +0.0154%
+  FAMILY-WISE p = 0.0108  (exact, over 738 circular shifts of the session axis)
+
+  THE GATE, committed before the run:
+    1. family-wise p <= 0.05 ......... PASS  (p = 0.0108)
+    2. excess > 0.16% of price ...... FAIL  (best = +0.0154%)
+
+  friction reference (from costs_intraday, NOT the gate):
+    statutory only ... 0.0827% of notional -> best cell is 5.4x short
+    with slippage .... 0.1827% of notional -> best cell is 11.9x short
+    The statutory figure is the floor no execution skill gets under.
+
+  GATE 2 FAILED. The effect survives the null and does not survive the friction. Real, and untradeable.
+  A cell added after reading this table would invalidate the family-wise null.
+
+ledger -> data\experiments\e5_signal_grid_20260904-161138.parquet

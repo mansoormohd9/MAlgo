@@ -93,6 +93,10 @@ class FactorResult:
     start: date | None = None
     end: date | None = None
     universe_size: list = field(default_factory=list)
+    #: {symbol: net rupees contributed}. Cash out minus cash in, plus what is
+    #: still held at the final mark. Exists to answer ONE question that the
+    #: headline CAGR cannot: how much of the result is one or two names.
+    contribution: dict = field(default_factory=dict)
 
     @property
     def final_value(self) -> float:
@@ -146,6 +150,28 @@ class FactorResult:
     def avg_turnover(self) -> float:
         return self.turnover_sum / self.rebalances if self.rebalances else 0.0
 
+    def concentration(self, top: int = 3) -> dict:
+        """
+        How much of the net result came from the biggest contributors.
+
+        A momentum sleeve that never trims can have its whole terminal wealth
+        carried by a couple of positions, and that is a different product from
+        one whose edge is spread across the book - same CAGR, entirely
+        different capacity and entirely different odds of repeating.
+        """
+        if not self.contribution:
+            return {}
+        vals = sorted(self.contribution.values(), reverse=True)
+        total = sum(vals)
+        gains = sum(v for v in vals if v > 0)
+        return {
+            "names": len(vals),
+            "top1_share_of_gains": (vals[0] / gains) if gains > 0 else 0.0,
+            "topn_share_of_gains": (sum(vals[:top]) / gains)
+            if gains > 0 else 0.0,
+            "net_total": total,
+        }
+
     def headline(self, starting: float) -> str:
         return (f"CAGR {self.cagr(starting):+.2%}  "
                 f"Sharpe {self.sharpe():.2f}  "
@@ -195,6 +221,24 @@ def _mark(universe: FactorUniverse, symbol: str, day: date,
     return pos.entry_price
 
 
+def _charge(costs, price: float, shares: float, sell: bool,
+            slippage_pct: float) -> float:
+    """
+    One leg's total cost: the statutory rate card plus slippage.
+
+    `run` used to call `costs.buy_cost`/`sell_cost` directly, and those two
+    deliberately EXCLUDE slippage - `EquityCostModel.friction` is the method
+    that includes it. So every fill in every factor result before this landed
+    happened at the close for free. It is not a small omission on a book that
+    turns 63% of itself a month, and it is not a NEUTRAL one: the random null
+    turns 1.78x per rebalance, so free fills subsidise the null nearly three
+    times as much as they subsidise momentum.
+    """
+    leg = (costs.sell_cost(price, shares) if sell
+           else costs.buy_cost(price, shares))
+    return leg + price * shares * slippage_pct
+
+
 def run(bars: dict, starting_capital: float, top_n: int = 20,
         band: str = "all", formation: str = "mom12_1",
         hold_months: int = 1, min_price: float = 20.0,
@@ -203,7 +247,9 @@ def run(bars: dict, starting_capital: float, top_n: int = 20,
         seed: int | None = None, start: date | None = None,
         end: date | None = None, progress=None,
         universe: FactorUniverse | None = None,
-        listed_before: date | None = None) -> FactorResult:
+        listed_before: date | None = None,
+        reweight: bool = False,
+        slippage_pct: float = 0.0) -> FactorResult:
     """
     Replay the sleeve month by month.
 
@@ -264,20 +310,60 @@ def run(bars: dict, starting_capital: float, top_n: int = 20,
                 continue                       # cannot trade it; keep holding
             pos = held.pop(symbol)
             gross = price * pos.shares
-            charge = costs.sell_cost(price, pos.shares)
+            charge = _charge(costs, price, pos.shares, True, slippage_pct)
             cash += gross - charge
             result.costs_paid += charge
             result.trades += 1
             result.turnover_sum += gross
+            result.contribution[symbol] = (
+                result.contribution.get(symbol, 0.0) + gross - charge)
 
         # ---- mark the book, then buy into the free slots ---------------
         marked = cash
         for symbol, pos in held.items():
             marked += _mark(universe, symbol, day, pos) * pos.shares
 
+        budget = marked / max(top_n, 1) if marked > 0 else 0.0
+
+        # ---- trim winners and top up laggards back to equal weight -----
+        # WITHOUT THIS THE SLEEVE IS TWO STRATEGIES. A name held through
+        # several rebalances is never trimmed, so its weight compounds and
+        # terminal wealth can be carried by one or two positions - which is
+        # momentum plus a let-winners-run overlay that was never registered
+        # as a hypothesis. Turned on, every held name is pulled back to
+        # `marked / top_n`, and every share traded pays both legs.
+        if reweight and budget > 0:
+            for symbol in sorted(held):
+                price = _tradeable_price(universe, symbol, day, result)
+                if price is None:
+                    continue
+                pos = held[symbol]
+                target = int(budget // price)
+                delta = target - pos.shares
+                if delta == 0:
+                    continue
+                if delta > 0:
+                    cost = price * delta
+                    charge = _charge(costs, price, delta, False, slippage_pct)
+                    if cost + charge > cash:
+                        continue          # no cash to top up; leave it light
+                    cash -= cost + charge
+                    flow = -(cost + charge)
+                else:
+                    shed = -delta
+                    charge = _charge(costs, price, shed, True, slippage_pct)
+                    cash += price * shed - charge
+                    flow = price * shed - charge
+                result.contribution[symbol] = (
+                    result.contribution.get(symbol, 0.0) + flow)
+                result.costs_paid += charge
+                result.trades += 1
+                result.turnover_sum += price * abs(delta)
+                held[symbol] = Position(symbol, target, pos.entry_price,
+                                        pos.entry_day)
+
         buys = sorted(wanted - set(held))
-        if buys and marked > 0:
-            budget = marked / max(top_n, 1)
+        if buys and budget > 0:
             for symbol in buys:
                 price = _tradeable_price(universe, symbol, day, result)
                 if price is None:
@@ -286,13 +372,15 @@ def run(bars: dict, starting_capital: float, top_n: int = 20,
                 if shares <= 0:
                     continue
                 cost = price * shares
-                charge = costs.buy_cost(price, shares)
+                charge = _charge(costs, price, shares, False, slippage_pct)
                 if cost + charge > cash:
                     continue                   # no cash; the slot goes unused
                 cash -= cost + charge
                 result.costs_paid += charge
                 result.trades += 1
                 result.turnover_sum += cost
+                result.contribution[symbol] = (
+                    result.contribution.get(symbol, 0.0) - cost - charge)
                 held[symbol] = Position(symbol, shares, price, day)
 
         value = cash + sum(_mark(universe, s, day, p) * p.shares
@@ -300,6 +388,19 @@ def run(bars: dict, starting_capital: float, top_n: int = 20,
         result.equity.append((day, value))
         result.holdings_log.append((day, sorted(held)))
         result.rebalances += 1
+
+    # CLOSE THE CONTRIBUTION LEDGER. Everything still held at the end is
+    # marked and credited to its own name, so the contributions sum to
+    # (final value - starting capital) rather than to the realised half only.
+    # Without this a name that is still open - which for a momentum sleeve is
+    # exactly the biggest winner - shows only its purchases and reads as the
+    # single worst position in the book.
+    if result.equity:
+        last_day = result.equity[-1][0]
+        for symbol, pos in held.items():
+            result.contribution[symbol] = (
+                result.contribution.get(symbol, 0.0)
+                + _mark(universe, symbol, last_day, pos) * pos.shares)
 
     # `turnover_sum` is accumulated in RUPEES above and converted here into
     # units of book value, so `avg_turnover` can divide by the rebalance count
