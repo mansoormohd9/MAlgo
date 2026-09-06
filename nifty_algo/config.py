@@ -1344,6 +1344,29 @@ class FactorConfig:
     #: signal.
     slippage_pct: float = 0.0025
 
+    # --- the Shariah screen, which the BACKTEST NEVER HAD ---
+    #: Apply the halal screen when selecting the book.
+    #:
+    #: FALSE IS WHAT EVERY RECORDED F1/F2 NUMBER WAS MEASURED WITH, and
+    #: `backtest.CAVEATS` says so outright: no point-in-time fundamentals
+    #: exist, so the screen cannot be replayed and the book tested a LARGER
+    #: universe than a live book may trade. Turning this on therefore does not
+    #: make the backtest more honest - it answers a different question, "what
+    #: would a screened sleeve have held", under the same standing distortion
+    #: the swing backtest already prints: today's balance sheets applied to all
+    #: of history.
+    halal_screened: bool = False
+
+    #: How far down the ranking to look for `top_n` names that pass.
+    #:
+    #: THE SCREEN RUNS AFTER THE RANKING, NOT BEFORE. Cheap-to-expensive, the
+    #: same ordering `swing/scanner.py` uses - and it is what makes the screen
+    #: affordable at all: fundamentals are needed only for names that actually
+    #: reach the shortlist, a few hundred across twenty years rather than all
+    #: 2,400. A shortlist that runs out before `top_n` is filled is a fact
+    #: worth reporting, not a reason to reach further down.
+    halal_shortlist: int = 60
+
     # --- F2a: the three drawdown instruments, all no-ops at their defaults ---
     #: Sell a held name intra-month once it is this far below its basis.
     #: None disables the check entirely, which is how every factor result

@@ -104,6 +104,16 @@ class FactorResult:
     start: date | None = None
     end: date | None = None
     universe_size: list = field(default_factory=list)
+    #: `(day, [symbols])` the RANKING asked for, before cash had a say.
+    #:
+    #: Distinct from `holdings_log`, which is what the account could afford,
+    #: and the gap between them is not small: `budget = marked / top_n` spends
+    #: the pot with nothing left for charges, so the last buys are refused and
+    #: the book held all 20 names on 9 of 121 rebalances. Logging only fills
+    #: would hide a systematic under-deployment behind a `top_n` that reads
+    #: like a promise - the same reason the journal records rejections as
+    #: carefully as approvals.
+    wanted_log: list = field(default_factory=list)
     #: {symbol: net rupees contributed}. Cash out minus cash in, plus what is
     #: still held at the final mark. Exists to answer ONE question that the
     #: headline CAGR cannot: how much of the result is one or two names.
@@ -113,6 +123,12 @@ class FactorResult:
     #: 0 unless the corresponding instrument is switched on.
     stops_fired: int = 0
     regime_flat: int = 0
+    #: Names the halal screen rejected while filling the book, and rebalances
+    #: where the shortlist ran out before `top_n` was filled. The second is the
+    #: one that matters: a book that quietly held 14 names instead of 20 is a
+    #: different book, and nothing else in the result would say so.
+    screened_out: int = 0
+    shortlist_short: int = 0
     #: Sell legs only. `trades` counts both sides, and the flat DP charge is
     #: levied per scrip PER SELL - so the minimum-capital arithmetic needs
     #: this number and cannot be derived from `trades` without assuming the
@@ -318,6 +334,32 @@ def _regime_gate(benchmark, ma_days: int):
     return ok
 
 
+def _screened_top(scores: dict, top_n: int, shortlist: int,
+                  halal_ok, result: FactorResult) -> list:
+    """
+    The highest-ranked `top_n` names that pass the screen, looking no further
+    down than `shortlist`.
+
+    THE BOUND IS THE POINT. Without it the book reaches as far down the
+    ranking as it must to find twenty passing names, which on a month when the
+    screen is strict means holding the 300th-best momentum name and calling it
+    momentum. Stopping at the shortlist holds FEWER names instead, and records
+    that it did.
+    """
+    ranked = mom.top_n(scores, max(shortlist, top_n))
+    picked = []
+    for symbol in ranked:
+        if len(picked) >= top_n:
+            break
+        if halal_ok(symbol):
+            picked.append(symbol)
+        else:
+            result.screened_out += 1
+    if len(picked) < top_n:
+        result.shortlist_short += 1
+    return picked
+
+
 def run(bars: dict, starting_capital: float, top_n: int = 20,
         band: str = "all", formation: str = "mom12_1",
         hold_months: int = 1, min_price: float = 20.0,
@@ -332,7 +374,9 @@ def run(bars: dict, starting_capital: float, top_n: int = 20,
         stop_pct: float | None = None,
         stop_basis: str = "entry",
         regime_ma_days: int = 0,
-        benchmark=None) -> FactorResult:
+        benchmark=None,
+        halal_ok=None,
+        halal_shortlist: int = 60) -> FactorResult:
     """
     Replay the sleeve month by month.
 
@@ -398,7 +442,14 @@ def run(bars: dict, starting_capital: float, top_n: int = 20,
         scores = (mom.random_scores(elig.symbols, rng) if rng is not None
                   else mom.score_universe(universe, elig.symbols, day,
                                           formation))
-        wanted = set(mom.top_n(scores, top_n))
+        # The default path is written out separately and identically to how it
+        # always was, so `halal_ok=None` cannot drift from the book every
+        # recorded F1/F2 number was measured on.
+        if halal_ok is None:
+            wanted = set(mom.top_n(scores, top_n))
+        else:
+            wanted = set(_screened_top(scores, top_n, halal_shortlist,
+                                       halal_ok, result))
 
         # ---- the regime gate stands the whole sleeve down ---------------
         # Emptying `wanted` reuses the sell loop below rather than adding a
@@ -468,6 +519,8 @@ def run(bars: dict, starting_capital: float, top_n: int = 20,
                 result.turnover_sum += price * abs(delta)
                 held[symbol] = Position(symbol, target, pos.entry_price,
                                         pos.entry_day, pos.basis_price)
+
+        result.wanted_log.append((day, sorted(wanted)))
 
         buys = sorted(wanted - set(held))
         if buys and budget > 0:

@@ -21,6 +21,10 @@ python -m nifty_algo.experiment_intraday --report        # the table from the ex
 python -m nifty_algo.intraday_equity.signal_grid --market india  # E5: is there ANY edge on 5m equity bars? (~35 min)
 python -m nifty_algo.factor.verdict --seeds 500 --slippage 0.0025   # F1: is the factor sleeve real? (~40 min)
 python -m nifty_algo.factor.drawdown                        # F2: does ANY drawdown instrument beat holding less? (~45s)
+python -m nifty_algo.factor.sleeve --capital 500000         # what the sleeve wants THIS month, headless
+python -m nifty_algo.factor.membership --refresh            # Nifty 50/500 constituent lists from NSE
+python scripts/fetch_factor_fundamentals.py --shortlist 60  # balance sheets for every name ever shortlisted (~35 min)
+python scripts/run_f3_screened.py                           # F3: what does the halal screen cost the sleeve? (~5s)
 python scripts/run_s1_swing_null.py --seeds 40 --years 6 --capital 200000  # S1: does the swing book beat chance? (~55 min)
 python -m nifty_algo.intraday_equity.signal_grid --horizon sessions   # E6: do intraday signals predict DAYS? (~40 min)
 python -m nifty_algo.research macro --market india          # macro fact pack; --json is what a skill reads
@@ -33,7 +37,7 @@ python scripts/fetch_history.py         # real 5m NIFTY history (resumable)
 python scripts/fetch_vix.py             # India VIX, for SYNTHETIC_PREMIUM backtests
 ```
 
-Tests (904: 898 passing, 5 skipped, 1 failing only while you are logged in to Kite - see below; pytest, `pythonpath = . tests` so `nifty_algo` and the conftest helpers both import without an install step):
+Tests (933: 927 passing, 5 skipped, 1 failing only while you are logged in to Kite - see below; pytest, `pythonpath = . tests` so `nifty_algo` and the conftest helpers both import without an install step):
 
 ```bash
 pytest                                                     # the only run that counts as done
@@ -672,6 +676,123 @@ moved when the measured drawdown did.
 the 2016-2026 CAGR is 15.96%; the top three, 13.30%; the top five, 11.20% -
 against the index at 10.88% on identical marks. Reason to size it small and never
 lever it.
+
+## The sleeve as a console, and the restraint built into it
+
+[factor/sleeve.py](nifty_algo/factor/sleeve.py) is the live book and
+[ui/page_sleeve.py](nifty_algo/ui/page_sleeve.py) renders it. THE SCAN IS THE
+BACKTEST'S OWN FUNCTIONS CALLED ON TODAY - `eligible_at`, `score_universe` and
+`top_n`, imported and used unchanged - which is what makes the recorded numbers
+a description of what the page recommends.
+`test_the_live_scan_is_the_backtests_own_book` asserts it against
+`wanted_log`, and it is the only test in that file that matters.
+
+**THE PAGE IS BUILT AROUND A REFUSAL.** The sleeve rebalances monthly, turnover
+is its largest measured cost, and its edge over the null exists partly BECAUSE
+it turns 0.56x per rebalance against the null's 1.75x. So the diff is computed
+daily and stamped **provisional** on every day that is not the rebalance date;
+the checklist download exists only when it is armed. Acting on a provisional
+diff is not a small deviation from the tested book - it is the mechanism by
+which that book's edge is spent on brokerage.
+
+**NEWS NEVER TOUCHES THE RANKING.** `swing/scanner._score` folds news into a
+rank because that book was measured with it there. This one was not, so a
+headline that reordered the top 20 would make the live sleeve a different and
+untested strategy while every figure on the page still described the tested
+one. `test_news_cannot_reach_the_ranking` pins it.
+
+**THE BOOK HELD ALL 20 NAMES ON 9 OF 121 REBALANCES.** `budget = marked / top_n`
+spends the pot with nothing left for charges, so the last buys are refused for
+cash and the sleeve runs at 15-19 names most months. That is a property of the
+measured result, not a bug - but a console that divided the pot by 20 would hand
+you a checklist whose final orders the broker rejects. `_size_sequentially`
+therefore fills in rank order against a running balance exactly as `run()` does,
+and `SleevePick.unfunded` says which names the pot did not reach.
+
+**`wanted_log` IS NOT `holdings_log`.** The first is what the ranking asked for,
+the second what the account could afford, and logging only fills would hide a
+systematic under-deployment behind a `top_n` that reads like a promise. Same
+discipline as journalling rejections as carefully as approvals.
+
+**THE FACTOR MARKET IS BORROWED, NOT REGISTERED.** `markets.factor_market(cfg)`
+returns a `replace()` of India rather than a fourth entry in `default_markets()`,
+because `markets.keys(cfg)` is the `--market` choice list for every swing CLI -
+the same reasoning `IntradayEquityConfig` already records. **Taxonomy is what
+forces it to exist at all:** the swing book screens the Nifty 100, whose
+industries are hand-maintained in NSE's vocabulary, while the factor universe is
+~2,400 names from Kite's instrument dump with no industry column, so only
+Yahoo's GICS labels can classify it.
+
+**AND THOSE LABELS HAVE TO BE COPIED ONTO THE STOCK.** `activity_failure` and
+`_is_classified` match on `stock.industry`/`stock.sector`, NOT on the
+fundamentals object. Without `sleeve.stock_for(symbol, market, fundamentals)`
+every name arrives unclassified - and unclassified is a REJECT - so the sleeve
+would find nothing eligible and look like a strict screen rather than a broken
+one.
+
+**The screen runs AFTER the ranking and is bounded.** Cheap-to-expensive, as the
+swing scanner already orders its gates: rank first, then take the highest-ranked
+names that pass, looking no further than `halal_shortlist`. That bound is
+load-bearing - without it the book reaches as far down as it must to find twenty
+passing names, which on a strict month means holding the 300th-best momentum name
+and still calling it momentum. It holds FEWER names instead and records that it
+did. Measured on the live top 30: **11 rejected, 37%**, so the default shortlist
+of 60 fills comfortably. It also makes the screen affordable - fundamentals are
+one slow request per name, and only 954 distinct names ever reached the top 60
+across 121 rebalances, against 2,437 in the universe.
+
+**F3: THE SCREEN IS ROUGHLY FREE ON RETURN AND CONSISTENTLY CUTS THE DRAWDOWN.**
+`scripts/run_f3_screened.py`, both windows, `halal_screened` applied at
+selection:
+
+| window | unscreened | screened |
+| --- | --- | --- |
+| 2016-2026 | +18.79% / -57.2% | **+18.01% / -47.9%** |
+| 2005-2016 | +12.39% / -78.5% | **+13.76% / -74.8%** |
+
+It costs 0.78pp and saves 9.3pp of drawdown on one window, ADDS 1.37pp and saves
+3.7pp on the other. So the book you would actually trade is not worse than the
+one that was measured - which is the question F3 existed to answer, and the
+answer could easily have gone the other way.
+
+**Two things must be read with it.** The balance sheets are TODAY'S applied to
+every rebalance - the same point-in-time distortion the swing backtest prints -
+and it cannot be fixed with free data. And **26% of the 2005-2016 shortlist is
+`unverifiable`** against 6% of the 2016-2026 one: the further back you look the
+less Yahoo classifies, so a quarter of that window's names are excluded for a
+DATA reason wearing a Shariah reason's clothes. The +1.37pp is not clean evidence
+the screen helps.
+
+**THE PLANNING DRAWDOWN STAYS AT 78.5%.** The screened figure on the good window
+is -47.9%, and sizing off it would repeat exactly the mistake the kill test
+caught: -57.2% also looked like the answer until an unseen decade said -78.5%.
+The worst screened number is -74.8%, the worst measured anywhere is -78.5%, and
+the more conservative of two numbers that close is not worth trading away.
+
+**`halal_screened` still defaults False** so every recorded F1/F2 number
+reproduces byte-identically, and `run_f3_screened.py` reads the fundamentals
+cache FILE rather than calling `load_fundamentals` - that function fetches
+whatever is missing, so handing it the universe fires ~1,500 requests as a side
+effect of a measurement.
+
+**Index membership is a file, not a calculation.** [factor/membership.py](nifty_algo/factor/membership.py)
+resolves Nifty 50 / Next 50 / 500 / outside from committed constituent lists.
+Turnover rank correlates with membership and is not it, and a band guessed from
+bars would be right most of the time - the worst kind of wrong. A missing file
+reports "50 / Next 50 split unavailable" rather than picking a half, the same
+discipline `HalalVerdict` applies to an absent fundamental.
+
+**What the page refuses to do:** offer a stop-loss control (F2 measured one and
+it is a delay, not an exit, in a book that re-buys monthly), place an order (the
+sleeve is a THIRD book and going live on it is its own decision), or show
++18.79% without +0.60pp beside it. `_record` renders both windows above the
+picks, and `test_both_windows_are_on_screen_before_anything_else` keeps them
+there.
+
+**A failed holdings read is not an empty account.** `_holdings_map` returns three
+states, and an incomplete snapshot marks every action "[holdings unverified]" -
+because an empty list read as "you hold nothing" turns a fully invested book into
+twenty BUYs, the single most expensive mistake this page could make.
 
 ## Holdings, and the research briefings built on them
 

@@ -34,7 +34,7 @@ Yahoo's GICS-derived one ("Credit Services"). One table cannot serve both.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, replace, field
 
 #: Cash-account markets, keyed the way the CLI and the UI both spell them.
 INDIA = "india"
@@ -54,6 +54,7 @@ UK = "uk"
 POOL_HOME = "home"
 POOL_SWING_IN = "swing_india"
 POOL_FOREIGN = "foreign"
+POOL_FACTOR = "factor"
 
 #: Which classification vocabulary the halal activity screen should match on.
 TAXONOMY_NSE = "nse"
@@ -201,6 +202,35 @@ def default_markets() -> dict[str, Market]:
             taxonomy=TAXONOMY_GICS,
         ),
     }
+
+
+def factor_market(cfg) -> Market:
+    """
+    India as the monthly factor sleeve sees it. DELIBERATELY NOT REGISTERED.
+
+    `IntradayEquityConfig` already records why a second India entry would be
+    wrong: `markets.keys(cfg)` is the `--market` choice list for every swing
+    CLI, so registering one there offers a book that cannot be scanned by the
+    scanner those CLIs drive. This borrows the India descriptor the same way
+    and changes only the two fields that genuinely differ.
+
+    TAXONOMY IS THE FIELD THAT FORCES THIS TO EXIST. The swing book screens the
+    Nifty 100, whose industries are hand-maintained in `data/nifty100.csv` in
+    NSE's vocabulary. The factor universe is ~2,400 names derived from Kite's
+    instrument dump and carries no industry column at all, so the only
+    classification available is Yahoo's - which is what `GICS_ACTIVITIES`
+    matches on. Screening the wide universe against the NSE table would fail
+    to classify almost every name, and an unclassified name is a REJECT, so
+    the sleeve would quietly stop finding anything eligible.
+
+    The pot differs for the reason the pots always differ: one balance funding
+    two books means a drawdown in one silently shrinks the other.
+    """
+    return replace(get(cfg, INDIA),
+                   key="factor_india",
+                   label="India · monthly factor sleeve",
+                   capital_pool=POOL_FACTOR,
+                   taxonomy=TAXONOMY_GICS)
 
 
 def get(cfg, key: str) -> Market:

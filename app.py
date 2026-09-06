@@ -45,9 +45,9 @@ auth.require_login()    # NOTHING below this line runs until you are signed in
 
 from nifty_algo.ui.theme import CSS, get_palette          # noqa: E402
 from nifty_algo.ui import (page_live, page_brief, page_swing,        # noqa: E402
-                           page_book, page_portfolio, page_research,
-                           page_strategies, page_backtest, page_journal,
-                           page_settings)
+                           page_sleeve, page_book, page_portfolio,
+                           page_research, page_strategies, page_backtest,
+                           page_journal, page_settings)
 from nifty_algo.ui.state import get_config                # noqa: E402
 from nifty_algo.ui.components import banner               # noqa: E402
 from nifty_algo.ui import refresh                         # noqa: E402
@@ -58,6 +58,7 @@ PAGES = {
     "Live alerts": page_live.render,
     "Daily brief": page_brief.render,
     "Daily picks": page_swing.render,
+    "Monthly sleeve": page_sleeve.render,
     "Trade book": page_book.render,
     "Portfolio": page_portfolio.render,
     "Research": page_research.render,
