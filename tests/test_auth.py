@@ -322,8 +322,19 @@ def test_a_successful_sign_in_forgets_that_client_entirely():
 # the secrets bridge
 # --------------------------------------------------------------------------
 def test_the_bridge_never_overwrites_a_real_environment_variable(monkeypatch):
-    """`os.environ` is authoritative, or env and secrets disagree silently."""
+    """
+    `os.environ` is authoritative, or env and secrets disagree silently.
+
+    Both preconditions are established HERE rather than assumed of the
+    machine: one key present, one absent. `conftest._no_live_credentials`
+    blanks every credential so no test can reach a broker, and a blank value
+    is PRESENT as far as the bridge is concerned - so the half of this test
+    that needs an absent key has to say so. Depending on the ambient
+    environment is the exact habit that let `test_auth` leak real keys into
+    `test_portfolio_connectors` in the first place.
+    """
     monkeypatch.setenv("KITE_API_KEY", "from-the-environment")
+    monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
 
     class FakeSecrets:
         def items(self):

@@ -67,6 +67,26 @@ def _restore_config():
      c.factor_capital_inr) = saved
 
 
+@pytest.fixture(autouse=True)
+def _no_real_settings_writes(monkeypatch):
+    """
+    A page test must never touch `data/settings.json`.
+
+    `_run` persists the configuration that produced a scan, which is right for
+    a console opened once a month and catastrophic in a test: the first run of
+    these tests wrote `factor_universe: nifty500` and a Rs 5,00,000 pot into
+    the real file, and every later `get_config()` then applied them - which is
+    also how three of these tests started failing for a reason that had
+    nothing to do with what they assert.
+
+    `settings_store.save` binds `DEFAULT_PATH` as a default argument at import,
+    so patching the module constant would not redirect it. The seam that works
+    is the page's own reference.
+    """
+    from nifty_algo.ui import page_sleeve
+    monkeypatch.setattr(page_sleeve, "save_settings", lambda: None)
+
+
 @pytest.fixture
 def page(monkeypatch):
     """The page with bars stubbed, holdings unread, and the pot funded."""
@@ -105,6 +125,65 @@ def test_both_windows_are_on_screen_before_anything_else(page):
     assert "+7.94pp" in body
     assert "+0.60pp" in body
     assert "78.5%" in body
+
+
+def test_the_record_follows_the_selected_universe(page):
+    """
+    THE POINT OF THIS PAGE'S RECORD. Selecting a restricted universe must
+    change the figures on screen to that universe's own, or the page is
+    quoting a book nobody is trading - the failure it was built to prevent,
+    in a new costume.
+    """
+    unrestricted = _text(page)
+    assert "+18.79%" in unrestricted
+
+    page.selectbox[0].set_value("nifty500").run()
+    restricted = _text(page)
+    assert "+17.60%" in restricted          # the size-ranked control's number
+    assert "+18.79%" not in restricted      # never the other universe's
+
+
+def test_the_inflated_figure_appears_once_and_is_labelled(page):
+    """
+    +31.29% is not a caveat on the expectation, it is the wrong number to plan
+    with. It is on the page so a reader who runs the backtest can see why it
+    disagrees - in the caption, never in the table, and never alone.
+    """
+    page.selectbox[0].set_value("nifty500").run()
+    captions = " ".join(str(getattr(c, "value", "")) for c in page.caption)
+    tables = " ".join(df.value.to_string() for df in page.dataframe)
+
+    assert "+31.29%" in captions
+    assert "+31.29%" not in tables
+    assert "look-ahead" in captions
+    assert _text(page).count("+31.29%") == 1
+
+
+def test_a_nifty100_mandate_is_told_not_to_run_it(page):
+    """
+    Against its control a Nifty 100 restriction costs 10pp and lands below the
+    index. The page has to say that where the number is, not in a doc.
+    """
+    page.selectbox[0].set_value("nifty100").run()
+    body = _text(page)
+    assert "+7.94%" in body
+    assert "DO NOT RUN THE SLEEVE HERE" in body
+
+
+def test_an_unmeasured_universe_refuses_rather_than_borrowing(page,
+                                                              monkeypatch):
+    """
+    Adding a universe without measuring it must make the page say so. The
+    alternative - silently showing another universe's numbers - is the exact
+    thing the per-universe record exists to stop.
+    """
+    monkeypatch.setitem(sl.RECORDS, "nifty500", None)
+    monkeypatch.delitem(sl.RECORDS, "nifty500")
+    page.selectbox[0].set_value("nifty500").run()
+    body = _text(page)
+    assert "No backtest describes" in body
+    assert "+18.79%" not in body
+    assert "+17.60%" not in body
 
 
 def test_a_scan_renders_a_book_and_stays_provisional(page):

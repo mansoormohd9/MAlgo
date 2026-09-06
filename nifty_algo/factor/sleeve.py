@@ -27,14 +27,23 @@ TWO RULES SHAPE EVERYTHING HERE, AND BOTH ARE ABOUT RESTRAINT.
 WHAT THIS PAGE MUST NEVER LET YOU FORGET. F1 cleared its gate on 2016-2026:
 +18.79% CAGR, beat 500/500 null seeds, p = 0.002. F2's kill test on the
 never-used 2005-2016 window returned +0.60pp over the index, a -78.5% drawdown
-and an 81-month recovery. `HEADLINE` carries both and is rendered above the
+and an 81-month recovery. `RECORDS` carries both and is rendered above the
 picks rather than in a footnote, because a console that shows the first number
 without the second is a machine for forgetting the second.
+
+AND THE RECORD IS PER UNIVERSE. F4 measured that restricting to the Nifty 500
+is free while restricting to the Nifty 100 costs 10pp, and that the naive
+restricted backtests are inflated by 13.69pp and 11.87pp of look-ahead. Showing
+the unrestricted +18.79% above a restricted book would quote numbers for a
+universe nobody is trading - the same failure in a new costume - so
+`record_for` returns the measured record for the selected universe, or None,
+and None means the caller says so rather than borrowing.
 """
 from __future__ import annotations
 
 import argparse
 import sys
+import textwrap
 from dataclasses import dataclass, field
 from datetime import date
 
@@ -49,15 +58,121 @@ from . import momentum as mom
 from . import restriction as restr
 from .universe import BANDS, FactorUniverse, month_ends
 
-#: The two windows, together, always. Percentages are CAGR; the drawdown is on
-#: month-end marks, so the true intra-month trough is deeper than either.
-HEADLINE: tuple[tuple[str, str, str, str, str], ...] = (
-    ("window", "sleeve", "Nifty", "excess", "worst fall"),
+#: Column headings for every record below.
+HEADLINE: tuple[str, ...] = ("window", "sleeve", "Nifty", "excess",
+                             "worst fall")
+
+
+@dataclass(frozen=True)
+class Record:
+    """
+    What a backtest actually says about ONE universe.
+
+    THE RECORD IS PER UNIVERSE BECAUSE THE NUMBERS ARE. Showing the
+    unrestricted book's +18.79% above a Nifty-500-restricted book would quote
+    figures for a universe that is not being traded - the same failure this
+    page exists to prevent, in a new costume.
+
+    `rows` is always what to EXPECT. Where a published-membership universe was
+    measured, its naive figure goes in `naive` as a single caption line rather
+    than a table row: it is not a caveat on the expectation, it is simply the
+    wrong number for planning, and putting it in the table would make it the
+    one a reader remembers.
+    """
+    universe: str
+    describes: str
+    rows: tuple
+    caution: str
+    naive: str | None = None
+
+
+#: F1/F2 for the shipped book; F4's size-ranked CONTROLS for the restricted
+#: ones, never their naive figures. A universe absent from here has not been
+#: measured, and `record_for` returns None so the caller refuses rather than
+#: borrowing someone else's numbers.
+_UNRESTRICTED_ROWS = (
     ("2016-2026, where it was measured", "+18.79%", "+10.85%", "+7.94pp",
      "-57.2% / 35 months"),
     ("2005-2016, never used to build it", "+12.39%", "+11.79%", "+0.60pp",
      "-78.5% / 81 months"),
 )
+
+RECORDS: dict[str, Record] = {
+    "all": Record(
+        universe="all",
+        describes="every listed NSE name - the book F1, F2 and F3 measured",
+        rows=_UNRESTRICTED_ROWS,
+        caution="Read both rows. The upper is the window the strategy was "
+                "built and measured on; the lower is a decade it had never "
+                "seen, where it beat the index by 0.60pp and fell 78.5% "
+                "taking 81 months to recover. Survivorship flatters both."),
+
+    "size500": Record(
+        universe="size500",
+        describes="top 500 by point-in-time size - the CONTROL, and the "
+                  "honest estimate for any large-cap-restricted sleeve",
+        rows=(("2016-2026", "+17.60%", "+10.85%", "+6.75pp",
+               "-48.6% / 34 months"),
+              ("2005-2016", "+13.55%", "+11.79%", "+1.76pp",
+               "-74.3% / 79 months")),
+        caution="Restricting by size costs essentially nothing (-0.41pp and "
+                "-0.22pp against the unrestricted book) and buys nothing "
+                "either - the drawdown is unchanged."),
+
+    "nifty500": Record(
+        universe="nifty500",
+        describes="the Nifty 500, priced with its size-ranked control - "
+                  "because today's membership cannot be applied to 2016",
+        rows=(("2016-2026", "+17.60%", "+10.85%", "+6.75pp",
+               "-48.6% / 34 months"),
+              ("2005-2016", "+13.55%", "+11.79%", "+1.76pp",
+               "-74.3% / 79 months")),
+        caution="These are the size-ranked control's numbers, and they are "
+                "what to expect. Restricting to the Nifty 500 is free - it "
+                "costs about 0.3pp - but it does NOT reduce the drawdown.",
+        naive="A backtest restricted to TODAY'S Nifty 500 reports +31.29% "
+              "and -32.9%. Ignore it: +13.69pp of that is look-ahead, "
+              "because today's membership can only hold companies that grew "
+              "INTO the index."),
+
+    "size100": Record(
+        universe="size100",
+        describes="top 100 by point-in-time size - the control for a Nifty "
+                  "100 mandate",
+        rows=(("2016-2026", "+7.94%", "+10.85%", "-2.91pp",
+               "-33.8% / 25 months"),
+              ("2005-2016", "+10.62%", "+11.79%", "-1.17pp",
+               "-65.5% / 78 months")),
+        caution="A 100-name universe LOSES to the index on both windows. A "
+                "top-20 book is a fifth of it, so there is almost no "
+                "cross-section left to rank - which is the whole mechanism."),
+
+    "nifty100": Record(
+        universe="nifty100",
+        describes="the Nifty 100, priced with its size-ranked control",
+        rows=(("2016-2026", "+7.94%", "+10.85%", "-2.91pp",
+               "-33.8% / 25 months"),
+              ("2005-2016", "+10.62%", "+11.79%", "-1.17pp",
+               "-65.5% / 78 months")),
+        caution="DO NOT RUN THE SLEEVE HERE. Against its control a Nifty 100 "
+                "restriction costs 10.07pp of CAGR and lands BELOW the index "
+                "on both windows. Momentum needs a cross-section to rank "
+                "within and 100 names is not one.",
+        naive="A backtest restricted to TODAY'S Nifty 100 reports +19.81% "
+              "and -23.9%. Ignore it: +11.87pp of that is look-ahead."),
+}
+
+
+def record_for(universe_key: str) -> Record | None:
+    """
+    The measured record for a universe, or None if nothing measured it.
+
+    None is a REFUSAL, not a fallback. A caller that quietly substituted
+    another universe's numbers would be doing the exact thing this whole
+    structure exists to stop, so adding a key to `restriction.UNIVERSES`
+    without measuring it makes the page say so instead.
+    """
+    return RECORDS.get((universe_key or "all").lower())
 
 #: Plan for this, not for the number the good decade showed. Measured on
 #: month-end marks over one realisation; `drawdown.DRAWDOWN_HAIRCUT` is why the
@@ -587,13 +702,37 @@ def decide(scan_result: SleeveScan, holdings=None) -> list:
 
 # ------------------------------------------------------------- the report
 
+def _record_lines(universe_key: str) -> list:
+    """
+    The measured record for THIS universe, or a refusal.
+
+    Shared with the page through `record_for`, so the CLI and the console
+    cannot end up quoting different numbers for the same book.
+    """
+    rec = record_for(universe_key)
+    if rec is None:
+        return [f"  NO BACKTEST DESCRIBES THE UNIVERSE {universe_key!r}.",
+                "  Nothing here has measured it, so no return figure is "
+                "shown - borrowing another",
+                "  universe's numbers would be worse than showing none."]
+    out = [f"  What a backtest says about THIS universe ({rec.describes}):",
+           f"    {HEADLINE[0]:<36}{HEADLINE[1]:>9}{HEADLINE[2]:>10}"
+           f"{HEADLINE[3]:>9}  {HEADLINE[4]}"]
+    for row in rec.rows:
+        out.append(f"    {row[0]:<36}{row[1]:>9}{row[2]:>10}{row[3]:>9}  "
+                   f"{row[4]}")
+    out.append("")
+    out += ["  " + line for line in textwrap.wrap(rec.caution, 74)]
+    if rec.naive:
+        out.append("")
+        out += ["  " + line for line in textwrap.wrap(rec.naive, 74)]
+    return out
+
+
 def report(scan_result: SleeveScan, actions: list) -> str:
     s = scan_result
-    lines = ["THE MONTHLY FACTOR SLEEVE", "",
-             "  What it did in the two windows - read both, always:"]
-    for row in HEADLINE:
-        lines.append(f"    {row[0]:<36}{row[1]:>9}{row[2]:>10}{row[3]:>9}  "
-                     f"{row[4]}")
+    lines = ["THE MONTHLY FACTOR SLEEVE", ""]
+    lines += _record_lines(s.universe_key)
     lines += ["", f"  as of {s.as_of}   universe {s.universe_size:,}   "
                   f"eligible {s.eligible:,}   holding {len(s.picks)}"]
 

@@ -52,9 +52,18 @@ from . import membership as mb
 
 #: The registered universes. `all` is the shipped book and the only one every
 #: recorded F1/F2/F3 number describes.
-UNIVERSES: tuple[str, ...] = ("all", "nifty500", "nifty100", "size500")
+UNIVERSES: tuple[str, ...] = ("all", "nifty500", "nifty100",
+                              "size500", "size100")
 
-#: How many names `size500` keeps. Named after the index it stands in for.
+#: Each index restriction gets a size-ranked twin of the same width, so no
+#: published-membership arm is ever reported without a control beside it. An
+#: uncontrolled `nifty100` would be the same trap as an uncontrolled
+#: `nifty500`, just on a shorter list - and a shorter list is a STRONGER
+#: filter, because "grew into the Nifty 100 by 2026" selects harder than
+#: "grew into the Nifty 500".
+SIZE_RANKS: dict[str, int] = {"size500": 500, "size100": 100}
+
+#: Kept for callers that predate the pair. Same value it always had.
 SIZE_RANK_N = 500
 
 
@@ -176,10 +185,11 @@ def resolver(cfg, universe_key: str, bars: dict, factor_universe,
                 f"companies that grew into the index.")
         return (lambda _day, n=frozenset(names): set(n)), note
 
+    n = SIZE_RANKS[key]
     caps = load_market_caps(cfg)
     shares = _implied_shares(bars, caps)
-    rank = SizeRank(factor_universe, shares, SIZE_RANK_N)
-    note = (f"size500: top {SIZE_RANK_N} by point-in-time size, from "
+    rank = SizeRank(factor_universe, shares, n)
+    note = (f"{key}: top {n} by point-in-time size, from "
             f"{len(rank.symbols):,} names with a market cap; "
             f"{len(rank.skipped):,} excluded for having none.")
     return rank.at, note

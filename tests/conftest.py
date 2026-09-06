@@ -12,6 +12,49 @@ from nifty_algo.strategy import Context
 
 BASE_DAY = datetime(2026, 3, 10, 9, 15)
 
+#: Every credential `ui.auth.bridge_secrets` bridges from `st.secrets` into
+#: `os.environ`, plus the two that actually reach money.
+CREDENTIAL_KEYS: tuple[str, ...] = (
+    "KITE_API_KEY", "KITE_API_SECRET", "KITE_ACCESS_TOKEN",
+    "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID",
+    "SMTP_HOST", "SMTP_USER", "SMTP_PASSWORD",
+    "FYERS_APP_ID", "FYERS_SECRET_KEY",
+    "DHAN_CLIENT_ID", "DHAN_ACCESS_TOKEN",
+)
+
+
+@pytest.fixture(autouse=True)
+def _no_live_credentials(monkeypatch):
+    """
+    THE SUITE MUST NEVER REACH A BROKER. This is what makes that true.
+
+    `tests/test_auth.py` drives `app.py` through Streamlit's `AppTest`, so
+    `load_dotenv()` and `bridge_secrets()` execute and copy the real `.env`
+    keys into `os.environ` FOR THE REST OF THE PROCESS. Nothing reset them, so
+    `test_portfolio_connectors.py` - which asserts Kite is unconfigured - found
+    a genuinely configured Kite and read the live account: real positions, a
+    live FX call. No order was placed, but a repo built around keeping code
+    away from money by accident should not have its test run touch the account
+    at all.
+
+    BLANK, NOT DELETE. `python-dotenv` skips any key already present in
+    `os.environ`, so an empty string is what stops `load_dotenv()` re-supplying
+    the real value; deleting them leaves the door open on the very next
+    AppTest. `tests/test_auth._clean_env` already uses and documents this
+    mechanism for the auth keys - this is the same trick applied to the broker
+    keys and to the whole suite.
+
+    Function-scoped and autouse, so a test's own `monkeypatch.setenv` still
+    wins: `test_auth.py` sets `KITE_API_KEY` deliberately to prove the bridge
+    never overwrites a real environment variable, and that must keep working.
+
+    `KiteSession.configured` is `bool(api_key and api_secret)`, both read from
+    here, and a cached `.kite_session.json` alone does NOT make it configured -
+    so blanking these two closes the path completely rather than narrowing it.
+    """
+    for key in CREDENTIAL_KEYS:
+        monkeypatch.setenv(key, "")
+
 
 def make_bars(rows: list[dict], start: datetime = BASE_DAY,
               minutes: int = 5) -> pd.DataFrame:

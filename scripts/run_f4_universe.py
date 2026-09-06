@@ -46,7 +46,7 @@ from nifty_algo.factor import sleeve as sl                   # noqa: E402
 from nifty_algo.swing.costs_equity import DEFAULT_EQUITY_COSTS  # noqa: E402
 from run_f3_screened import verdict_map                      # noqa: E402
 
-ARMS = ("all", "nifty500", "size500")
+ARMS = ("all", "nifty500", "size500", "nifty100", "size100")
 
 
 def main(argv=None) -> int:
@@ -122,12 +122,20 @@ def main(argv=None) -> int:
               f"{(sum(elig) / len(elig) if elig else 0):>10.0f}")
 
     base = results["all"].cagr(args.capital)
-    n500 = results["nifty500"].cagr(args.capital)
-    s500 = results["size500"].cagr(args.capital)
-    print(f"\n  restriction costs: nifty500 {(n500 - base) * 100:+.2f}pp, "
-          f"size500 {(s500 - base) * 100:+.2f}pp against all")
-    print(f"  LOOK-AHEAD ESTIMATE: nifty500 - size500 = "
-          f"{(n500 - s500) * 100:+.2f}pp of CAGR")
+    print()
+    print("  EACH PUBLISHED INDEX AGAINST ITS OWN SIZE-RANKED CONTROL:")
+    print(f"    {'pair':<24}{'naive':>9}{'control':>9}{'look-ahead':>13}"
+          f"{'honest cost vs all':>21}")
+    for index_key, control_key in (("nifty500", "size500"),
+                                   ("nifty100", "size100")):
+        if index_key not in results or control_key not in results:
+            continue
+        naive = results[index_key].cagr(args.capital)
+        control = results[control_key].cagr(args.capital)
+        print(f"    {index_key + ' vs ' + control_key:<24}"
+              f"{naive:>+9.2%}{control:>+9.2%}"
+              f"{(naive - control) * 100:>+12.2f}pp"
+              f"{(control - base) * 100:>+20.2f}pp")
     print()
     print("  `nifty500` uses TODAY'S membership, so it may only hold companies "
           "that grew INTO the")

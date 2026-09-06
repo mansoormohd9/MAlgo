@@ -394,3 +394,98 @@ def test_the_scan_reports_which_band_produced_the_book(cfg, world):
     scan = sl.scan(cfg, world, today=_last_mark(world))
     assert scan.band == cfg.factor.band
     assert scan.universe_size == len(world)
+
+
+# ------------------------------------------------------- the per-universe record
+
+def test_the_unrestricted_record_still_carries_the_recorded_figures():
+    """
+    REGRESSION. `record_for("all")` must be exactly what F1 and F2 measured,
+    or the unrestricted page silently changed what it claims.
+    """
+    rec = sl.record_for("all")
+    flat = " ".join(" ".join(row) for row in rec.rows)
+    for figure in ("+18.79%", "+12.39%", "+7.94pp", "+0.60pp",
+                   "-57.2%", "-78.5%"):
+        assert figure in flat
+    assert rec.naive is None
+
+
+def test_a_restricted_record_quotes_its_control_not_the_naive_backtest():
+    """
+    The whole point. `nifty500`'s expectation rows are `size500`'s numbers,
+    because today's membership cannot be applied to 2016 - and the inflated
+    +31.29% lives in `naive`, never in the table.
+    """
+    rec = sl.record_for("nifty500")
+    flat = " ".join(" ".join(row) for row in rec.rows)
+    assert "+17.60%" in flat and "+13.55%" in flat
+    assert "+31.29%" not in flat
+    assert "+18.79%" not in flat
+    assert rec.naive and "+31.29%" in rec.naive
+    assert "look-ahead" in rec.naive
+
+
+def test_the_nifty100_record_says_not_to_run_it():
+    rec = sl.record_for("nifty100")
+    flat = " ".join(" ".join(row) for row in rec.rows)
+    assert "+7.94%" in flat              # below the index on the same marks
+    assert "DO NOT RUN THE SLEEVE HERE" in rec.caution
+
+
+def test_an_unmeasured_universe_has_no_record():
+    """
+    None is a refusal, not a fallback. Adding a universe to
+    `restriction.UNIVERSES` without measuring it must not inherit another's
+    numbers.
+    """
+    assert sl.record_for("nifty42") is None
+    assert sl.record_for("") is sl.record_for("all")
+
+
+def test_every_registered_universe_has_been_measured():
+    """
+    The selector offers `restriction.UNIVERSES`, so a key with no record is a
+    choice the console cannot describe. This fails the moment someone adds one
+    without measuring it - which is the intended nag.
+    """
+    from nifty_algo.factor import restriction as restr
+    missing = [k for k in restr.UNIVERSES if sl.record_for(k) is None]
+    assert not missing, f"unmeasured universes offered by the selector: {missing}"
+
+
+def test_the_report_shows_the_record_for_the_scanned_universe(cfg, world,
+                                                              monkeypatch):
+    """
+    The CLI and the page read the same `record_for`, so they cannot quote
+    different numbers for the same book.
+    """
+    from nifty_algo.factor import restriction as restr
+    monkeypatch.setattr(
+        restr, "resolver",
+        lambda c, key, bars, uni, root=".": (restr.static(set(world)), "test"))
+    cfg.factor.universe = "nifty500"
+    try:
+        scan = sl.scan(cfg, world, today=_last_mark(world))
+        text = sl.report(scan, sl.decide(scan))
+        assert "+17.60%" in text
+        assert "+18.79%" not in text
+        assert "+31.29%" in text          # present, in the caution paragraph
+    finally:
+        cfg.factor.universe = "all"
+
+
+def test_the_report_refuses_an_unmeasured_universe(cfg, world, monkeypatch):
+    from nifty_algo.factor import restriction as restr
+    monkeypatch.setattr(
+        restr, "resolver",
+        lambda c, key, bars, uni, root=".": (restr.static(set(world)), "test"))
+    monkeypatch.delitem(sl.RECORDS, "nifty500")
+    cfg.factor.universe = "nifty500"
+    try:
+        scan = sl.scan(cfg, world, today=_last_mark(world))
+        text = sl.report(scan, sl.decide(scan))
+        assert "NO BACKTEST DESCRIBES" in text
+        assert "+18.79%" not in text and "+17.60%" not in text
+    finally:
+        cfg.factor.universe = "all"

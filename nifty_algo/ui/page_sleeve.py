@@ -26,7 +26,7 @@ from ..factor import sleeve as sl
 from ..factor.drawdown import DRAWDOWN_HAIRCUT
 from ..swing import halal as halal_mod
 from .components import banner
-from .state import get_config
+from .state import get_config, save_settings
 from .theme import get_palette
 
 _SCAN_KEY = "factor_sleeve_scan"
@@ -45,8 +45,15 @@ def render() -> None:
         f"band {cfg.factor.band}"
     )
 
-    _record(p)
+    # THE RECORD IS RENDERED LAST AND PLACED FIRST. `_controls` is what writes
+    # the selected universe onto the config, so computing the record before it
+    # would show the PREVIOUS universe's numbers for one interaction - on the
+    # one panel whose entire purpose is never to quote the wrong book. A
+    # container reserves the position at the top and is filled afterwards.
+    record_slot = st.container()
     _controls(cfg, p)
+    with record_slot:
+        _record(cfg, p)
 
     scan = st.session_state.get(_SCAN_KEY)
     if scan is None:
@@ -73,23 +80,35 @@ def render() -> None:
 
 # ------------------------------------------------------------- the record
 
-def _record(p) -> None:
+def _record(cfg, p) -> None:
     """
-    Both windows, above everything. Never one of them.
+    Both windows, above everything - and for THIS universe, never another's.
 
-    F1 measured +18.79% on 2016-2026 and cleared its gate at p = 0.002. F2's
-    kill test on the never-used 2005-2016 window returned +0.60pp over the
-    index. Showing the first without the second would make this page an
-    advertisement.
+    Renders before any scan, so it reads the selected universe from the config
+    rather than from a result. A page that showed the unrestricted +18.79%
+    above a Nifty-500 book would be quoting a universe nobody is trading.
     """
-    rows = [dict(zip(sl.HEADLINE[0], row)) for row in sl.HEADLINE[1:]]
-    st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
-    banner(
-        "<b>Read both rows.</b> The upper one is the window the strategy was "
-        "built and measured on; the lower one is a decade it had never seen, "
-        "where it beat the index by 0.60pp and fell 78.5% taking 81 months to "
-        "recover. Survivorship runs one way and flatters both.",
-        p.warning, "⚠")
+    rec = sl.record_for(cfg.factor.universe)
+    if rec is None:
+        banner(f"<b>No backtest describes the "
+               f"<code>{html.escape(cfg.factor.universe)}</code> universe.</b> "
+               f"Nothing has measured it, so no return figure is shown here — "
+               f"borrowing another universe's numbers would be worse than "
+               f"showing none.", p.critical, "⛔")
+        return
+
+    st.dataframe(
+        pd.DataFrame([dict(zip(sl.HEADLINE, row)) for row in rec.rows]),
+        hide_index=True, width="stretch")
+    st.caption(f"These describe: {rec.describes}.")
+    banner(f"<b>{html.escape(rec.caution)}</b>", p.warning, "⚠")
+    if rec.naive:
+        # ONE LINE, IN SMALL PRINT, ON PURPOSE. The inflated figure is not a
+        # caveat on the expectation above - it is simply the wrong number to
+        # plan with. It appears at all so a reader who runs the backtest
+        # themselves can see why it disagrees, and it appears small so it is
+        # not the number they walk away with.
+        st.caption(f"⚠ {rec.naive}")
 
 
 # ------------------------------------------------------------- the controls
@@ -159,6 +178,13 @@ def _run(cfg, with_news: bool) -> None:
     st.session_state[_SCAN_KEY] = scan
     st.session_state[_HOLDINGS_KEY] = holdings
     st.session_state[_ACTIONS_KEY] = sl.decide(scan, holdings)
+    # Saved HERE rather than on every widget touch, so what persists is the
+    # configuration that actually produced a scan rather than a half-typed
+    # pot. A console opened once a month should come back configured.
+    try:
+        save_settings()
+    except Exception as e:                                 # pragma: no cover
+        st.caption(f"settings not saved ({e}) — the scan above still stands")
     prog.empty()
 
 
@@ -195,8 +221,15 @@ def _context(scan, p) -> None:
     c3.metric("As of", str(scan.as_of))
 
     if scan.universe_key != "all":
-        banner(f"<b>Universe: {html.escape(scan.universe_key)}.</b> "
-               f"{html.escape(scan.universe_note)}", p.series_1, "▤")
+        # Live, a published membership list is simply a fact about today -
+        # there is no look-ahead in knowing what the index holds right now.
+        # The inflated BACKTEST is handled by the record above, so this banner
+        # is about the book, not about the measurement.
+        banner(f"<b>Ranking inside {html.escape(scan.universe_key)}.</b> "
+               f"{html.escape(scan.universe_note.split('.')[0])}. Today's "
+               f"membership is a fact today; it is the backtest of it that is "
+               f"inflated, and the record above already prices that in.",
+               p.series_1, "▤")
 
     if scan.regime.known:
         accent = p.series_1 if scan.regime.above else p.warning
@@ -240,6 +273,15 @@ def _sizing(cfg, scan, p) -> None:
             f"deeper and one realisation is not a distribution. Recovery took "
             f"{sl.MEASURED_RECOVERY_MONTHS} months."
         )
+        if scan.universe_key != "all":
+            banner(
+                "<b>Restricting the universe does not lower this number.</b> "
+                "F4 measured it: against a point-in-time size control a "
+                "large-cap-restricted sleeve draws down 48.6% and 74.3% — "
+                "indistinguishable from unrestricted. The naive restricted "
+                "backtest shows a shallower fall and that part is look-ahead "
+                "too. Plan for the same drawdown whichever universe you pick.",
+                p.warning, "▤")
         banner(
             "<b>There is no stop-loss control here, on purpose.</b> F2 "
             "measured a per-name stop at two widths, two bases and across two "

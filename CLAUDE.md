@@ -39,7 +39,7 @@ python scripts/fetch_history.py         # real 5m NIFTY history (resumable)
 python scripts/fetch_vix.py             # India VIX, for SYNTHETIC_PREMIUM backtests
 ```
 
-Tests (951: 945 passing, 5 skipped, 1 failing only while you are logged in to Kite - see below; pytest, `pythonpath = . tests` so `nifty_algo` and the conftest helpers both import without an install step):
+Tests (970: 965 passing, 5 skipped; pytest, `pythonpath = . tests` so `nifty_algo` and the conftest helpers both import without an install step):
 
 ```bash
 pytest                                                     # the only run that counts as done
@@ -846,10 +846,64 @@ worth 2.8pp on the 2016-2026 window (+2.38pp before the full-universe fetch,
 in 2026, so heavy diluters have their past size overstated and growth names
 dilute most. Every look-ahead figure it produces is therefore a LOWER bound.
 
+**AND THE NIFTY 100 IS WORSE THAN USELESS.** Given its own control (`size100`,
+top 100 by point-in-time size) the picture is:
+
+| pair | naive | control | look-ahead | honest cost vs `all` |
+| --- | --- | --- | --- | --- |
+| nifty500 vs size500 | +31.29% | +17.60% | +13.69pp | **-0.41pp** |
+| nifty100 vs size100 | +19.81% | **+7.94%** | +11.87pp | **-10.07pp** |
+
+A 100-name universe LOSES to the index on both windows (+7.94% and +10.62%
+against +10.85% and +11.79%). A top-20 book is a fifth of it, so there is almost
+no cross-section left to rank - and cross-section is the entire mechanism. Every
+published-membership arm now gets a size-ranked twin of the same width, because
+an uncontrolled `nifty100` is the same trap as an uncontrolled `nifty500` on a
+shorter list, and a shorter list selects HARDER.
+
+**THE RECORD ON SCREEN IS PER UNIVERSE.** `sleeve.RECORDS` / `record_for` hold
+what a backtest actually says about each one, and `report()` and
+[page_sleeve.py](nifty_algo/ui/page_sleeve.py) both read it - so the CLI and the
+console cannot quote different numbers for the same book. For a restricted
+universe the table shows the CONTROL's figures, because those are what to
+expect; the naive +31.29% appears once, in a caption, labelled inflated. It is
+not a caveat on the expectation, it is the wrong number to plan with, and a
+table row would make it the one you remember.
+
+**`record_for` RETURNS None FOR AN UNMEASURED UNIVERSE, AND None IS A REFUSAL.**
+Both consumers render "no backtest describes this universe" rather than borrow
+another's numbers, and `test_every_registered_universe_has_been_measured` fails
+the moment a key is added to `restriction.UNIVERSES` without measuring it.
+
+**THE RECORD IS COMPUTED AFTER THE CONTROLS AND PLACED ABOVE THEM.** `_controls`
+is what writes the selected universe onto the config, so rendering the record
+first showed the PREVIOUS universe's numbers for one interaction - on the single
+panel whose whole purpose is never to quote the wrong book. A `st.container()`
+reserves the position and is filled afterwards.
+
 **`universe` defaults to `"all"`** so every recorded F1/F2/F3 number reproduces
 byte-identically, and `test_no_restriction_is_byte_identical_to_the_old_book`
 pins it. Live, none of the look-ahead applies: today's membership is a fact
 today, which is why the page offers the selector at all.
+
+**The pot, universe and screen persist; the rest of the strategy does not.**
+`settings_store.FIELDS` gained three entries, and the distinction is close
+enough to be worth stating: `factor_universe` is not a parameter being swept, it
+is which slice of the market this holder may own, and the Shariah screen is a
+property of the holder rather than of the strategy. Both belong with the pots;
+the formation, band, `top_n` and hold period stay in version-controlled config.
+`apply_to` gained a SECOND refusal beside the `dry_run` one - every string
+coerces to a string, so a hand-edited `"factor_universe": "nifty42"` would pass
+the type check and raise deep inside a scan; it degrades to the unrestricted
+book with a note instead.
+
+**A page test must never write `data/settings.json`.** Persisting from `_run`
+means the page writes real user state, and the first run of these tests wrote
+`factor_universe: nifty500` and a Rs 5,00,000 pot into the live file - after
+which three unrelated tests failed because `get_config()` applied them.
+`settings_store.save` binds `DEFAULT_PATH` as a default argument at import, so
+patching the module constant does not redirect it; the seam that works is the
+page's own `save_settings` reference.
 
 ## Holdings, and the research briefings built on them
 
@@ -978,10 +1032,51 @@ reads as armed and does nothing is the failure this repo refuses elsewhere.
 Tests: [test_auth.py](tests/test_auth.py). Every UI `AppTest` must call
 `conftest.sign_in(at)` or it renders the login form and nothing else.
 
-## The suite reads your live brokerage account if you are logged in
+## The suite must never reach a broker, and one fixture is why
 
-`pytest` is green from a cold machine and fails one test on a trading morning,
-and the failing test is the messenger rather than the bug.
+`tests/conftest._no_live_credentials` blanks every bridged credential -
+`KITE_API_KEY`, `KITE_API_SECRET` and the Telegram/SMTP/Fyers/Dhan keys - for
+every test in the suite.
+
+**BLANK, NOT DELETE.** `python-dotenv` skips any key already present in
+`os.environ`, so an empty string is what stops `load_dotenv()` re-supplying the
+real value; deleting them leaves the door open on the very next AppTest.
+`test_auth._clean_env` already used this trick for the auth keys and documents
+it - the fixture applies it to the broker keys and to the whole run.
+
+**It is sufficient because `KiteSession.configured` is
+`bool(api_key and api_secret)`**, both read from the environment. A cached
+`.kite_session.json` alone does NOT make it configured, so blanking those two
+closes the path rather than narrowing it. `tests/test_no_live_credentials.py`
+asserts the guard directly, because a guard that only works silently is one that
+rots.
+
+**What it fixes, and what that cost.** `tests/test_auth.py` drives the console
+through Streamlit's `AppTest`, which runs `app.py` - so `load_dotenv()` and
+`bridge_secrets()` executed and copied the real `.env` keys into `os.environ`
+**for the rest of the process**. Nothing reset them, and
+`tests/test_portfolio_connectors.py::test_an_enabled_but_unconfigured_connector_is_unavailable`
+then asserted Kite was unconfigured, reached a genuinely configured Kite, and
+**read the live account** - real positions, a fresh FX rate. It placed no orders,
+but a repo whose entire design is about keeping code away from money by accident
+should not have its test run reach the account at all.
+
+    pytest tests/test_auth.py tests/test_portfolio_connectors.py   # was 1 failed
+
+That two-file reproduction was the whole diagnosis: ORDER dependence, not the
+login on its own. It passes now.
+
+**A test that needs a credential ABSENT has to say so.** The fixture is
+function-scoped, so a test's own `monkeypatch.setenv` still wins - but a blank
+value is PRESENT as far as `bridge_secrets` is concerned, so
+`test_the_bridge_never_overwrites_a_real_environment_variable` now deletes the
+key it needs missing instead of assuming the machine has none. Depending on the
+ambient environment is the habit that caused all of this.
+
+## Older note: how that failure used to present
+
+`pytest` was green from a cold machine and failed one test on a trading morning,
+and the failing test was the messenger rather than the bug.
 
 `tests/test_auth.py` drives the console through Streamlit's `AppTest`, which
 runs `app.py` - so `load_dotenv()` and `bridge_secrets()` execute and copy the

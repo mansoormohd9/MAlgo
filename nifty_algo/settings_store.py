@@ -46,6 +46,15 @@ FIELDS: tuple[tuple[str, str, str], ...] = (
     ("capital", "foreign_capital_inr", "foreign_capital_inr"),
     ("equity_broker", "dry_run", "equity_dry_run"),
     ("equity_broker", "ddpi_active", "ddpi_active"),
+    # The monthly sleeve. Its console is opened once a month, so resetting the
+    # pot and the universe on every launch is friction on the only day it
+    # matters. The UNIVERSE is here deliberately: `FactorConfig.universe`
+    # defaults to "all" so every recorded F1/F2/F3 number reproduces, and a
+    # user who trades the restricted book should not have to re-select it -
+    # nor should that preference be committed into version-controlled defaults.
+    ("capital", "factor_capital_inr", "factor_capital_inr"),
+    ("factor", "universe", "factor_universe"),
+    ("factor", "halal_screened", "factor_halal_screened"),
 )
 
 
@@ -111,4 +120,20 @@ def apply_to(cfg, path: Path | str = DEFAULT_PATH) -> list[str]:
             "that expires nightly. Dry run has been restored. Turn it off "
             "again deliberately if that is what you want."
         )
+
+    # THE SECOND REFUSAL. `apply_to` coerces by type, and every string coerces
+    # to a string - so a hand-edited `"factor_universe": "nifty42"` would be
+    # set here and then raise `UnknownUniverse` deep inside a scan. An
+    # unreadable settings file must degrade to defaults with a note, never to
+    # a crash on the one page it configures.
+    try:
+        from .factor.restriction import UNIVERSES
+    except Exception:                                      # pragma: no cover
+        UNIVERSES = ()
+    if UNIVERSES and cfg.factor.universe not in UNIVERSES:
+        notes.append(
+            f"factor_universe in {path} is {cfg.factor.universe!r}, which is "
+            f"not a registered universe ({', '.join(UNIVERSES)}) - the "
+            f"unrestricted book has been restored.")
+        cfg.factor.universe = "all"
     return notes

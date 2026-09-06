@@ -13,6 +13,11 @@ journal/
 data/*.csv
 data/*.parquet
 data/*.feather
+# A snapshot of one pytest run has no lasting value. The EXPERIMENT
+# reports beside these (f1_verdict_*.txt, s1_swing_null.txt,
+# f4_clean.txt) are kept on purpose - they are the human-readable form
+# of numbers the ledgers in data/experiments/ hold only as columns.
+data/pytest_*.txt
 !data/sample_*.csv
 # The swing scanner's universes and your halal rulings are SOURCE, not
 # downloaded data - the scan cannot run without them. One universe file per
