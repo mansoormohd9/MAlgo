@@ -67,6 +67,14 @@ def main(argv=None) -> int:
     p.add_argument("--cache", default="", help="a different bars parquet")
     p.add_argument("--since", default="", help="YYYY-MM-DD; skip older marks")
     p.add_argument("--limit", type=int, default=0, help="smoke test")
+    p.add_argument("--all-symbols", action="store_true",
+                   help="fetch the WHOLE universe rather than the shortlist. "
+                        "Needed for `restriction.size500` to be a clean "
+                        "control: fetching only shortlisted names leaves "
+                        "market caps for exactly the names that once had "
+                        "strong momentum, so a size rank built on them is "
+                        "pre-selected on the outcome it is supposed to be "
+                        "independent of.")
     args = p.parse_args(argv)
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -83,11 +91,15 @@ def main(argv=None) -> int:
     universe = FactorUniverse(bars, adv_window=cfg.factor.adv_window)
 
     start = date.fromisoformat(args.since) if args.since else None
-    symbols = shortlisted_symbols(cfg, universe, args.shortlist, start)
+    if args.all_symbols:
+        symbols = sorted(bars)
+        what = "the whole universe"
+    else:
+        symbols = shortlisted_symbols(cfg, universe, args.shortlist, start)
+        what = f"distinct names ever in the top {args.shortlist}"
     if args.limit:
         symbols = symbols[:args.limit]
-    print(f"\n{len(symbols):,} distinct names ever in the top "
-          f"{args.shortlist}\n", flush=True)
+    print(f"\n{len(symbols):,} {what}\n", flush=True)
 
     stocks = [sl.stock_for(s, market) for s in symbols]
     started = time.time()

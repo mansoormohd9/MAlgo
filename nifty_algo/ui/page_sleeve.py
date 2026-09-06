@@ -21,6 +21,7 @@ from datetime import date
 import pandas as pd
 import streamlit as st
 
+from ..factor import restriction as restr
 from ..factor import sleeve as sl
 from ..factor.drawdown import DRAWDOWN_HAIRCUT
 from ..swing import halal as halal_mod
@@ -94,7 +95,15 @@ def _record(p) -> None:
 # ------------------------------------------------------------- the controls
 
 def _controls(cfg, p) -> None:
-    c1, c2, c3, c4 = st.columns([1.3, 1, 1, 1.2])
+    c0, c1, c2, c3, c4 = st.columns([1.3, 1.3, 1, 1, 1.1])
+
+    universe = c0.selectbox(
+        "Universe", list(restr.UNIVERSES),
+        index=list(restr.UNIVERSES).index(cfg.factor.universe),
+        help="Which slice of the NSE may be ranked. 'all' is what every "
+             "recorded number describes; 'nifty500' is a fact today but "
+             "LOOK-AHEAD in any backtest.")
+    cfg.factor.universe = universe
 
     pot = c1.number_input(
         "Factor pot (₹)", min_value=0.0, step=25_000.0,
@@ -121,7 +130,7 @@ def _controls(cfg, p) -> None:
         help="Headlines for the picks. Context for you — it cannot reorder "
              "the ranking.")
 
-    if c1.button("Run scan", type="primary", width="stretch"):
+    if c0.button("Run scan", type="primary", width="stretch"):
         _run(cfg, with_news)
 
 
@@ -184,6 +193,10 @@ def _context(scan, p) -> None:
     c2.metric("Eligible today", f"{scan.eligible:,}",
               help="passed price, history and turnover gates")
     c3.metric("As of", str(scan.as_of))
+
+    if scan.universe_key != "all":
+        banner(f"<b>Universe: {html.escape(scan.universe_key)}.</b> "
+               f"{html.escape(scan.universe_note)}", p.series_1, "▤")
 
     if scan.regime.known:
         accent = p.series_1 if scan.regime.above else p.warning
@@ -272,7 +285,7 @@ def _concentration(scan, p) -> None:
     ticket you cannot fill is a return you did not get.
     """
     outside = sum(1 for x in scan.picks if x.index_band.startswith("Outside"))
-    if not scan.picks or not outside:
+    if not scan.picks or not outside or scan.universe_key != "all":
         return
     banner(
         f"<b>{outside} of {len(scan.picks)} picks sit outside the Nifty "

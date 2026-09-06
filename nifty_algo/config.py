@@ -1302,6 +1302,17 @@ class FactorConfig:
     top_n: int = 20
     #: One of `factor.universe.BANDS`.
     band: str = "all"
+
+    #: Which slice of the NSE may be ranked - `factor.restriction.UNIVERSES`.
+    #:
+    #: "all" IS THE ONLY VALUE EVERY RECORDED NUMBER DESCRIBES. `nifty500`
+    #: applied to a backtest is LOOK-AHEAD: today's membership can only ever
+    #: hold companies that grew INTO the index, which is selection on the
+    #: outcome and flatters hard. `size500` is the control - top 500 by
+    #: point-in-time size, whose error is share issuance rather than hindsight -
+    #: and the gap between the two is the size of the look-ahead. Live, none of
+    #: this applies: today's membership is a fact today.
+    universe: str = "all"
     #: One of `factor.momentum.FORMATIONS`.
     formation: str = "mom12_1"
     #: Months between rebalances. 1 is monthly, 3 quarterly.

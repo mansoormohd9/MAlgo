@@ -46,6 +46,7 @@ from ..swing.universe import Stock
 from . import backtest as fb
 from . import membership as mb
 from . import momentum as mom
+from . import restriction as restr
 from .universe import BANDS, FactorUniverse, month_ends
 
 #: The two windows, together, always. Percentages are CAGR; the drawdown is on
@@ -163,6 +164,9 @@ class SleeveScan:
     #: Which liquidity band `eligible_at` was asked for. On the row so a page
     #: full of micro caps says WHY it is a page full of micro caps.
     band: str = "all"
+    #: Which slice of the NSE was rankable, and the one-line reason.
+    universe_key: str = "all"
+    universe_note: str = ""
 
     holdings_available: bool = False
     holdings_note: str = "not read"
@@ -357,15 +361,25 @@ def scan(cfg: Config, bars: dict, benchmark=None, today: date | None = None,
     market = markets_mod.factor_market(cfg)
     universe = universe or FactorUniverse(bars, adv_window=fcfg.adv_window)
 
+    # The SAME resolver the backtest uses. Live there is no look-ahead in a
+    # published membership list - today's constituents are a fact today - but
+    # the code path is shared so the two cannot drift into different universes
+    # while quoting each other's numbers.
+    restrict_fn, universe_note = restr.resolver(
+        cfg, fcfg.universe, bars, universe)
+    restrict = restrict_fn(today)
+
     elig = universe.eligible_at(today, fcfg.min_price, fcfg.min_turnover_inr,
-                                fcfg.min_history_sessions, fcfg.band)
+                                fcfg.min_history_sessions, fcfg.band,
+                                restrict_to=restrict)
     scores = mom.score_universe(universe, elig.symbols, today, fcfg.formation)
 
     out = SleeveScan(
         as_of=today, universe_size=len(universe.symbols),
         eligible=len(elig.symbols), rejections=dict(elig.rejections),
         pot_inr=cfg.capital.capital_inr(market.capital_pool),
-        top_n=fcfg.top_n, band=fcfg.band)
+        top_n=fcfg.top_n, band=fcfg.band, universe_key=fcfg.universe,
+        universe_note=universe_note)
 
     out.next_rebalance, out.is_rebalance_day, out.sessions_to_rebalance = (
         rebalance_calendar(universe, fcfg.hold_months, today))
@@ -598,6 +612,7 @@ def report(scan_result: SleeveScan, actions: list) -> str:
                      f"({s.sessions_to_rebalance} sessions away) - everything "
                      f"below is PROVISIONAL and should not be traded")
 
+    lines.append(f"  universe: {s.universe_note}")
     lines.append(f"  regime: {s.regime.note}")
     lines.append(f"  {s.membership_note}")
     lines.append(f"  {s.holdings_note}")
@@ -625,7 +640,7 @@ def report(scan_result: SleeveScan, actions: list) -> str:
             f"{(int(p.held_qty) if p.is_held else 0):>6}{pnl:>8}")
 
     outside = sum(1 for p in s.picks if p.index_band.startswith("Outside"))
-    if outside:
+    if outside and s.universe_key == "all":
         lines += [
             "",
             f"  {outside} of {len(s.picks)} picks sit OUTSIDE THE NIFTY 500. "
@@ -685,6 +700,9 @@ def _main() -> int:                                        # pragma: no cover
     p.add_argument("--regime-ma", type=int, default=50,
                    help="report the regime gate's state; 0 to hide it")
     p.add_argument("--cache", default="", help="read a different parquet")
+    p.add_argument("--universe", default=None,
+                   choices=list(restr.UNIVERSES),
+                   help="which slice of the NSE may be ranked")
     p.add_argument("--asof", default=None, help="YYYY-MM-DD, for replay")
     p.add_argument("--no-holdings", action="store_true")
     args = p.parse_args()
@@ -698,6 +716,8 @@ def _main() -> int:                                        # pragma: no cover
         cfg.capital.factor_capital_inr = args.capital
     if args.cache:
         cfg.factor.cache_name = args.cache
+    if args.universe:
+        cfg.factor.universe = args.universe
     cfg.factor.halal_screened = args.halal
     cfg.factor.regime_ma_days = args.regime_ma
 

@@ -1,0 +1,71 @@
+=== FETCH DONE ===
+
+fetched 2,433; usable 2,077; classified 2,064
+369 names have NO Yahoo classification - the activity screen cannot run on those, and an unclassifiable name is a REJECT rather than a pass.
+cached in data\cache\fundamentals.json
+exit=0
+
+=== F4 2016-2026 ===
+2,437 symbols
+halal screen ON - 2,434 names have verdicts
+  [all] all listed NSE equity (as tested)
+  [nifty500] nifty500: 501 names from TODAY'S published list. In a backtest this is LOOK-AHEAD - it can only hold companies that grew into the index.
+  [size500] size500: top 500 by point-in-time size, from 1,953 names with a market cap; 484 excluded for having none.
+
+ran 3 arms in 4s
+
+F4 - universe restriction, screened, 2016-09-30 -> 2026-09-04, 121 marks
+
+  universe         CAGR   maxDD  recov   turn  trades  avg names  eligible
+  all           +18.01%  -47.9%    36m    57%   1,270       17.7       924
+  nifty500      +31.29%  -32.9%    24m    39%     859       17.3       374
+  size500       +17.60%  -48.6%    34m    50%   1,143       17.7       431
+
+  restriction costs: nifty500 +13.28pp, size500 -0.41pp against all
+  LOOK-AHEAD ESTIMATE: nifty500 - size500 = +13.69pp of CAGR
+
+  `nifty500` uses TODAY'S membership, so it may only hold companies that grew INTO the
+  index - selection on the outcome. `size500` ranks by point-in-time size instead, so
+  its error is share issuance rather than hindsight. The gap between them is how much
+  of the restricted result is illusion. Plan against `size500`, not against `nifty500`.
+
+  Both still inherit the standing distortions: the symbol list is TODAY'S listed set
+  (survivorship, one way), and with the screen on the balance sheets are today's too.
+
+  AND THE CONTROL IS NOT CLEAN EITHER, just cleaner. `size500` prices a 2008 rebalance
+  with a share count measured in 2026, so a company that has diluted heavily has its past
+  size overstated - and growth names dilute most. The look-ahead figure above is a LOWER
+  bound on the real one.
+
+=== F4 2005-2016 ===
+2,433 symbols
+halal screen ON - 2,434 names have verdicts
+  [all] all listed NSE equity (as tested)
+  [nifty500] nifty500: 501 names from TODAY'S published list. In a backtest this is LOOK-AHEAD - it can only hold companies that grew into the index.
+  [size500] size500: top 500 by point-in-time size, from 1,952 names with a market cap; 481 excluded for having none.
+
+ran 3 arms in 4s
+
+F4 - universe restriction, screened, 2005-09-30 -> 2016-08-31, 132 marks
+
+  universe         CAGR   maxDD  recov   turn  trades  avg names  eligible
+  all           +13.76%  -74.8%    77m    43%   1,068       16.9       322
+  nifty500      +19.14%  -66.3%    57m    37%     921       17.0       196
+  size500       +13.55%  -74.3%    79m    42%   1,054       17.1       233
+
+  restriction costs: nifty500 +5.38pp, size500 -0.22pp against all
+  LOOK-AHEAD ESTIMATE: nifty500 - size500 = +5.59pp of CAGR
+
+  `nifty500` uses TODAY'S membership, so it may only hold companies that grew INTO the
+  index - selection on the outcome. `size500` ranks by point-in-time size instead, so
+  its error is share issuance rather than hindsight. The gap between them is how much
+  of the restricted result is illusion. Plan against `size500`, not against `nifty500`.
+
+  Both still inherit the standing distortions: the symbol list is TODAY'S listed set
+  (survivorship, one way), and with the screen on the balance sheets are today's too.
+
+  AND THE CONTROL IS NOT CLEAN EITHER, just cleaner. `size500` prices a 2008 rebalance
+  with a share count measured in 2026, so a company that has diluted heavily has its past
+  size overstated - and growth names dilute most. The look-ahead figure above is a LOWER
+  bound on the real one.
+ALLDONE

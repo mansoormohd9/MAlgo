@@ -46,6 +46,27 @@ def _world():
             for i in range(12)}
 
 
+@pytest.fixture(autouse=True)
+def _restore_config():
+    """
+    Put the shared config back after every test in this file.
+
+    `ui.state.get_config()` returns the module-level `DEFAULT` itself, so a
+    control on this page writes to the object every other test reads. Leaving
+    `universe="nifty500"` behind would make some later test fail for a reason
+    it has nothing to do with - which is precisely the failure mode
+    `test_auth.py` already inflicts on `test_portfolio_connectors.py` through
+    `os.environ`. One leak of that kind in the suite is one too many.
+    """
+    from nifty_algo.config import DEFAULT
+    f, c = DEFAULT.factor, DEFAULT.capital
+    saved = (f.universe, f.halal_screened, f.regime_ma_days,
+             c.factor_capital_inr)
+    yield
+    (f.universe, f.halal_screened, f.regime_ma_days,
+     c.factor_capital_inr) = saved
+
+
 @pytest.fixture
 def page(monkeypatch):
     """The page with bars stubbed, holdings unread, and the pot funded."""
@@ -138,3 +159,49 @@ def test_the_page_never_offers_a_stop_loss_control(page):
                       list(page.number_input) + list(page.slider) +
                       list(page.toggle) + list(page.selectbox)).lower()
     assert "stop" not in labels
+
+
+def test_the_universe_selector_reaches_the_scan(page, monkeypatch):
+    """
+    The selector is the control the mandate runs through, so it has to arrive
+    at `eligible_at` rather than merely render. Stubbing the resolver proves
+    the page's choice is what the scan restricts on - and that a restricted
+    book actually comes back smaller.
+    """
+    from nifty_algo.factor import restriction as restr
+
+    seen = {}
+
+    def _fake(cfg, key, bars, universe, root="."):
+        seen["key"] = key
+        return restr.static({"WIN04", "WIN05", "WIN06"}), f"stubbed {key}"
+
+    monkeypatch.setattr(restr, "resolver", _fake)
+    page.selectbox[0].set_value("nifty500").run()
+    page.number_input[0].set_value(500_000.0).run()
+    next(b for b in page.button if "Run scan" in b.label).click().run()
+    assert not page.exception
+
+    assert seen["key"] == "nifty500"
+    scan = page.session_state["factor_sleeve_scan"]
+    assert scan.universe_key == "nifty500"
+    assert {p.symbol for p in scan.picks} <= {"WIN04", "WIN05", "WIN06"}
+    assert "stubbed" in _text(page)
+
+
+def test_the_micro_cap_warning_is_suppressed_once_restricted(page, monkeypatch):
+    """
+    "17 of 20 picks sit outside the Nifty 500" is the right warning for the
+    unrestricted book and a lie once a universe key is on - the picks are
+    inside it by construction.
+    """
+    from nifty_algo.factor import restriction as restr
+    monkeypatch.setattr(
+        restr, "resolver",
+        lambda cfg, key, bars, uni, root=".": (
+            restr.static({"WIN04", "WIN05", "WIN06"}), "stubbed"))
+    page.selectbox[0].set_value("nifty500").run()
+    page.number_input[0].set_value(500_000.0).run()
+    next(b for b in page.button if "Run scan" in b.label).click().run()
+    assert not page.exception
+    assert "sit outside the Nifty 500" not in _text(page)

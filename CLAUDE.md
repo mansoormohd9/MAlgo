@@ -25,6 +25,8 @@ python -m nifty_algo.factor.sleeve --capital 500000         # what the sleeve wa
 python -m nifty_algo.factor.membership --refresh            # Nifty 50/500 constituent lists from NSE
 python scripts/fetch_factor_fundamentals.py --shortlist 60  # balance sheets for every name ever shortlisted (~35 min)
 python scripts/run_f3_screened.py                           # F3: what does the halal screen cost the sleeve? (~5s)
+python scripts/run_f4_universe.py                           # F4: what does a Nifty 500 restriction cost, and how much of it is look-ahead? (~10s)
+python -m nifty_algo.factor.sleeve --universe nifty500 --halal --capital 500000  # the restricted book, live
 python scripts/run_s1_swing_null.py --seeds 40 --years 6 --capital 200000  # S1: does the swing book beat chance? (~55 min)
 python -m nifty_algo.intraday_equity.signal_grid --horizon sessions   # E6: do intraday signals predict DAYS? (~40 min)
 python -m nifty_algo.research macro --market india          # macro fact pack; --json is what a skill reads
@@ -37,7 +39,7 @@ python scripts/fetch_history.py         # real 5m NIFTY history (resumable)
 python scripts/fetch_vix.py             # India VIX, for SYNTHETIC_PREMIUM backtests
 ```
 
-Tests (933: 927 passing, 5 skipped, 1 failing only while you are logged in to Kite - see below; pytest, `pythonpath = . tests` so `nifty_algo` and the conftest helpers both import without an install step):
+Tests (951: 945 passing, 5 skipped, 1 failing only while you are logged in to Kite - see below; pytest, `pythonpath = . tests` so `nifty_algo` and the conftest helpers both import without an install step):
 
 ```bash
 pytest                                                     # the only run that counts as done
@@ -793,6 +795,61 @@ there.
 states, and an incomplete snapshot marks every action "[holdings unverified]" -
 because an empty list read as "you hold nothing" turns a fully invested book into
 twenty BUYs, the single most expensive mistake this page could make.
+
+## F4: the Nifty 500 restriction is FREE, and its apparent benefit is hindsight
+
+The live sleeve's top 20 was 17 names outside the Nifty 500, one trading Rs 2.5
+cr a day. [factor/restriction.py](nifty_algo/factor/restriction.py) makes the
+universe a lever, and `scripts/run_f4_universe.py` measures it three ways
+because measuring it ONE way produces a spectacular lie.
+
+| window | `all` | `nifty500` | `size500` (control) | look-ahead |
+| --- | --- | --- | --- | --- |
+| 2016-2026 | +18.01% / -47.9% | **+31.29% / -32.9%** | +17.60% / -48.6% | **+13.69pp** |
+| 2005-2016 | +13.76% / -74.8% | **+19.14% / -66.3%** | +13.55% / -74.3% | **+5.59pp** |
+
+**RESTRICTING TO TODAY'S NIFTY 500 APPEARS TO ADD 13pp OF CAGR AND HALVE THE
+DRAWDOWN. Almost all of it is hindsight.** Today's membership applied to 2016
+can only hold companies that GREW INTO the index - selection on the outcome,
+which is worse than the plain survivorship bias `factor/universe.py` documents
+because survivorship removes losers while this also pre-selects winners.
+
+**The control is a point-in-time size rank**, because the Nifty 500 selects on
+free-float market cap: today's implied share count (`market_cap` over today's
+close) applied to each date's own close, top 500 per rebalance. Its error is
+share ISSUANCE - mechanical, and it does not know whether a company later joined
+an index. On that control the restriction costs **-0.41pp and -0.22pp**: free,
+and it buys nothing. **The drawdown relief is hindsight too** - `size500` draws
+down -48.6% and -74.3%, indistinguishable from unrestricted.
+
+**So the answer to "what if I have to be in the Nifty 500" is: do it, it is
+free.** Trade it for the mandate and for fillability - the restricted book runs
+Rs 22-814 cr a day - but expect `size500`'s return and `size500`'s drawdown, not
+the +31% the naive backtest reports. The planning drawdown stays 78.5%.
+
+**TURNOVER RANK IS NOT A PROXY FOR INDEX MEMBERSHIP.** CUPID passes
+`band="liquid"` - its turnover blew out WITH the momentum, Rs 774 cr a day on a
+micro cap - so any liquidity stand-in readmits exactly the names a size mandate
+excludes. Size and traded value are different facts.
+
+**THE RESTRICTION IS A CALLABLE, NOT A SET.** `size500` is a different set every
+rebalance; passing `run()` one set computed over the whole history would be
+look-ahead arriving through the back door. `restriction.compose` intersects it
+with `listed_only` so a universe key cannot silently override the survivorship
+bound.
+
+**THE CONTROL IS NOT CLEAN EITHER, just cleaner - and it was wrong twice before
+it was right.** First it was built only from names that had ever reached the top
+60, i.e. pre-selected on the outcome it exists to be independent of; that was
+worth 2.8pp on the 2016-2026 window (+2.38pp before the full-universe fetch,
+-0.41pp after). Second, it prices a 2008 rebalance with a share count measured
+in 2026, so heavy diluters have their past size overstated and growth names
+dilute most. Every look-ahead figure it produces is therefore a LOWER bound.
+
+**`universe` defaults to `"all"`** so every recorded F1/F2/F3 number reproduces
+byte-identically, and `test_no_restriction_is_byte_identical_to_the_old_book`
+pins it. Live, none of the look-ahead applies: today's membership is a fact
+today, which is why the page offers the selector at all.
 
 ## Holdings, and the research briefings built on them
 

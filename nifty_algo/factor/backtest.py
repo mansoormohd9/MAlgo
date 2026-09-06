@@ -46,6 +46,7 @@ import numpy as np
 
 from ..swing.costs_equity import DEFAULT_EQUITY_COSTS
 from . import momentum as mom
+from . import restriction as _restriction
 from .universe import FactorUniverse, month_ends
 
 CAVEATS = """\
@@ -376,7 +377,8 @@ def run(bars: dict, starting_capital: float, top_n: int = 20,
         regime_ma_days: int = 0,
         benchmark=None,
         halal_ok=None,
-        halal_shortlist: int = 60) -> FactorResult:
+        halal_shortlist: int = 60,
+        restrict_fn=None) -> FactorResult:
     """
     Replay the sleeve month by month.
 
@@ -414,7 +416,15 @@ def run(bars: dict, starting_capital: float, top_n: int = 20,
     # then silently reproduces the baseline to four decimal places, which is
     # exactly what it did before this was fixed.
     anchor = listed_before or dates[0]
-    restrict = universe.listed_before(anchor) if listed_only else None
+    # `restrict_fn` is a CALLABLE, not a set, because a size-ranked universe is
+    # a different set on every rebalance - handing this one set computed over
+    # the whole history would be look-ahead arriving through the back door.
+    # The two compose by intersection so a universe key cannot silently
+    # override the survivorship bound.
+    restrict_by_day = _restriction.compose(
+        _restriction.static(universe.listed_before(anchor))
+        if listed_only else None,
+        restrict_fn)
     rng = np.random.default_rng(seed) if seed is not None else None
     regime_ok = _regime_gate(benchmark, regime_ma_days)
     if regime_ma_days > 0 and regime_ok is None:
@@ -433,6 +443,8 @@ def run(bars: dict, starting_capital: float, top_n: int = 20,
         if progress:
             progress(n, len(dates), day)
 
+        restrict = (restrict_by_day(day) if restrict_by_day is not None
+                    else None)
         elig = universe.eligible_at(day, min_price, min_turnover,
                                     min_history, band, restrict_to=restrict)
         for reason, count in elig.rejections.items():
