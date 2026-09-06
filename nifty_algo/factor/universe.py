@@ -64,9 +64,30 @@ class SymbolDaily:
     dates: list
     closes: np.ndarray
     turnover: np.ndarray
+    #: Wilder ATR, or None when nothing asked for it. Optional because it is a
+    #: third full-length array over ~2,400 symbols and every result recorded
+    #: before F5 was produced without it - a universe that silently grew 50%
+    #: in memory for every caller would be a cost nobody asked for.
+    atr: np.ndarray | None = None
 
     def count_before(self, day: date) -> int:
         return bisect_left(self.dates, day)
+
+    def atr_before(self, day: date) -> float | None:
+        """
+        The last ATR reading STRICTLY BEFORE `day`.
+
+        Same `< day` discipline as every other accessor here: a stop distance
+        computed from the bar it is about to trade on is look-ahead, and it
+        would produce a better curve with no error anywhere.
+        """
+        if self.atr is None:
+            return None
+        k = self.count_before(day)
+        if k <= 0:
+            return None
+        value = float(self.atr[k - 1])
+        return value if np.isfinite(value) and value > 0 else None
 
 
 @dataclass
@@ -95,8 +116,10 @@ class FactorUniverse:
     be look-ahead is READING one, which `count_before` prevents by construction.
     """
 
-    def __init__(self, bars: dict, adv_window: int = 60):
+    def __init__(self, bars: dict, adv_window: int = 60,
+                 atr_window: int = 0):
         self.adv_window = adv_window
+        self.atr_window = atr_window
         self.symbols: dict[str, SymbolDaily] = {}
         for symbol, frame in bars.items():
             if frame is None or frame.empty or "close" not in frame:
@@ -109,7 +132,8 @@ class FactorUniverse:
                 dates=[t.date() if hasattr(t, "date") else t
                        for t in frame.index],
                 closes=closes,
-                turnover=closes * volume)
+                turnover=closes * volume,
+                atr=(_atr(frame, atr_window) if atr_window else None))
 
     def first_bar(self, symbol: str) -> date | None:
         sd = self.symbols.get(symbol)
@@ -200,6 +224,36 @@ class FactorUniverse:
         if i >= len(sd.dates) or sd.dates[i] != day:
             return None
         return float(sd.closes[i])
+
+
+def _atr(frame, window: int) -> np.ndarray:
+    """
+    Wilder's ATR over `window` sessions, as a plain array.
+
+    TRUE RANGE NEEDS HIGH AND LOW, and a close-to-close proxy would understate
+    it on exactly the gapping small caps this book holds - which would make an
+    ATR stop tighter than it looks and fire more than intended. A frame with no
+    high/low falls back to the close-to-close range rather than pretending,
+    and the fallback is the pessimistic direction for a stop study: it makes
+    the stop wider, so it cannot manufacture a firing.
+    """
+    close = frame["close"].to_numpy(dtype=float)
+    if "high" in frame and "low" in frame:
+        high = frame["high"].to_numpy(dtype=float)
+        low = frame["low"].to_numpy(dtype=float)
+    else:
+        high = low = close
+    prev = np.concatenate([[close[0]], close[:-1]])
+    tr = np.maximum(high - low,
+                    np.maximum(np.abs(high - prev), np.abs(low - prev)))
+    out = np.full(len(tr), np.nan, dtype=float)
+    if len(tr) < window or window <= 0:
+        return out
+    # Wilder smoothing, seeded on the first full window.
+    out[window - 1] = float(np.mean(tr[:window]))
+    for i in range(window, len(tr)):
+        out[i] = (out[i - 1] * (window - 1) + tr[i]) / window
+    return out
 
 
 def month_ends(sessions: list, hold_months: int = 1) -> list:

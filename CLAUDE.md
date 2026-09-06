@@ -27,6 +27,8 @@ python scripts/fetch_factor_fundamentals.py --shortlist 60  # balance sheets for
 python scripts/run_f3_screened.py                           # F3: what does the halal screen cost the sleeve? (~5s)
 python scripts/run_f4_universe.py                           # F4: what does a Nifty 500 restriction cost, and how much of it is look-ahead? (~10s)
 python -m nifty_algo.factor.sleeve --universe nifty500 --halal --capital 500000  # the restricted book, live
+# F5 (the ATR trail) has no CLI of its own - it is `trail_atr_multiple` on
+# `factor.backtest.run`, and it lost. See "F5" below before asking for a stop.
 python scripts/run_s1_swing_null.py --seeds 40 --years 6 --capital 200000  # S1: does the swing book beat chance? (~55 min)
 python -m nifty_algo.intraday_equity.signal_grid --horizon sessions   # E6: do intraday signals predict DAYS? (~40 min)
 python -m nifty_algo.research macro --market india          # macro fact pack; --json is what a skill reads
@@ -39,7 +41,7 @@ python scripts/fetch_history.py         # real 5m NIFTY history (resumable)
 python scripts/fetch_vix.py             # India VIX, for SYNTHETIC_PREMIUM backtests
 ```
 
-Tests (970: 965 passing, 5 skipped; pytest, `pythonpath = . tests` so `nifty_algo` and the conftest helpers both import without an install step):
+Tests (977: 972 passing, 5 skipped; pytest, `pythonpath = . tests` so `nifty_algo` and the conftest helpers both import without an install step):
 
 ```bash
 pytest                                                     # the only run that counts as done
@@ -904,6 +906,57 @@ which three unrelated tests failed because `get_config()` applied them.
 `settings_store.save` binds `DEFAULT_PATH` as a default argument at import, so
 patching the module constant does not redirect it; the seam that works is the
 page's own `save_settings` reference.
+
+## F5: an ATR trail is the same crash insurance, and it is not free
+
+A per-name trailing stop is the most-requested thing this sleeve does not have,
+so it was measured rather than argued about: Wilder ATR(14), armed at every
+rebalance, ratcheted daily, never loosened, on the Nifty 500 + halal book.
+
+| trail | 2016-2026 | 2005-2016 |
+| --- | --- | --- |
+| none | +31.29% / -32.9% | +19.14% / -66.3% |
+| 3x ATR | +19.56% / -31.4% (**-11.73pp**) | +14.96% / -57.4% (-4.18pp) |
+| 4x ATR | +24.93% / -28.0% (-6.36pp) | +16.22% / -62.5% (-2.92pp) |
+| 6x ATR | +28.09% / -32.0% (-3.20pp) | +17.71% / -65.9% (-1.43pp) |
+
+**IT FAILS F2's GATE ON BOTH WINDOWS.** The best drawdown relief anywhere is
+8.9pp (3x ATR on the crash window, which also cuts recovery from 57 to 36
+months) - short of the 10pp the gate asks - and the SAME setting costs 11.73pp
+for 1.5pp of drawdown on the calm decade. That is the crash-insurance shape F2
+already found for the regime gate, arriving by a different route.
+
+**THE RELATIONSHIP IS MONOTONIC, WHICH IS WHY NO MULTIPLE RESCUES IT.** Fixed
+percentage stops on the same book trace the identical curve - 5% costs 10.7pp
+and fires 992 times over 121 rebalances, 25% costs 1.3pp and fires 47 - and the
+drawdown barely moves along any of it. **A 5% stop measured from entry makes the
+drawdown WORSE**, -39.9% against -32.9%, because it sells low and re-buys
+higher. The mechanism is the one F2 named: a book that re-ranks monthly buys
+back most of what a stop sold, so a stop is a delay that pays two round trips.
+
+**Turnover is the tell.** 39% -> 110% at a 5% stop, 39% -> 126% at 2x ATR. The
+sleeve's edge over a random-scoring null exists partly BECAUSE it turns 0.56x
+per rebalance against the null's 1.75x; a tight stop turns it INTO the null.
+
+**SO THE CONSOLE FLAGS AND NEVER SELLS.** `sleeve.review()` returns `Flag`
+objects - drawdown against what you paid, a break of the level a trail would
+have fired at, a halal verdict that changed, a news hit - ordered most-serious
+first, rendered in the "Between rebalances" panel, and carrying no quantity by
+construction. A flag costs nothing and can see the thing a stop cannot: a
+company that has stopped being the company you bought. The `atr` row prints the
+level the measured-unprofitable rule would have sold at, labelled as
+information rather than as a recommendation.
+
+**AND THE OPERATIONAL PATH WOULD HAVE BEEN WORSE THAN THE ARITHMETIC.** Without
+DDPI every delivery sell needs a CDSL TPIN authorisation valid for ONE trading
+day, and Kite still displays a stale GTT as active - so a trailing stop
+maintained by daily re-authorisation is precisely the "looks armed and is not"
+failure `kite_equity.protection_state()` exists to prevent.
+
+**`trail_atr_multiple` and `atr_window` default to None/0**, and the ATR array
+is not even allocated unless asked for - a third full-length array over 2,400
+symbols is a cost nobody asked for, and every F1-F4 number reproduces
+byte-identically without it.
 
 ## Holdings, and the research briefings built on them
 

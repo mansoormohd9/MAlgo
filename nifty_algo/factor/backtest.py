@@ -79,6 +79,13 @@ class Position:
     shares: int
     entry_price: float
     entry_day: date
+    #: The trailing stop level in rupees, or None until a trail arms it.
+    #:
+    #: A RATCHET, exactly as `ExitLadder` is: it only ever rises. A stop that
+    #: can loosen is not a stop - it is a number that follows the price down
+    #: and sells at the bottom anyway.
+    trail_stop: float | None = None
+
     #: What `stop_pct` measures from. Separate from `entry_price` because
     #: `_mark` falls back to `entry_price` for a name that stopped trading,
     #: and refreshing THAT every rebalance would quietly re-value the book.
@@ -378,7 +385,8 @@ def run(bars: dict, starting_capital: float, top_n: int = 20,
         benchmark=None,
         halal_ok=None,
         halal_shortlist: int = 60,
-        restrict_fn=None) -> FactorResult:
+        restrict_fn=None,
+        trail_atr_multiple: float | None = None) -> FactorResult:
     """
     Replay the sleeve month by month.
 
@@ -565,10 +573,23 @@ def run(bars: dict, starting_capital: float, top_n: int = 20,
         # Runs AFTER the mark, so the equity curve is still sampled at
         # month-ends only and its drawdown stays comparable, arm to arm, with
         # every factor result this repo has already published.
-        if stop_pct and held:
+        if (stop_pct or trail_atr_multiple) and held:
             if stop_basis == "rebalance":
                 for symbol, pos in held.items():
                     pos.basis_price = _mark(universe, symbol, day, pos)
+            # ARM THE TRAIL AT THE MARK, AND LET IT ONLY RISE. Re-seeding it
+            # to `mark - k*ATR` every month unconditionally would LOOSEN a
+            # stop that had already ratcheted up on a winner, which is the one
+            # thing a trailing stop may never do - `ExitLadder` has the same
+            # rule for the same reason.
+            if trail_atr_multiple:
+                for symbol, pos in held.items():
+                    atr = universe.symbols[symbol].atr_before(day)                         if symbol in universe.symbols else None
+                    if atr is None:
+                        continue
+                    level = _mark(universe, symbol, day, pos) -                         trail_atr_multiple * atr
+                    if pos.trail_stop is None or level > pos.trail_stop:
+                        pos.trail_stop = level
             # Sessions AFTER the final rebalance are never marked again, so
             # trading them would spend charges and move `contribution` in a
             # stretch the equity curve cannot see. The interval is empty by
@@ -581,7 +602,9 @@ def run(bars: dict, starting_capital: float, top_n: int = 20,
                 for symbol in sorted(held):
                     pos = held[symbol]
                     price, split = _stop_price(universe, symbol, sd)
-                    if price is None or pos.basis_price <= 0:
+                    if price is None:
+                        continue
+                    if not trail_atr_multiple and pos.basis_price <= 0:
                         continue
                     if split is not None:
                         # Carry the basis through the corporate action rather
@@ -589,8 +612,19 @@ def run(bars: dict, starting_capital: float, top_n: int = 20,
                         # a resting stop and what keeps the NEXT session from
                         # firing on a price that only looks like a collapse.
                         pos.basis_price *= split
+                        if pos.trail_stop is not None:
+                            pos.trail_stop *= split
                         continue
-                    if price > pos.basis_price * (1.0 - stop_pct):
+
+                    if trail_atr_multiple:
+                        atr = universe.symbols[symbol].atr_before(sd)
+                        if atr is not None:
+                            level = price - trail_atr_multiple * atr
+                            if pos.trail_stop is None or level > pos.trail_stop:
+                                pos.trail_stop = level      # ratchet, never down
+                        if pos.trail_stop is None or price > pos.trail_stop:
+                            continue
+                    elif price > pos.basis_price * (1.0 - stop_pct):
                         continue
                     del held[symbol]
                     gross = price * pos.shares

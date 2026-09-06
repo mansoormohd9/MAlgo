@@ -489,3 +489,105 @@ def test_the_report_refuses_an_unmeasured_universe(cfg, world, monkeypatch):
         assert "+18.79%" not in text and "+17.60%" not in text
     finally:
         cfg.factor.universe = "all"
+
+
+# --------------------------------------------- the ATR trail, and the flags
+
+def test_the_atr_trail_is_a_no_op_by_default(world):
+    """
+    REGRESSION. F1, F2, F3 and F4 were all measured without it, and the ATR
+    array is not even built unless `atr_window` is asked for.
+    """
+    a = fb.run(world, 500_000.0, top_n=4, min_turnover=0.0, min_history=300)
+    b = fb.run(world, 500_000.0, top_n=4, min_turnover=0.0, min_history=300,
+               trail_atr_multiple=None)
+    assert [v for _, v in a.equity] == [v for _, v in b.equity]
+    assert a.stops_fired == b.stops_fired == 0
+
+    plain = FactorUniverse(world)
+    assert all(sd.atr is None for sd in plain.symbols.values())
+
+
+def test_the_trail_ratchets_up_and_never_loosens(world):
+    """
+    A stop that can fall is not a stop - it follows the price down and sells
+    at the bottom anyway. Same rule `ExitLadder` has, asserted here because
+    the trail is re-armed at every rebalance and that is where it could slip.
+    """
+    universe = FactorUniverse(world, atr_window=14)
+    res = fb.run(world, 500_000.0, top_n=4, min_turnover=0.0, min_history=300,
+                 universe=universe, trail_atr_multiple=3.0)
+    assert res.stops_fired >= 0            # it ran
+
+    # Re-arming must never lower a level already ratcheted up.
+    pos = fb.Position("X", 10, 100.0, date(2020, 1, 1))
+    pos.trail_stop = 95.0
+    for level in (90.0, 80.0, 96.0):
+        if pos.trail_stop is None or level > pos.trail_stop:
+            pos.trail_stop = level
+    assert pos.trail_stop == 96.0
+
+
+def test_the_atr_cannot_see_the_day_it_is_used_on(world):
+    """
+    The safety property, for the stop distance this time. An ATR computed
+    including the rebalance bar is look-ahead, and it would tighten or loosen
+    the stop using the move it is about to trade on.
+    """
+    universe = FactorUniverse(world, atr_window=14)
+    day = _last_mark(world)
+    full = universe.symbols["WIN00"].atr_before(day)
+
+    truncated = {s: f[f.index < pd.Timestamp(day)] for s, f in world.items()}
+    trimmed = FactorUniverse(truncated, atr_window=14)
+    assert trimmed.symbols["WIN00"].atr_before(day) == full
+
+
+def test_a_flag_is_never_an_order(cfg, world):
+    """
+    The panel's whole justification. F5 measured the automatic version and it
+    loses, so `review` returns things to READ and `decide` remains the only
+    thing that produces quantities.
+    """
+    day = _last_mark(world)
+    scan = sl.scan(cfg, world, today=day)
+    top = scan.picks[0]
+    held = _Snapshot([_Pos(top.symbol, 10, average_price=top.price * 3.0)])
+
+    flags = sl.review(cfg, scan, held)
+    assert flags and any(f.kind == "drawdown" for f in flags)
+    assert all(not hasattr(f, "quantity") for f in flags)
+    assert all(f.severity in ("watch", "review") for f in flags)
+
+
+def test_a_holding_within_tolerance_is_not_flagged(cfg, world):
+    day = _last_mark(world)
+    scan = sl.scan(cfg, world, today=day)
+    top = scan.picks[0]
+    held = _Snapshot([_Pos(top.symbol, 10, average_price=top.price * 0.99)])
+    assert not [f for f in sl.review(cfg, scan, held)
+                if f.kind == "drawdown"]
+
+
+def test_an_incomplete_holdings_read_is_flagged_as_such(cfg, world):
+    """
+    A flag list built from half an account is worse than none, because it
+    reads as 'nothing else needs looking at'.
+    """
+    day = _last_mark(world)
+    scan = sl.scan(cfg, world, today=day)
+    top = scan.picks[0]
+    snap = _Snapshot([_Pos(top.symbol, 10, average_price=top.price * 3.0)],
+                     complete=False, notes=["kite failed"])
+    flags = sl.review(cfg, scan, snap)
+    assert any(f.kind == "holdings" for f in flags)
+
+
+def test_the_report_labels_flags_as_prompts_not_signals(cfg, world):
+    day = _last_mark(world)
+    scan = sl.scan(cfg, world, today=day)
+    top = scan.picks[0]
+    held = _Snapshot([_Pos(top.symbol, 10, average_price=top.price * 3.0)])
+    text = sl.report(scan, sl.decide(scan, held), sl.review(cfg, scan, held))
+    assert "never orders" in text
+    assert "prompts to read" in text

@@ -32,6 +32,7 @@ from .theme import get_palette
 _SCAN_KEY = "factor_sleeve_scan"
 _ACTIONS_KEY = "factor_sleeve_actions"
 _HOLDINGS_KEY = "factor_sleeve_holdings"
+_FLAGS_KEY = "factor_sleeve_flags"
 
 
 def render() -> None:
@@ -74,6 +75,7 @@ def render() -> None:
     for pick in scan.picks:
         _pick_card(pick, scan, p)
     _call(scan, p)
+    _review(cfg, scan, p)
     _screened_out(scan, p)
     _caveats(scan, p)
 
@@ -178,6 +180,7 @@ def _run(cfg, with_news: bool) -> None:
     st.session_state[_SCAN_KEY] = scan
     st.session_state[_HOLDINGS_KEY] = holdings
     st.session_state[_ACTIONS_KEY] = sl.decide(scan, holdings)
+    st.session_state[_FLAGS_KEY] = sl.review(cfg, scan, holdings)
     # Saved HERE rather than on every widget touch, so what persists is the
     # configuration that actually produced a scan rather than a half-typed
     # pot. A console opened once a month should come back configured.
@@ -431,6 +434,44 @@ def _call(scan, p) -> None:
            "you execute it yourself in Kite. Going live on a third book is a "
            "separate decision from building a page that describes it.",
            p.series_1, "✋")
+
+
+def _review(cfg, scan, p) -> None:
+    """
+    Between rebalances: what to LOOK at. Nothing here is an order.
+
+    The panel exists because the alternative was measured and lost. F5 ran an
+    ATR trail on this book at five multiples over two decades: it costs
+    1.2-14.7pp of CAGR and fails the drawdown gate on both windows, because a
+    monthly book re-buys what a stop sold. A flag costs nothing and can see
+    what a stop cannot - a company that stopped being the company you bought.
+    """
+    flags = st.session_state.get(_FLAGS_KEY) or []
+    st.subheader("Between rebalances")
+    if not flags:
+        st.info("Nothing flagged. That is the normal state — this book is "
+                "supposed to be left alone between rebalance dates.")
+        return
+
+    rows = [{"symbol": f.symbol, "why": f.kind, "detail": f.detail,
+             "": "look at this" if f.severity == "review" else "note"}
+            for f in flags]
+    st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+    banner(
+        "<b>These are prompts to read, not orders.</b> F5 measured the "
+        "automatic version — an ATR trail on this book, five multiples, two "
+        "decades — and it costs between 1.2 and 14.7 points of CAGR while "
+        "failing the drawdown gate on both windows, because a book that "
+        "re-ranks monthly buys back most of what a stop sold. What a stop "
+        "cannot see is a company that has stopped being the company you "
+        "bought. That is what this is for.",
+        p.warning, "◎")
+    if any(f.kind == "atr" for f in flags):
+        st.caption(
+            f"An 'atr' row is the level a {cfg.factor.review_atr_multiple:g}× "
+            f"ATR trail would have sold at. It is printed so you can see what "
+            f"the measured-unprofitable rule would have done — not as a "
+            f"recommendation to do it.")
 
 
 def _screened_out(scan, p) -> None:

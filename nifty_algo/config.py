@@ -1399,6 +1399,24 @@ class FactorConfig:
     #: strict form and the one that can actually cut a drawdown.
     stop_basis: str = "entry"
 
+    # --- F5: what gets FLAGGED between rebalances, and never traded ---
+    #: Flag a holding this far below what you paid for it.
+    #:
+    #: A FLAG IS NOT A STOP, and the distinction is the whole point. F5
+    #: measured an ATR trail on this book across five multiples and two
+    #: decades: it costs 1.2-14.7pp of CAGR and fails the drawdown gate on
+    #: both windows, because a monthly-rebalanced book re-buys what it sold.
+    #: So nothing here sells. It puts a name in front of you between
+    #: rebalances, and you decide - which is untested by construction and
+    #: honest for the same reason.
+    review_drawdown_pct: float = 0.15
+
+    #: Also flag when price falls this many ATRs below what you paid. Shown
+    #: as INFORMATION - it is the level a trail would have fired at, printed
+    #: so you can see what the measured-unprofitable rule would have done.
+    review_atr_multiple: float = 3.0
+    review_atr_window: int = 14
+
     #: Hold cash while the benchmark is below its own `n`-day moving average.
     #: 0 disables it, matching how `SwingConfig.regime_ma_days` already reads.
     #:

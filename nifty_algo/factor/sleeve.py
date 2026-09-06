@@ -628,6 +628,102 @@ def _attach_news(picks: list, cfg: Config, market, progress=None) -> None:
         p.news = results.get(p.symbol)
 
 
+# ------------------------------------------------- between rebalances
+
+@dataclass(frozen=True)
+class Flag:
+    """
+    One holding worth a human look, between rebalance dates.
+
+    NOTHING HERE SELLS ANYTHING. F5 measured the alternative: an ATR trail on
+    this book, five multiples, two decades. It costs 1.2-14.7pp of CAGR and
+    fails the drawdown gate on both windows, because a book that re-ranks
+    monthly buys back most of what a stop sold - so a stop is a delay that
+    pays two round trips. What a stop cannot see, and you can, is a company
+    that has stopped being the company you bought: a fraud, a delisting, an
+    auditor walking out. That is what this surfaces.
+    """
+    symbol: str
+    kind: str              # drawdown | atr | halal | news
+    detail: str
+    severity: str = "watch"    # watch | review
+
+
+def review(cfg: Config, scan_result: SleeveScan, holdings=None,
+           universe: FactorUniverse | None = None,
+           today: date | None = None) -> list:
+    """
+    What to look at before the next rebalance. Advice to a human, never an order.
+
+    Ordered most-serious first, and every flag says what it is FOR - a
+    drawdown flag is not evidence of anything, it is a prompt to go and read.
+    """
+    fcfg = cfg.factor
+    today = today or scan_result.as_of
+    held, available, _ = _holdings_map(holdings)
+    by_symbol = {p.symbol: p for p in scan_result.picks}
+    flags: list[Flag] = []
+
+    for symbol, pos in sorted(held.items()):
+        qty = float(getattr(pos, "quantity", 0.0) or 0.0)
+        paid = float(getattr(pos, "average_price", 0.0) or 0.0)
+        if qty <= 0 or paid <= 0:
+            continue
+        pick = by_symbol.get(symbol)
+        price = pick.price if pick else float(
+            getattr(pos, "last_price", 0.0) or 0.0)
+        if price <= 0:
+            continue
+
+        move = price / paid - 1.0
+        if move <= -abs(fcfg.review_drawdown_pct):
+            flags.append(Flag(
+                symbol, "drawdown",
+                f"{move:+.1%} against what you paid "
+                f"(Rs {paid:,.2f} -> Rs {price:,.2f}). Go and read why.",
+                "review"))
+
+        if universe is not None and fcfg.review_atr_multiple:
+            sd = universe.symbols.get(symbol)
+            atr = sd.atr_before(today) if sd is not None else None
+            if atr:
+                level = paid - fcfg.review_atr_multiple * atr
+                if price <= level:
+                    flags.append(Flag(
+                        symbol, "atr",
+                        f"below {fcfg.review_atr_multiple:g}x ATR from your "
+                        f"entry (Rs {level:,.2f}). A trail would have sold "
+                        f"here - F5 measured that rule and it costs more than "
+                        f"it saves, so this is information, not a signal.",
+                        "watch"))
+
+        if pick is not None and pick.halal is not None and not pick.halal_ok:
+            flags.append(Flag(
+                symbol, "halal",
+                f"no longer passes the screen: {pick.halal.summary}",
+                "review"))
+
+        if pick is not None and pick.news is not None:
+            n = pick.news
+            items = getattr(n, "items", []) or []
+            if getattr(n, "available", False) and items:
+                flags.append(Flag(
+                    symbol, "news",
+                    f"{len(items)} recent headline"
+                    f"{'s' if len(items) != 1 else ''} - "
+                    f"{getattr(items[0], 'title', '')[:90]}",
+                    "watch"))
+
+    order = {"review": 0, "watch": 1}
+    flags.sort(key=lambda f: (order.get(f.severity, 9), f.symbol, f.kind))
+    if not available and flags:
+        flags.append(Flag(
+            "-", "holdings",
+            "the holdings read was incomplete, so this list may be missing "
+            "positions entirely.", "review"))
+    return flags
+
+
 # --------------------------------------------------------------- the call
 
 def decide(scan_result: SleeveScan, holdings=None) -> list:
@@ -729,7 +825,7 @@ def _record_lines(universe_key: str) -> list:
     return out
 
 
-def report(scan_result: SleeveScan, actions: list) -> str:
+def report(scan_result: SleeveScan, actions: list, flags: list = ()) -> str:
     s = scan_result
     lines = ["THE MONTHLY FACTOR SLEEVE", ""]
     lines += _record_lines(s.universe_key)
@@ -807,6 +903,19 @@ def report(scan_result: SleeveScan, actions: list) -> str:
         lines.append(f"    {a.kind:<8}{a.symbol:<14}{a.qty:>8} sh  "
                      f"Rs {a.value_inr:>11,.0f}   {a.reason}")
 
+    if flags:
+        lines += ["", "  BETWEEN REBALANCES - things to LOOK at, never orders:"]
+        for f in flags:
+            mark = "!" if f.severity == "review" else " "
+            lines.append(f"   {mark} {f.symbol:<12}{f.kind:<10}{f.detail}")
+        lines += ["",
+                  "    F5 measured the automatic version - an ATR trail at "
+                  "five multiples over two",
+                  "    decades - and it costs 1.2-14.7pp of CAGR while "
+                  "failing the drawdown gate on",
+                  "    both windows. A monthly book re-buys what a stop sold. "
+                  "These are prompts to read."]
+
     lines += ["", "  What this cannot see:"]
     for c in s.caveats:
         lines.append(f"    - {c}")
@@ -876,7 +985,8 @@ def _main() -> int:                                        # pragma: no cover
                   with_news=args.news,
                   progress=lambda m: print(f"  [{m}]", flush=True))
     print()
-    print(report(result, decide(result, holdings)))
+    print(report(result, decide(result, holdings),
+                 review(cfg, result, holdings, universe=None)))
     return 0
 
 
