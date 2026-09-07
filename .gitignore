@@ -29,6 +29,15 @@ data/pytest_*.txt
 !data/ftse100.csv
 !data/etf_holdings.csv
 !data/halal_overrides.csv
+# The LIVE sleeve's bars, and the one market-data file that is committed on
+# purpose. `data/cache/` below is ignored wholesale, so a deploy - Streamlit
+# Cloud clones from GitHub - arrives with no bars and the Monthly sleeve
+# cannot scan at all. This is 400 sessions of close/volume, 6.5 MB against the
+# 62 MB full cache, and it produces a byte-identical live book. It is NOT
+# enough to backtest on, which is why only `sleeve.load_bars` falls back to
+# it and `drawdown.load` still raises. Rebuild with
+# `python -m nifty_algo.factor.deployed_bars`; the fetch script also writes it.
+!data/sleeve_bars_india.parquet
 data/cache/
 
 # Your capital pots and broker flags. Numbers about YOUR account, not about

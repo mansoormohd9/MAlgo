@@ -23,6 +23,7 @@ python -m nifty_algo.factor.verdict --seeds 500 --slippage 0.0025   # F1: is the
 python -m nifty_algo.factor.drawdown                        # F2: does ANY drawdown instrument beat holding less? (~45s)
 python -m nifty_algo.factor.sleeve --capital 500000         # what the sleeve wants THIS month, headless
 python -m nifty_algo.factor.membership --refresh            # Nifty 50/500 constituent lists from NSE
+python -m nifty_algo.factor.deployed_bars                   # rebuild the 6.5 MB slice the DEPLOYED sleeve scans on, then commit it
 python scripts/fetch_factor_fundamentals.py --shortlist 60  # balance sheets for every name ever shortlisted (~35 min)
 python scripts/run_f3_screened.py                           # F3: what does the halal screen cost the sleeve? (~5s)
 python scripts/run_f4_universe.py                           # F4: what does a Nifty 500 restriction cost, and how much of it is look-ahead? (~10s)
@@ -41,7 +42,7 @@ python scripts/fetch_history.py         # real 5m NIFTY history (resumable)
 python scripts/fetch_vix.py             # India VIX, for SYNTHETIC_PREMIUM backtests
 ```
 
-Tests (1042: 1041 passing, 1 skipped; pytest, `pythonpath = . tests` so `nifty_algo` and the conftest helpers both import without an install step). **One skip, and it is the only one that should ever be here** - `test_experiment_intraday.py:187`, a sample file too short for one fold. It used to be five: the other four were one parametrized invariant going vacuous, which is the failure mode described under **Testing conventions**:
+Tests (1043: 1042 passing, 1 skipped; pytest, `pythonpath = . tests` so `nifty_algo` and the conftest helpers both import without an install step). **One skip, and it is the only one that should ever be here** - `test_experiment_intraday.py:187`, a sample file too short for one fold. It used to be five: the other four were one parametrized invariant going vacuous, which is the failure mode described under **Testing conventions**:
 
 ```bash
 pytest                                                     # the only run that counts as done
@@ -1317,6 +1318,78 @@ mapping rather than from process-wide state.
 Until then a full run on a logged-in machine reports one failure that is not a
 regression, which is precisely the kind of noise that trains you to skim a red
 suite.
+
+## Deploying the sleeve: what ships, and what must never fall back
+
+**`data/cache/` IS GITIGNORED, SO A DEPLOY ARRIVES WITH NO MARKET DATA.**
+Streamlit Community Cloud clones from GitHub, so the Monthly sleeve reported
+
+    No factor cache at /mount/src/malgo/data/cache/factor_daily_india.parquet
+
+which was entirely correct - the file is 62 MB and stays out of git on purpose.
+The swing book survives the same clone because `prices.load_prices`
+re-downloads on a miss; the factor loader refuses to, so it hard-failed.
+
+**TWO FILES SHIP, AND THEY ARE THE ONLY COMMITTED MARKET DATA.** Both carry
+explicit `.gitignore` negations, like the universe CSVs that are source rather
+than data:
+
+| file | size | what it is |
+| --- | --- | --- |
+| `data/sleeve_bars_india.parquet` | **6.5 MB** | 400 sessions of close+volume, 2,437 symbols, benchmark included |
+| `data/sleeve_fundamentals.json` | **1.4 MB** | the balance sheets the halal screen reads |
+
+**400 sessions of close+volume is the smallest thing that scans**, and it was
+verified to produce a **byte-identical book**: same 20 symbols in the same
+order, same target quantities, same 472 eligible, momentum equal to within
+float32 rounding. The signal needs 253 sessions, the vol and 52-week figures
+253, `min_history_sessions` 300. `FactorUniverse` reads only `close` and
+`volume` - carrying OHLC would double the file to ship an ATR the live sleeve
+never computes.
+
+**THE FULL CACHE ALWAYS WINS.** `sleeve.load_bars` tries it first, so nothing
+about running locally changes and a stale slice cannot quietly replace current
+bars. `LAST_BARS_SOURCE` records which one was used and the page banners it -
+but only when it is NOT the full cache, because naming the normal case on every
+scan trains you to skip the line.
+
+**AND THE FALLBACK IS NOT IN `drawdown.load`.** That function feeds F1-F5, and
+a backtest silently running on 400 sessions would report a complete, plausible,
+badly wrong CAGR - every recorded number in this file would stop being
+reproducible with nothing to say so. The backtests keep raising when the full
+cache is absent; only the live path degrades.
+`test_the_BACKTEST_still_refuses_when_only_the_slice_exists` is the guard.
+
+**THE SCREEN NEEDED SHIPPING TOO, AND THE FAILURE WAS SILENT.** Measured on a
+fresh clone with the halal screen on: 60 shortlisted names, **60 rejected, 0
+picks**. "Cannot verify" is a reject by design, so absent balance sheets read
+as a very strict screen rather than as starving. Worse, `load_fundamentals`
+assigned the fetch result unconditionally, so **an unreachable Yahoo replaced a
+usable cached sheet with an empty one carrying an `error`** - a failed refresh
+destroyed good data. It now keeps the cached sheet unless the fetch actually
+has a balance sheet. Stale data is not the same as no data: a sheet carries
+`balance_sheet_date` so an old one is visible AS old, and nothing is visible
+about one that was thrown away. With that fix a clone with every entry stale
+and all 60 fetches failing still produces the identical 20-name book.
+
+**THE COMMITTED FUNDAMENTALS ARE NEVER MERGED with the live cache** - if the
+live cache exists at all it is used alone, or "when was this sheet read"
+becomes unanswerable per symbol. They may end up written into the live cache,
+which is harmless because the rows carry their own `fetched_at` and therefore
+persist with their true age.
+
+**Both artifacts are rebuilt by `scripts/fetch_factor_history.py`** so the
+refresh cannot be forgotten as a separate step, and by
+`python -m nifty_algo.factor.deployed_bars` when the full cache is already
+current and only the deploy needs updating. `--out` fetches skip it: those
+exist for a DIFFERENT window, and shipping those bars as the live slice would
+deploy a book nobody asked for.
+
+**`deployed_bars.load(path=None)` resolves `SLICE_PATH` at CALL time**, not as
+a default argument. A default is captured at import, so patching the module
+constant redirects nothing - the same trap `settings_store.DEFAULT_PATH`
+records, and it silently pointed two tests at the real committed slice before
+the signature changed.
 
 ## Relative data paths, and the launch directory that decided what they meant
 

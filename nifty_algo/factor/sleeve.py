@@ -1350,10 +1350,47 @@ def report(scan_result: SleeveScan, actions: list, flags: list = ()) -> str:
 
 # ------------------------------------------------------------------- CLI
 
+#: Set by `load_bars` to whichever source it actually used, so the page and
+#: the CLI can say. A module-level record rather than a return value because
+#: every caller already unpacks `(bars, benchmark)` and a third element would
+#: be silently dropped by the ones that do not want it.
+LAST_BARS_SOURCE: str = ""
+
+
 def load_bars(cfg: Config):
-    """Read-only, and never through a loader that rewrites the cache."""
+    """
+    Read-only, and never through a loader that rewrites the cache.
+
+    THE FULL CACHE WINS; THE COMMITTED SLICE IS A FALLBACK. `data/cache/` is
+    gitignored, so a deploy (Streamlit Cloud clones from GitHub) has no bars at
+    all and the sleeve could not scan. `deployed_bars` ships 400 sessions of
+    close/volume - 6.5 MB against 62 MB, and a byte-identical live book - so
+    the deployed console works. Locally nothing changes: the real cache is
+    found first and the slice is never read.
+
+    THE FALLBACK IS HERE AND NOT IN `drawdown.load` ON PURPOSE. That function
+    feeds F1-F5, and a backtest quietly running on 400 sessions would report a
+    complete, plausible, badly wrong CAGR. The backtests keep raising.
+    """
+    global LAST_BARS_SOURCE
+    from . import deployed_bars as slice_mod
     from .drawdown import load
-    return load(cfg.factor)
+
+    try:
+        bars, bench = load(cfg.factor)
+        LAST_BARS_SOURCE = "full cache"
+        return bars, bench
+    except FileNotFoundError as missing:
+        bars, bench, info = slice_mod.load()
+        if bars is None:
+            LAST_BARS_SOURCE = ""
+            raise FileNotFoundError(
+                f"{missing} There is also no deployed slice at "
+                f"{slice_mod.at_root(slice_mod.SLICE_PATH)} - build one with "
+                f"`python -m nifty_algo.factor.deployed_bars` and commit it if "
+                f"this is a deployment.") from missing
+        LAST_BARS_SOURCE = info.describe()
+        return bars, bench
 
 
 def _main() -> int:                                        # pragma: no cover

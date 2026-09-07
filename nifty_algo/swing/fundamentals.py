@@ -43,6 +43,13 @@ from ..paths import at_root
 CACHE_NAME = "fundamentals.json"
 
 
+#: Committed, so a deploy has balance sheets to screen against. `data/cache/`
+#: is gitignored, and with an empty cache the screen rejected all 60
+#: shortlisted names and produced a 0-name book. Read-only and never written
+#: to - see `_read_cache_with_fallback`.
+DEPLOYED_NAME = "data/sleeve_fundamentals.json"
+
+
 def cache_path(cfg) -> Path:
     """
     The cache file, ANCHORED TO THE REPO rather than to the working directory.
@@ -56,6 +63,35 @@ def cache_path(cfg) -> Path:
     the write can never anchor differently. See `paths.py`.
     """
     return at_root(Path(cfg.swing.cache_dir)) / CACHE_NAME
+
+
+def deployed_path() -> Path:
+    return at_root(DEPLOYED_NAME)
+
+
+def _read_cache_with_fallback(path: Path) -> dict[str, Fundamentals]:
+    """
+    The live cache, falling back to the COMMITTED copy when it is absent.
+
+    The live cache always wins - locally nothing changes. The fallback exists
+    for a clone that has no `data/cache/` at all, where the alternative is a
+    screen that rejects everything it cannot verify and reads as strict rather
+    than as starving.
+
+    NEVER MERGED. If the live cache exists at all it is used ALONE - a
+    half-populated live cache silently topped up from a committed file would
+    make "when was this balance sheet read" unanswerable per symbol.
+
+    It CAN end up written into the live cache, and that is harmless: the rows
+    carry their own `fetched_at`, so `_write_cache` persists them with their
+    true age and `_is_stale` still refetches them on schedule. Nothing here
+    makes an old sheet look new - which is the only thing that would matter.
+    """
+    live = _read_cache(path)
+    if live:
+        return live
+    return _read_cache(deployed_path())
+
 
 # Candidate Yahoo line items, best first. The first one present wins.
 _TOTAL_ASSETS = ("Total Assets",)
@@ -144,7 +180,7 @@ def load_fundamentals(stocks: Iterable, cfg, market, force_refresh: bool = False
     """
     stocks = list(stocks)
     cache_file = cache_path(cfg)
-    cache = _read_cache(cache_file)
+    cache = _read_cache_with_fallback(cache_file)
     max_age = timedelta(days=cfg.swing.fundamentals_cache_days)
 
     keyed = {s.symbol: market.qualified(s.symbol) for s in stocks}
@@ -162,7 +198,24 @@ def load_fundamentals(stocks: Iterable, cfg, market, force_refresh: bool = False
     for i, stock in enumerate(stale):
         if progress:
             progress(i, len(stale), f"fundamentals: {stock.symbol}")
-        out[stock.symbol] = _fetch_one(stock)
+        fetched = _fetch_one(stock)
+        cached = cache.get(keyed[stock.symbol])
+        # A FAILED REFRESH MUST NOT DISCARD A GOOD BALANCE SHEET.
+        #
+        # This used to assign unconditionally, so an unreachable Yahoo replaced
+        # a usable cached sheet with an empty one carrying an `error` - and the
+        # halal screen treats absent data as CANNOT VERIFY, which is a reject.
+        # Measured on a fresh clone with the network blocked: all 60
+        # shortlisted names rejected, 0 picks, presenting as a very strict
+        # screen rather than as a network failure.
+        #
+        # Stale data is not the same as no data. A balance sheet carries
+        # `balance_sheet_date`, so an old one is visible AS old wherever it
+        # surfaces; nothing is visible about a sheet that was thrown away.
+        if fetched.has_balance_sheet or cached is None:
+            out[stock.symbol] = fetched
+        else:
+            out[stock.symbol] = cached
 
     if progress and stale:
         progress(len(stale), len(stale), "fundamentals complete")
@@ -199,7 +252,7 @@ def read_cached(cfg, market) -> dict[str, Fundamentals]:
     `{market}:{SYMBOL}` on disk, bare symbol in the return value - the same
     asymmetry `load_fundamentals` documents, and for the same reason.
     """
-    cache = _read_cache(cache_path(cfg))
+    cache = _read_cache_with_fallback(cache_path(cfg))
     prefix = f"{market.key}:"
     return {key[len(prefix):]: f for key, f in cache.items()
             if key.startswith(prefix)}

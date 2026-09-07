@@ -245,6 +245,25 @@ def main(argv: list[str] | None = None) -> int:
           f"median {sizes[len(sizes) // 2]:,}  max {sizes[-1]:,}")
     print(f"benchmark: {0 if benchmark is None else len(benchmark):,} bars")
     print(f"-> {path}")
+
+    # THE DEPLOYED SLICE IS REBUILT HERE SO IT CANNOT BE FORGOTTEN. `data/cache/`
+    # is gitignored, so the deployed console has no bars unless the committed
+    # slice ships - and a slice that has to be refreshed by a separate command
+    # is one that goes stale the first time somebody is in a hurry. Skipped for
+    # `--out`, which exists for fetches over a DIFFERENT window: shipping those
+    # bars as the live slice would deploy a book nobody asked for.
+    if not args.out:
+        try:
+            from nifty_algo.factor import deployed_bars as slice_mod
+
+            target = slice_mod.write(pd.read_parquet(path))
+            print(f"-> {target} ({target.stat().st_size / 1e6:.1f} MB, "
+                  f"{slice_mod.SLICE_SESSIONS} sessions) - COMMIT THIS, it is "
+                  f"what lets the deployed sleeve scan")
+        except Exception as e:                             # pragma: no cover
+            print(f"  deployed slice NOT rebuilt ({e}) - run "
+                  f"`python -m nifty_algo.factor.deployed_bars` before "
+                  f"deploying, or the live console will scan on older bars")
     return 0
 
 

@@ -33,6 +33,7 @@ _SCAN_KEY = "factor_sleeve_scan"
 _ACTIONS_KEY = "factor_sleeve_actions"
 _HOLDINGS_KEY = "factor_sleeve_holdings"
 _FLAGS_KEY = "factor_sleeve_flags"
+_BARS_KEY = "factor_sleeve_bars_source"
 
 
 def render() -> None:
@@ -202,11 +203,13 @@ def _run(cfg, with_news: bool) -> None:
         st.warning(f"Holdings could not be read ({e}). Every position will "
                    f"show as new — do not act on that.")
 
+    bars_source = sl.LAST_BARS_SOURCE
     prog.progress(0.5, text="ranking the universe")
     scan = sl.scan(cfg, bars, bench, today=date.today(), holdings=holdings,
                    with_news=with_news,
                    progress=lambda m: prog.progress(0.7, text=m))
     st.session_state[_SCAN_KEY] = scan
+    st.session_state[_BARS_KEY] = bars_source
     st.session_state[_HOLDINGS_KEY] = holdings
     st.session_state[_ACTIONS_KEY] = sl.decide(scan, holdings)
     st.session_state[_FLAGS_KEY] = sl.review(cfg, scan, holdings)
@@ -268,6 +271,19 @@ def _context(scan, p) -> None:
         banner(f"<b>Regime.</b> {html.escape(scan.regime.note)} "
                f"<i>Shown as a fact — it does not change the picks.</i>",
                accent, "◐")
+
+    # WHICH BARS PRODUCED THIS. Only said when it is NOT the full cache -
+    # naming the normal case on every scan would train you to skip the line,
+    # and this line exists to be read on the one deploy where it matters.
+    source = st.session_state.get(_BARS_KEY) or ""
+    if source and source != "full cache":
+        banner(
+            f"<b>Scanned on the deployed bar slice, not the full cache.</b> "
+            f"{html.escape(source)}. That is enough to rank and size exactly "
+            f"as the full cache does — it was verified to produce an identical "
+            f"book — but it is NOT enough to backtest on, and it is only as "
+            f"fresh as the last commit. Check the rebalance date above before "
+            f"acting.", p.warning, "▤")
 
     if not scan.holdings_available:
         banner(f"<b>{html.escape(scan.holdings_note)}.</b> Every position "
