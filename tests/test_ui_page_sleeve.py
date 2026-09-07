@@ -61,10 +61,10 @@ def _restore_config():
     from nifty_algo.config import DEFAULT
     f, c = DEFAULT.factor, DEFAULT.capital
     saved = (f.universe, f.halal_screened, f.regime_ma_days,
-             c.factor_capital_inr)
+             c.factor_capital_inr, f.formation)
     yield
     (f.universe, f.halal_screened, f.regime_ma_days,
-     c.factor_capital_inr) = saved
+     c.factor_capital_inr, f.formation) = saved
 
 
 @pytest.fixture(autouse=True)
@@ -441,3 +441,58 @@ def test_the_held_columns_are_absent_when_holdings_were_not_read(page):
     assert frames, "the sector table did not render"
     assert "held" not in frames[0].columns
     assert "shift" not in frames[0].columns
+
+
+# ------------------------------------------------------------ why these 20
+
+def test_the_funnel_is_on_screen_with_this_scans_own_counts(page):
+    """
+    A page that lists twenty tickers and a return figure never says what the
+    twenty have in common. What they have in common is one number.
+    """
+    scan = _run_scan(page)
+    body = _text(page)
+    # The funnel table, by its stage labels and this scan's real counts.
+    assert "1. universe" in body and "4. scored" in body
+    assert f"{scan.universe_size:,}" in body
+    assert f"{scan.scored:,}" in body
+    # "no" is wrapped in markdown bold, so match the phrase around it.
+    assert "volatility scaling" in body
+    assert "sector neutralisation" in body
+    assert "Nothing about the companies enters this" in body
+    assert scan.formation_sentence.split(" (")[0] in body
+
+
+def test_every_pick_carries_its_case(page):
+    scan = _run_scan(page)
+    body = _text(page)
+    assert "Why this name" in body
+    # The case is the headless module's, not the page's own prose.
+    for line in sl.why_for(scan.picks[0], scan):
+        assert line in body
+
+
+def test_the_page_states_what_did_not_choose_the_name(page):
+    """The single-factor disclaimer must survive rendering, not just exist."""
+    _run_scan(page)
+    body = _text(page)
+    assert "NOT why it was chosen" in body
+    assert "not a view on the company" in body
+
+
+def test_the_momentum_column_is_labelled_from_the_config(page):
+    """
+    The header used to be the literal "mom 12-1". Running `mom6_1` would have
+    printed a 6-1 signal under a 12-1 label on every row.
+    """
+    from nifty_algo.config import DEFAULT
+    DEFAULT.factor.formation = "mom6_1"
+    try:
+        scan = _run_scan(page)
+        assert scan.formation_label == "6-1"
+        picks = next(df.value for df in page.dataframe
+                     if "symbol" in df.value.columns)
+        assert "mom 6-1" in picks.columns
+        assert "mom 12-1" not in picks.columns
+    finally:
+        DEFAULT.factor.formation = "mom12_1"

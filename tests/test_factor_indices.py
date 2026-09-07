@@ -132,12 +132,19 @@ def test_excess_sharpe_subtracts_the_rate_and_the_builtin_does_not():
 
 def test_month_end_marks_hide_a_trough_that_daily_data_sees():
     """
-    The claim `daily_drawdown`'s docstring makes, on data built to expose it.
+    The MECHANISM, on data built to expose it - not the window figures.
 
     A crash that begins and fully recovers inside one calendar month is
     invisible to a month-end grid. This is not a corner case - it is the
     reason `drawdown.DRAWDOWN_HAIRCUT` exists, and here it can be measured
     instead of estimated.
+
+    THIS TEST USED TO CLAIM MORE THAN IT CHECKED. Its docstring said it was
+    "the claim `daily_drawdown`'s docstring makes", which invited the reader to
+    believe the -67.0% / 6.6pp / REVERSES figures in that docstring were
+    covered. They were not - only this synthetic crash was - and two of the
+    three were false for as long as nobody looked. The real window claims are
+    pinned by `test_the_daily_grid_claims_match_the_committed_report` below.
     """
     values = [1000.0] * 25 + [400.0] + [1000.0] * 25      # one-session crash
     frame = _frame(date(2010, 1, 4), values)
@@ -241,3 +248,111 @@ def test_chunked_spans_cover_the_range_without_overlapping():
     for (_, hi), (lo, _) in zip(spans, spans[1:]):
         assert lo == hi + timedelta(days=1)
     assert all((hi - lo).days <= 366 for lo, hi in spans)
+
+
+# ------------------------------------------- the daily-grid claims, pinned
+
+#: The Stage 0 report, which is TRACKED. `data/cache/nifty_tri.parquet` is not
+#: (`.gitignore` excludes `data/cache/`), so pinning against the parquet would
+#: give a test that quietly does not run on a cold checkout - the exact thing
+#: this pair of fixes exists to remove.
+REPORT = Path(__file__).resolve().parent.parent / "data" / "v0_shariah_index.txt"
+
+
+def _report_drawdowns() -> dict:
+    """
+    `{index name: (daily_dd, marked_dd)}` from the committed report.
+
+    Each pair block prints one row per index as
+    `name  CAGR  vol  Sharpe  maxDD  recovery  (marked maxDD)`, so the last six
+    whitespace tokens are the numbers and everything before them is the name.
+    Rows that are not index rows fail the trailing-percent test: the header
+    ends in `marks)`, the `excess` row is four tokens, and the calendar-block
+    tables end in a `29/60` fraction.
+    """
+    out = {}
+    for line in REPORT.read_text(encoding="utf-8").splitlines():
+        parts = line.split()
+        if len(parts) < 7:
+            continue
+        if not (parts[-1].endswith("%") and parts[-3].endswith("%")):
+            continue
+        name = " ".join(parts[:-6])
+        if name in out:                      # the two blocks never repeat one
+            continue
+        out[name] = (float(parts[-3].rstrip("%")) / 100.0,
+                     float(parts[-1].rstrip("%")) / 100.0)
+    return out
+
+
+def test_the_report_rows_parse_into_the_four_series():
+    """The parser is the test's weakest link, so pin it before trusting it."""
+    dds = _report_drawdowns()
+    for name, parent in fi.PARENT_OF.items():
+        assert name in dds, f"{name} missing from {REPORT.name}"
+        assert parent in dds, f"{parent} missing from {REPORT.name}"
+    # Every value is a drawdown: negative, and not a mis-read percentage.
+    for name, (daily, marked) in dds.items():
+        assert -1.0 < daily < 0.0, (name, daily)
+        assert -1.0 < marked < 0.0, (name, marked)
+
+
+def test_the_daily_grid_claims_match_the_committed_report():
+    """
+    THE TWO CLAIMS `daily_drawdown`'s DOCSTRING STILL MAKES.
+
+    It used to make three and two were false - -67.0% daily against a real
+    -63.7%, a 6.6pp gap against a real 3.3pp - and it pinned the reversal on
+    the Nifty 500 pair when the reversal is the Nifty 50 pair's. Nothing
+    checked any of it, so the prose disagreed with the report this very module
+    generates for as long as nobody recomputed it by hand.
+
+    What is asserted here is what the docstring now says, and no more:
+
+      1. the daily grid is STRICTLY DEEPER than the marked grid, every series;
+      2. the Nifty 50 pair REVERSES which side fell less and the Nifty 500
+         pair does NOT.
+
+    Deliberately no hardcoded percentages. Re-running the fetch on a later
+    session would move every figure by a little and none of the claims at all,
+    and a test that fails on a data refresh is a test that gets deleted.
+    """
+    dds = _report_drawdowns()
+
+    # 1. Marking can only ever hide a trough, never invent one.
+    for name, (daily, marked) in dds.items():
+        assert daily < marked, (
+            f"{name}: daily {daily:.2%} is not deeper than marked "
+            f"{marked:.2%} - month-end marks cannot see MORE of a fall")
+
+    # 2. The reversal, and which pair owns it.
+    reversed_pairs = set()
+    for name, parent in fi.PARENT_OF.items():
+        c_daily, c_marked = dds[name]
+        p_daily, p_marked = dds[parent]
+        # "Fell less" = the shallower (greater, less negative) drawdown.
+        if (c_marked > p_marked) != (c_daily > p_daily):
+            reversed_pairs.add(name)
+
+    assert reversed_pairs == {"Nifty50 Shariah"}, (
+        f"the docstring says the Nifty 50 pair reverses and the Nifty 500 pair "
+        f"does not; the report says {sorted(reversed_pairs) or 'neither'} does")
+
+
+def test_the_docstring_carries_no_bare_percentages_of_its_own():
+    """
+    The figures belong in the report, which is generated and committed.
+
+    Two of the three that used to live in this docstring were wrong, and they
+    were wrong because prose is the one place in this repo a number has no
+    test behind it. The corrected docstring quotes the old wrong values on
+    purpose - as a record of what rotted - so this checks the SHAPE that
+    allowed it: no new claim may be added without a source.
+    """
+    doc = fi.daily_drawdown.__doc__ or ""
+    assert "data/v0_shariah_index.txt" in doc, (
+        "the docstring must name where its figures come from")
+    assert "-67.0%" in doc and "6.6pp" in doc, (
+        "the retired wrong figures are kept as a deliberate record")
+    assert "REVERSES which side of the 500 pair" not in doc, (
+        "the reversal belongs to the Nifty 50 pair, not the 500 pair")

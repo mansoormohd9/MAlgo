@@ -43,6 +43,52 @@ FORMATIONS: dict[str, tuple[int, int]] = {
 }
 
 
+def formation_window(formation: str = "mom12_1") -> tuple[int, int]:
+    """
+    `(lookback_months, skip_months)` for a formation key.
+
+    The one place that mapping is read, so a caller that wants to LABEL the
+    signal cannot disagree with `score_universe` about which signal ran. An
+    unregistered key falls back to 12-1 here exactly as it does there - see
+    `formation_label` for why that fallback is worth saying out loud.
+    """
+    return FORMATIONS.get(formation, FORMATIONS["mom12_1"])
+
+
+def formation_label(formation: str = "mom12_1") -> str:
+    """
+    The signal in words, DERIVED from the formation rather than hardcoded.
+
+    "12-1" was written into the console header, the picks table and the pick
+    card as a literal, so a run with `formation="mom6_1"` printed a 6-1 signal
+    under a 12-1 label - and `score_universe` falls back to 12-1 on an
+    unregistered key without a warning, so a typo produced a correct book under
+    a wrong name. A panel whose whole job is to explain the signal must not be
+    able to name the wrong one.
+    """
+    lookback, skip = formation_window(formation)
+    label = f"{lookback}-{skip}"
+    if formation not in FORMATIONS:
+        return f"{label} (unrecognised '{formation}' - fell back to 12-1)"
+    return label
+
+
+def formation_sentence(formation: str = "mom12_1",
+                       sessions_per_month: int = SESSIONS_PER_MONTH) -> str:
+    """
+    The arithmetic in one sentence, for a reader who has not read the code.
+
+    Spelling out the session offsets is the point: "12-1 momentum" sounds like
+    a judgement about a company, and this is a division of two closing prices.
+    """
+    lookback, skip = formation_window(formation)
+    begin = lookback * sessions_per_month + 1
+    end = skip * sessions_per_month + 1
+    return (f"total return from {begin} sessions ago to {end} sessions ago "
+            f"({lookback} months of price, with the most recent "
+            f"{skip} skipped)")
+
+
 def formation_return(closes: np.ndarray, lookback_months: int = 12,
                      skip_months: int = 1,
                      sessions_per_month: int = SESSIONS_PER_MONTH
@@ -89,7 +135,7 @@ def score_universe(universe, symbols, day, formation: str = "mom12_1",
     is a decision disguised as a default - and on a wide universe, newly
     listed names are numerous enough for that to move the ranking.
     """
-    lookback, skip = FORMATIONS.get(formation, FORMATIONS["mom12_1"])
+    lookback, skip = formation_window(formation)
     out = {}
     for symbol in symbols:
         r = formation_return(universe.closes_before(symbol, day),
@@ -127,4 +173,5 @@ def top_n(scores: dict, n: int) -> list:
 
 
 __all__ = ["formation_return", "score_universe", "random_scores", "top_n",
+           "formation_window", "formation_label", "formation_sentence",
            "FORMATIONS", "SESSIONS_PER_MONTH"]

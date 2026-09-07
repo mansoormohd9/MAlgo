@@ -220,6 +220,12 @@ class SleevePick:
     sector: str = ""
     industry: str = ""
 
+    #: Where this score sits among every name that COULD be scored this month.
+    #: On the pick rather than recomputed by a caller, because the denominator
+    #: is the eligible cross-section at this rebalance and nothing downstream
+    #: has it. NaN when nothing was scored.
+    score_percentile: float = float("nan")
+
     halal: object | None = None
     news: object | None = None
 
@@ -292,6 +298,23 @@ class SleeveScan:
     universe_key: str = "all"
     universe_note: str = ""
 
+    #: WHICH SIGNAL ACTUALLY RAN, carried rather than assumed. The label used
+    #: to be the literal "12-1" in three places, so a `mom6_1` run printed a
+    #: 6-1 signal under a 12-1 heading - and `score_universe` falls back to
+    #: 12-1 on an unregistered key without complaining.
+    formation: str = "mom12_1"
+    formation_label: str = "12-1"
+    formation_sentence: str = ""
+    #: How many names could be scored at all - the denominator the ranking
+    #: actually competed in. Smaller than `eligible` whenever a name cleared
+    #: the gates but had too little history to form the signal.
+    scored: int = 0
+    #: The highest-ranked name that did NOT make the book, and its score. The
+    #: pot-and-screen version of "how close was this" - without it a rank of
+    #: 20 out of 400 reads as decisive when it may have won by 0.1pp.
+    marginal_symbol: str = ""
+    marginal_score: float = float("nan")
+
     holdings_available: bool = False
     holdings_note: str = "not read"
     #: What the pot could not deploy after charges.
@@ -345,6 +368,20 @@ def from_52w_high(closes: np.ndarray) -> float:
         return float("nan")
     peak = float(np.max(window))
     return (float(window[-1]) / peak - 1.0) if peak > 0 else float("nan")
+
+
+def _percentile(score: float, all_scores: np.ndarray) -> float:
+    """
+    Where `score` sits in the scored cross-section, as a fraction 0..1.
+
+    NaN in gives NaN out, and an empty cross-section gives NaN rather than
+    1.0 - "top of a field of nobody" is not a fact about a stock, and a 100%
+    printed against an empty universe would read as the strongest possible
+    endorsement.
+    """
+    if not np.isfinite(score) or len(all_scores) == 0:
+        return float("nan")
+    return float((all_scores <= score).mean())
 
 
 def liquidity_band(turnover: float, all_turnover: np.ndarray) -> str:
@@ -546,7 +583,11 @@ def scan(cfg: Config, bars: dict, benchmark=None, today: date | None = None,
         eligible=len(elig.symbols), rejections=dict(elig.rejections),
         pot_inr=cfg.capital.capital_inr(market.capital_pool),
         top_n=fcfg.top_n, band=fcfg.band, universe_key=fcfg.universe,
-        universe_note=universe_note)
+        universe_note=universe_note,
+        formation=fcfg.formation,
+        formation_label=mom.formation_label(fcfg.formation),
+        formation_sentence=mom.formation_sentence(fcfg.formation),
+        scored=len(scores))
 
     out.next_rebalance, out.is_rebalance_day, out.sessions_to_rebalance = (
         rebalance_calendar(universe, fcfg.hold_months, today))
@@ -578,6 +619,25 @@ def scan(cfg: Config, bars: dict, benchmark=None, today: date | None = None,
     # and the cache otherwise. AFTER `top_n`, so it cannot reach the ranking.
     labels = classify(chosen, cfg, market, known=facts)
 
+    # THE FIRST NAME THAT MISSED ON SCORE - and the screen rejections have to
+    # be stepped over to find it.
+    #
+    # "Highest-ranked name not chosen" is the obvious definition and it is
+    # wrong: under the halal screen that name is usually a REJECTION, which
+    # scores ABOVE the whole book rather than below it. Measured live, it
+    # returned ATHERENERG at +222.8% against a top pick of +137.5%, so the
+    # margin printed as "clears the cut by -85.4pp" - a negative margin for
+    # the number one name. Absent-for-failing-a-screen and
+    # absent-for-scoring-too-low are two different facts and only the second
+    # is a cut.
+    taken = set(chosen) | {s for s, _reason in out.screened_out}
+    for symbol in mom.top_n(scores, len(scores)):
+        if symbol not in taken:
+            out.marginal_symbol = symbol
+            out.marginal_score = float(scores[symbol])
+            break
+
+    all_scores = np.array(sorted(scores.values()), dtype=float)
     all_turnover = np.array([elig.turnover.get(s, 0.0) for s in elig.symbols],
                             dtype=float)
     held_map, out.holdings_available, out.holdings_note = _holdings_map(holdings)
@@ -598,6 +658,7 @@ def scan(cfg: Config, bars: dict, benchmark=None, today: date | None = None,
             index_band=members.band_of(symbol),
             halal=verdicts.get(symbol))
         pick.sector, pick.industry = labels.get(symbol, ("", ""))
+        pick.score_percentile = _percentile(pick.score, all_scores)
         pick.target_value_inr = out.ticket_inr
 
         pos = held_map.get(symbol)
@@ -683,6 +744,140 @@ def _attach_news(picks: list, cfg: Config, market, progress=None) -> None:
         results = news_mod.unavailable([p.symbol for p in picks], str(e))
     for p in picks:
         p.news = results.get(p.symbol)
+
+
+# ------------------------------------------------------ why this name
+
+def why_for(pick: SleevePick, scan_result: SleeveScan) -> list[str]:
+    """
+    The full case for one name, in the order a person would make it.
+
+    Same job as `SwingPick.why()`, which this book had no equivalent of - so
+    the console showed twenty tickers and no argument, and the only way to
+    learn why a name was there was to read `momentum.py`.
+
+    A MODULE FUNCTION RATHER THAN A METHOD, because half the case is
+    cross-sectional: the size of the field, the score of the name that just
+    missed, how many higher-ranked names the screen removed. Those live on the
+    scan, and copying them onto twenty picks would be twenty chances for the
+    page and the scan to disagree.
+
+    THE NEGATIVE IS THE MOST IMPORTANT LINE HERE. A list of favourable-looking
+    facts - strong trend, near its high, deep liquidity, decent sector - reads
+    as a multi-factor case for what is a single-factor pick. The ranking is one
+    division of two closing prices; everything else on the card is description
+    that had no vote. Saying so is the difference between explaining the book
+    and dressing it up.
+    """
+    out: list[str] = []
+    total = scan_result.scored or scan_result.eligible
+    label = scan_result.formation_label or "12-1"
+
+    # 1. Rank, and the size of the field it was won in.
+    if total:
+        out.append(
+            f"Ranked {_ordinal(pick.rank)} of {total:,} names that could be "
+            f"scored this month, on the ONE signal this book uses.")
+    else:
+        out.append(f"Ranked {_ordinal(pick.rank)} - but nothing else was "
+                   f"scored, so there was no cross-section to win.")
+
+    # 2. The signal, spelled out rather than named.
+    line = f"{label} momentum = {pick.momentum_12_1:+.1%}"
+    if scan_result.formation_sentence:
+        line += f" - {scan_result.formation_sentence}"
+    line += "."
+    if np.isfinite(pick.score_percentile):
+        line += f" That is the {_pct_label(pick.score_percentile)}."
+    out.append(line)
+
+    # 3. How close the cut was. A rank means little without the boundary.
+    if scan_result.marginal_symbol and np.isfinite(scan_result.marginal_score):
+        gap = pick.momentum_12_1 - scan_result.marginal_score
+        out.append(
+            f"The first name that missed the book was "
+            f"{scan_result.marginal_symbol} at "
+            f"{scan_result.marginal_score:+.1%}, so this pick clears the cut "
+            f"by {gap * 100:+.1f}pp.")
+
+    # 4. The screen, and what it removed while the book was being filled.
+    #
+    # NOT "higher-ranked than this name". The screen walks the ranking and
+    # records a rejection wherever it meets one, so a rejection can sit at
+    # rank 55 while this pick is rank 3 - every rejection outranks the LAST
+    # pick, not every pick. Counting them as "higher-ranked" was a precision
+    # `screened_out` does not carry.
+    if pick.halal is not None:
+        rejected = len(scan_result.screened_out)
+        note = (f" {rejected} name(s) were rejected while the book was being "
+                f"filled and are listed under Screened out." if rejected
+                else "")
+        out.append(
+            f"Passed the Shariah screen.{note}" if pick.halal_ok
+            else f"FAILS the Shariah screen and should not be here - "
+                 f"{getattr(pick.halal, 'reason', 'no reason recorded')}.")
+    else:
+        out.append("The Shariah screen was NOT run for this scan, so nothing "
+                   "here has been checked against it.")
+
+    # 5. Description. Explicitly not reasons.
+    facts = [f"{pick.index_band}"]
+    if pick.sector:
+        facts.append(f"sector {pick.sector}")
+    if np.isfinite(pick.vol_12m):
+        facts.append(f"12m vol {pick.vol_12m:.0%}")
+    if np.isfinite(pick.from_52w_high):
+        facts.append(f"{pick.from_52w_high:.1%} off its 52-week high")
+    if pick.liquidity_band:
+        facts.append(f"liquidity {pick.liquidity_band}")
+    out.append("Context, which had NO vote in the ranking: "
+               + ", ".join(facts) + ".")
+
+    # 6. The negative, stated plainly - and stated EXACTLY.
+    #
+    # An earlier version said "the only non-price gate is the Shariah screen",
+    # which is false: turnover and listing history gate eligibility too. They
+    # do not RANK, and that is the distinction worth drawing rather than
+    # blurring - a gate decides who competes, the score decides who wins.
+    out.append(
+        "NOT why it was chosen: sector, news, valuation, volatility, "
+        "drawdown or anything about the business. None of them enter the "
+        "score - the ranking is one division of two closing prices.")
+    out.append(
+        "Price, turnover and listing history decided who was ELIGIBLE to be "
+        "ranked, and the Shariah screen could only REMOVE a name the score had "
+        "already chosen. No gate promoted anything; only the score did.")
+    out.append(
+        "This is a cross-sectional PRICE ranking, not a view on the company. "
+        "It says this share went up more than its peers over that window; it "
+        "says nothing about whether it should have.")
+
+    # 7. What the pot did about it.
+    if pick.unfunded:
+        out.append("The pot ran out before this rank, so the sleeve wants it "
+                   "and cannot buy it - which is what the tested book did on "
+                   "most months too.")
+    return out
+
+
+_ORDINALS = {1: "st", 2: "nd", 3: "rd"}
+
+
+def _ordinal(n: int) -> str:
+    """1 -> '1st'. The teens are the whole reason this is not a one-liner."""
+    if 10 <= (n % 100) <= 20:
+        return f"{n}th"
+    return f"{n}{_ORDINALS.get(n % 10, 'th')}"
+
+
+def _pct_label(pct: float) -> str:
+    """
+    A percentile as an ordinal, not as a percent sign.
+
+    "99.6% percentile" is not a thing, and printing a percentage next to a
+    momentum figure that is also a percentage invites reading one as the other.
+    """
+    return f"{pct * 100:.1f}th percentile of that field"
 
 
 # ------------------------------------------------- where the money sits
@@ -1063,7 +1258,28 @@ def report(scan_result: SleeveScan, actions: list, flags: list = ()) -> str:
         lines.append(f"  THE SHORTLIST RAN OUT: fewer than {s.top_n} names "
                      f"passed the screen, so the book is lighter than designed.")
 
-    lines += ["", f"  {'#':>3} {'symbol':<13}{'mom12-1':>9}{'vol12m':>7}"
+    # WHY THESE NAMES, before the table of them. The funnel is four counts the
+    # scan already carries, and without it the list reads as a recommendation
+    # rather than as the output of one division of two closing prices.
+    lines += ["", f"  HOW THESE {len(s.picks)} WERE CHOSEN",
+              f"    universe {s.universe_size:,} -> eligible {s.eligible:,} "
+              f"-> scored {s.scored:,} -> top {s.top_n}"
+              + (f" -> {len(s.screened_out)} screened out"
+                 if s.screened_out else "")]
+    lines += ["    " + line for line in textwrap.wrap(
+        f"score = {s.formation_label} momentum, i.e. {s.formation_sentence}. "
+        f"No volatility scaling, no risk adjustment, no z-scoring, no sector "
+        f"neutralisation and no second factor. Nothing about the companies "
+        f"enters the ranking - only the Shariah screen reads a balance sheet, "
+        f"and it can only REMOVE a name the price already chose.", 72)]
+    if s.marginal_symbol and s.picks:
+        lines.append(
+            f"    first name that missed on score: {s.marginal_symbol} at "
+            f"{s.marginal_score:+.1%} (rank {s.top_n} beat it by "
+            f"{(s.picks[-1].momentum_12_1 - s.marginal_score) * 100:+.1f}pp)")
+
+    mom_head = f"mom{s.formation_label}"
+    lines += ["", f"  {'#':>3} {'symbol':<13}{mom_head:>9}{'vol12m':>7}"
                   f"{'off high':>9}{'ADV Rs cr':>10}  {'index band':<22}"
                   f"{'halal':<6}{'held':>6}{'P&L':>8}"]
     for p in s.picks:

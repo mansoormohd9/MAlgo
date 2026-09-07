@@ -78,6 +78,7 @@ def render() -> None:
     _context(scan, p)
     _sizing(cfg, scan, p)
     st.subheader(f"The book the sleeve wants ({len(scan.picks)})")
+    _how_chosen(scan, p)
     _picks_table(scan, by_symbol)
     _concentration(scan, p)
     _sector_mix(cfg, scan, holdings, p)
@@ -323,6 +324,75 @@ def _sizing(cfg, scan, p) -> None:
             p.series_1, "✋")
 
 
+# ----------------------------------------------------------- why these 20
+
+def _how_chosen(scan, p) -> None:
+    """
+    The funnel, with THIS scan's own counts.
+
+    The page could show twenty tickers and a return figure and never say what
+    the twenty have in common. What they have in common is one number, and
+    every count below already exists on the scan - so this panel adds no
+    arithmetic, it just refuses to leave the selection implicit.
+    """
+    with st.expander("Why these names - the funnel, and the one signal",
+                     expanded=False):
+        rows = [
+            {"stage": "1. universe",
+             "names": f"{scan.universe_size:,}",
+             "what happened": "every symbol in the bar cache"},
+            {"stage": f"2. restricted to {scan.universe_key}",
+             "names": "—",
+             "what happened": scan.universe_note.split(".")[0] or "no filter"},
+            {"stage": "3. eligible",
+             "names": f"{scan.eligible:,}",
+             "what happened": "cleared the price, turnover, history and band "
+                              f"gates (band={scan.band})"},
+            {"stage": "4. scored",
+             "names": f"{scan.scored:,}",
+             "what happened": "had enough history to form the signal - a name "
+                              "that does not is OMITTED, never scored zero"},
+            {"stage": f"5. top {scan.top_n}",
+             "names": f"{min(scan.top_n, scan.scored):,}",
+             "what happened": f"the {scan.top_n} highest scores, ties broken "
+                              "alphabetically"},
+        ]
+        if scan.screened_out:
+            rows.append(
+                {"stage": "6. Shariah screen",
+                 "names": f"−{len(scan.screened_out)}",
+                 "what happened": "higher-ranked names rejected; the book "
+                                  "reaches no further than the shortlist"})
+        st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+
+        st.markdown(
+            f"**The signal, in full.** `score = {scan.formation_label} "
+            f"momentum` — {html.escape(scan.formation_sentence)}. "
+            f"There is **no** volatility scaling, risk adjustment, z-scoring, "
+            f"winsorisation or sector neutralisation, and no second factor: "
+            f"`score` and the momentum column are the same number."
+        )
+        # `_how_chosen` runs before `_picks_table`, which is the panel that
+        # handles an empty book - so this one has to handle it too rather than
+        # index into `picks[-1]` on a scan that ranked nothing.
+        if scan.marginal_symbol and scan.picks:
+            last = scan.picks[-1]
+            st.caption(
+                f"The first name that missed on score was "
+                f"{html.escape(scan.marginal_symbol)} at "
+                f"{scan.marginal_score:+.1%}. Rank {last.rank} beat it by "
+                f"{(last.momentum_12_1 - scan.marginal_score) * 100:+.1f}pp"
+                f" — that is how close the cut was.")
+        banner(
+            "<b>Nothing about the companies enters this.</b> Not revenue, not "
+            "valuation, not management, not news — only the Shariah screen "
+            "looks at a balance sheet, and it can only REMOVE a name the price "
+            "already chose. Momentum is a bet that recent relative strength "
+            "persists for a month, and F2 measured what that costs when it "
+            "stops: a 78.5% drawdown taking 81 months to recover.",
+            p.warning, "▲")
+
+
 # --------------------------------------------------------------- the picks
 
 def _picks_table(scan, by_symbol) -> None:
@@ -344,7 +414,9 @@ def _picks_table(scan, by_symbol) -> None:
             "#": p_.rank,
             "symbol": p_.symbol,
             "sector": p_.sector or sl.UNCLASSIFIED,
-            "mom 12-1": f"{p_.momentum_12_1:+.0%}",
+            # The label comes from the SCAN, not a literal. A `mom6_1` run
+            # used to print a 6-1 signal under a "12-1" heading.
+            f"mom {scan.formation_label}": f"{p_.momentum_12_1:+.0%}",
             "vol 12m": f"{p_.vol_12m:.0%}",
             "off high": f"{p_.from_52w_high:.1%}",
             "ADV ₹cr": f"{p_.turnover_inr / 1e7:,.1f}",
@@ -485,7 +557,7 @@ def _sector_mix(cfg, scan, holdings, p) -> None:
 def _pick_card(pick, scan, action, p) -> None:
     held = f" · holding {int(pick.held_qty)}" if pick.is_held else ""
     title = (f"{pick.rank}. {pick.symbol} · {pick.momentum_12_1:+.0%} "
-             f"12-1 · {pick.index_band}{held}")
+             f"{scan.formation_label} · {pick.index_band}{held}")
     with st.expander(title):
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Price", f"₹{pick.price:,.2f}")
@@ -499,8 +571,23 @@ def _pick_card(pick, scan, action, p) -> None:
                    f"liquidity band: {pick.liquidity_band} · "
                    f"{pick.from_52w_high:.1%} off its 52-week high · "
                    f"order: {_order_text(action)}")
+        _why_panel(pick, scan)
         _halal_panel(pick, p)
         _news_panel(pick, p)
+
+
+def _why_panel(pick, scan) -> None:
+    """
+    The case for this name, from `sleeve.why_for` and nowhere else.
+
+    The page composes no argument of its own - it renders the one the headless
+    module produced, so `python -m nifty_algo.factor.sleeve` and this expander
+    give the same reasons. A console that argued for a pick in words the CLI
+    did not have would be a second strategy described in prose.
+    """
+    st.markdown("**Why this name**")
+    for line in sl.why_for(pick, scan):
+        st.markdown(f"- {line}")
 
 
 def _halal_panel(pick, p) -> None:

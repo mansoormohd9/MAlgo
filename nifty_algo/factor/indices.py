@@ -215,9 +215,21 @@ def daily_drawdown(frame: pd.DataFrame, column: str = "tri",
     is given, and the sleeve only ever had month-ends - which is precisely why
     `drawdown.DRAWDOWN_HAIRCUT` exists to inflate a measured figure by 15%
     before anyone sizes off it. Here the daily closes are published, so the
-    trough can be read instead of estimated: on this window month-end marking
-    hides 6.6pp of the Nifty 500's fall (-60.4% marked against -67.0% daily)
-    and, worse, REVERSES which side of the 500 pair drew down less.
+    trough can be read instead of estimated.
+
+    On the Stage 0 window marking hides 3-5pp of a parent's fall, and on the
+    NIFTY 50 PAIR it does something worse than flatter: it REVERSES which side
+    drew down less. Nifty50 Shariah is deeper than its parent on marks and
+    shallower on daily closes, so the two grids disagree about which index was
+    the safer one to have held. The Nifty 500 pair does not reverse.
+
+    THE FIGURES LIVE IN `data/v0_shariah_index.txt`, NOT HERE. This docstring
+    used to carry three and two of them were wrong: it claimed -67.0% daily
+    against a real -63.7%, a 6.6pp gap against a real 3.3pp, and it pinned the
+    reversal on the 500 pair when the reversal belongs to the 50 pair. A number
+    in a docstring has no test behind it, so it rotted quietly while the report
+    this module generates said something else. `test_factor_indices.py` now
+    pins both surviving claims against that committed report.
 
     A drawdown comparison on marks is therefore not a conservative version of
     this one. It is a different answer.

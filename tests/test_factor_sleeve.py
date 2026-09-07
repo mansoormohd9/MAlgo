@@ -60,6 +60,13 @@ def cfg(world):
     c.factor.min_turnover_inr = 1.0e7
     c.factor.min_price = 20.0
     c.capital.factor_capital_inr = 0.0
+    # `formation`, `halal_shortlist` and `halal_screened` are restored too:
+    # `cfg` IS the module-level `DEFAULT`, so anything a test here leaves
+    # behind is read by every later test in the run. That is the same leak
+    # `conftest._no_saved_settings` exists for, one scope down.
+    c.factor.formation = "mom12_1"
+    c.factor.halal_shortlist = 60
+    c.factor.halal_screened = False
 
 
 def _last_mark(world) -> date:
@@ -808,3 +815,192 @@ def test_known_facts_beat_the_cache(cfg, world, monkeypatch):
     out = sl.classify(["WIN00"], cfg, market,
                       known={"WIN00": _Fund("Fresh", "Widgets")})
     assert out["WIN00"] == ("Fresh", "Widgets")
+
+
+# ------------------------------------------------------ why this name
+
+def test_the_case_names_the_formation_that_actually_ran(cfg, world):
+    """
+    THE LABEL USED TO BE THE LITERAL "12-1" IN THREE PLACES.
+
+    `score_universe` falls back to 12-1 on an unregistered formation key
+    without complaining, and the console printed "12-1" regardless of what ran
+    - so a `mom6_1` book was described as a 12-1 book, and a typo produced a
+    correct book under a wrong name. A panel whose whole job is to explain the
+    signal must not be able to name the wrong one.
+    """
+    day = _last_mark(world)
+    cfg.factor.formation = "mom6_1"
+    try:
+        scan = sl.scan(cfg, world, today=day)
+        assert scan.formation_label == "6-1"
+        assert "6 months of price" in scan.formation_sentence
+        case = " ".join(sl.why_for(scan.picks[0], scan))
+        assert "6-1 momentum" in case
+        assert "12-1 momentum" not in case
+    finally:
+        cfg.factor.formation = "mom12_1"
+
+
+def test_an_unrecognised_formation_says_so_rather_than_lying(cfg, world):
+    """
+    A silent fallback plus a hardcoded label is how a book gets described as
+    something it is not. The fallback stays - changing it would change the
+    ranking - but it can no longer be invisible.
+    """
+    day = _last_mark(world)
+    cfg.factor.formation = "mom9_2"          # never registered
+    try:
+        scan = sl.scan(cfg, world, today=day)
+        assert "unrecognised" in scan.formation_label
+        assert "fell back to 12-1" in scan.formation_label
+    finally:
+        cfg.factor.formation = "mom12_1"
+
+
+def test_the_marginal_name_is_the_one_that_missed_on_SCORE(cfg, world,
+                                                           monkeypatch):
+    """
+    THE BUG THIS EXISTS TO PIN, MEASURED ON THE REAL BOOK.
+
+    "Highest-ranked name not chosen" is the obvious definition of the marginal
+    name and it is wrong under the halal screen: that name is usually a
+    REJECTION, which scores ABOVE the whole book. Live it returned ATHERENERG
+    at +222.8% against a top pick of +137.5%, so the case printed "clears the
+    cut by -85.4pp" - a negative margin for the number one name.
+
+    Absent-for-failing-a-screen and absent-for-scoring-too-low are two
+    different facts, and only the second is a cut.
+    """
+    day = _last_mark(world)
+    cfg.factor.halal_screened = True
+    cfg.factor.halal_shortlist = 8
+
+    # Reject the two STRONGEST names, which is the shape that broke it.
+    ranked = sl.mom.top_n(
+        sl.mom.score_universe(
+            sl.FactorUniverse(world, adv_window=cfg.factor.adv_window),
+            sl.FactorUniverse(world, adv_window=cfg.factor.adv_window)
+              .eligible_at(day, 0.0, 0.0, 300, "all").symbols,
+            day, cfg.factor.formation),
+        len(world))
+    banned = set(ranked[:2])
+
+    class _V:
+        def __init__(self, ok):
+            self.eligible = ok
+            self.reason = "banned by the test" if not ok else "fine"
+
+    monkeypatch.setattr(
+        sl, "screen_symbols",
+        lambda symbols, c, m, progress=None: (
+            {s: _V(s not in banned) for s in symbols}, {}))
+    try:
+        scan = sl.scan(cfg, world, today=day)
+    finally:
+        cfg.factor.halal_screened = False
+        cfg.factor.halal_shortlist = 60
+
+    assert scan.marginal_symbol not in banned, (
+        "a screen rejection is not the name that missed the cut")
+    assert scan.marginal_symbol not in {p.symbol for p in scan.picks}
+    # The margin must be positive for every pick, which is the whole point.
+    for pick in scan.picks:
+        assert pick.momentum_12_1 > scan.marginal_score
+        gap = [l for l in sl.why_for(pick, scan) if "clears the cut" in l]
+        assert gap and "+" in gap[0].split("clears the cut by")[1]
+
+
+def test_the_case_states_what_did_NOT_choose_the_name(cfg, world, monkeypatch):
+    """
+    THE MOST IMPORTANT LINE IN THE PANEL.
+
+    Trend, distance from the high, liquidity band and sector all read as
+    supporting evidence, and none of them has a vote. A list of favourable
+    facts with no disclaimer is a multi-factor case for a single-factor pick -
+    which would make the console describe a strategy the backtest never ran.
+    """
+    _labels(monkeypatch, {s: "Industrials" for s in world})
+    scan = sl.scan(cfg, world, today=_last_mark(world))
+    case = sl.why_for(scan.picks[0], scan)
+
+    negative = [l for l in case if l.startswith("NOT why")]
+    assert negative, "the panel must say what did not choose the name"
+    for word in ("sector", "news", "valuation", "volatility", "drawdown"):
+        assert word in negative[0]
+    assert any("not a view on the company" in l for l in case)
+
+    # AND IT MUST NOT OVERCLAIM. Turnover and listing history DO gate
+    # eligibility, so "the only non-price gate is the Shariah screen" - which
+    # this line used to say - was false. A gate decides who competes; the
+    # score decides who wins, and the difference is the whole claim.
+    assert not any("only non-price gate" in l for l in case)
+    gates = [l for l in case if "ELIGIBLE" in l]
+    assert gates and "turnover" in gates[0] and "listing history" in gates[0]
+    assert "only REMOVE" in gates[0]
+    # And the descriptive facts must be labelled as having had no vote.
+    assert any("had NO vote" in l for l in case)
+
+
+def test_the_percentile_is_the_scored_cross_section(cfg, world, monkeypatch):
+    _labels(monkeypatch, {s: "Industrials" for s in world})
+    scan = sl.scan(cfg, world, today=_last_mark(world))
+    top = scan.picks[0]
+    assert 0.0 < top.score_percentile <= 1.0
+    # Rank 1 is the top of the field, so nothing scored above it.
+    assert top.score_percentile == pytest.approx(1.0)
+    assert scan.picks[-1].score_percentile < top.score_percentile
+    assert f"{top.score_percentile * 100:.1f}th percentile" in " ".join(
+        sl.why_for(top, scan))
+
+
+def test_an_empty_cross_section_yields_no_percentile_not_a_perfect_one(cfg):
+    """
+    "Top of a field of nobody" is not a fact about a stock, and 100% printed
+    against an empty universe reads as the strongest possible endorsement.
+    """
+    import numpy as np
+    assert np.isnan(sl._percentile(0.5, np.array([])))
+    assert np.isnan(sl._percentile(float("nan"), np.array([1.0, 2.0])))
+
+
+def test_the_case_survives_a_book_smaller_than_the_cross_section(cfg, world):
+    """
+    Fewer eligible names than `top_n + 1` leaves no marginal name, and a NaN
+    formatted into prose would read as "clears the cut by nan pp".
+    """
+    day = _last_mark(world)
+    cfg.factor.top_n = len(world) + 5          # ask for more than exist
+    try:
+        scan = sl.scan(cfg, world, today=day)
+        assert scan.marginal_symbol == ""
+        for pick in scan.picks:
+            case = " ".join(sl.why_for(pick, scan))
+            assert "clears the cut" not in case
+            assert "nan" not in case.lower()
+    finally:
+        cfg.factor.top_n = 4
+
+
+def test_the_case_reports_a_pick_the_pot_could_not_reach(cfg, world):
+    day = _last_mark(world)
+    cfg.capital.factor_capital_inr = 1.0
+    scan = sl.scan(cfg, world, today=day)
+    assert all(p.unfunded for p in scan.picks)
+    assert any("pot ran out" in l for l in sl.why_for(scan.picks[0], scan))
+
+
+def test_the_case_says_when_the_screen_was_never_run(cfg, world):
+    """An unscreened name is not a passing one - the same rule `halal_ok`
+    already applies, in prose."""
+    scan = sl.scan(cfg, world, today=_last_mark(world))
+    assert cfg.factor.halal_screened is False
+    case = " ".join(sl.why_for(scan.picks[0], scan))
+    assert "was NOT run" in case
+    assert "Passed the Shariah screen" not in case
+
+
+def test_ordinals_do_not_produce_1th_or_21th():
+    assert [sl._ordinal(n) for n in (1, 2, 3, 4, 11, 12, 13, 21, 22, 111)] == [
+        "1st", "2nd", "3rd", "4th", "11th", "12th", "13th", "21st", "22nd",
+        "111th"]

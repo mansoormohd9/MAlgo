@@ -703,7 +703,54 @@ which that book's edge is spent on brokerage.
 rank because that book was measured with it there. This one was not, so a
 headline that reordered the top 20 would make the live sleeve a different and
 untested strategy while every figure on the page still described the tested
-one. `test_news_cannot_reach_the_ranking` pins it.
+one. `test_news_cannot_reach_the_ranking` pins it. Sector arrives the same way
+and later still - after `top_n` has chosen - for the same reason.
+
+**EVERY WIDGET ON THIS PAGE CARRIES AN EXPLICIT `key`, AND WITHOUT ONE THE
+CONTROLS LOSE EVERY SECOND INTERACTION.** Streamlit hashes a widget's
+`value=`/`index=` into its element id UNLESS a key is given
+(`elements/lib/utils.py`, `key_as_main_identity=True`, confirmed in the
+installed 1.62.0). Every control here reads the shared config for its default
+and writes the result straight back, and `get_config()` returns the
+module-level `DEFAULT` itself - so the identity MOVED on the run after each
+accepted change, the new id had no stored state, and the widget silently fell
+back to its default. Symptom: the pot advanced one step per **two** clicks of
+the stepper, and the Universe selector ate alternate selections on the one
+panel whose whole purpose is never to quote the wrong book.
+
+**The rule generalises: a page that reads config for a widget default and
+writes the result back MUST pass `key=`.** `page_settings.py` already did
+(`cap_option`, `cap_swing`, `cap_foreign`) and additionally defers its write to
+a Save button. The three regression tests set a value, rerun, and set it
+**again** - two changes in succession is the smallest sequence that fails,
+which is why the existing tests never caught it: they set the pot and read the
+config in the same run, the one run in the cycle that works.
+
+**`target` IS SHARES TO HOLD; `order` IS WHAT TO TRADE.** The picks table used
+to head `target_qty` as `buy`, so a name held 40 with a target of 48 read as
+"buy 48" when the correct order was `TOP_UP 8`. Both columns are now on the
+table and the order is looked up from `decide()` rather than recomputed -
+two answers to "what do I buy" is how a console recommends buying something
+twice. "The call" and its CSV stay the only place a tradeable quantity is
+downloadable.
+
+**THE SECTOR PANEL STATES AND NEVER JUDGES.** `sector_mix` shows wanted against
+held, wanted weighted by FUNDED rupees so a name the pot never reached weighs
+nothing and is named rather than dropped. Held weight is withheld as **None**
+whenever the read failed or a currency would not convert - `weight()`'s rule -
+and it uses the CONVERTED rupee value, never `value_native`, because a dollar
+line added to a rupee total is a sector weight 88x wrong that looks entirely
+ordinary. `unclassified` is always its own row, sorted last. **No threshold is
+drawn**: nothing in F1-F5 measured a sector cap and the backtested book had
+none, so a 40% line would be a number chosen on a page rather than one derived
+from a result. Labels are Yahoo/GICS, not NSE's, and the panel says so.
+
+**The sector labels cost nothing extra.** `screen_symbols` was already fetching
+fundamentals for the shortlist and discarding them; it now returns them, and
+`classify` falls back to a fetch-free `fundamentals.read_cached`. Note that with
+the screen ON coverage of the picks is 100% **by construction** - an
+unclassified name is already a screen reject - and that `load_fundamentals` is
+the wrong door because it refreshes anything over a week old as a side effect.
 
 **THE BOOK HELD ALL 20 NAMES ON 9 OF 121 REBALANCES.** `budget = marked / top_n`
 spends the pot with nothing left for charges, so the last buys are refused for
@@ -797,6 +844,68 @@ there.
 states, and an incomplete snapshot marks every action "[holdings unverified]" -
 because an empty list read as "you hold nothing" turns a fully invested book into
 twenty BUYs, the single most expensive mistake this page could make.
+
+## Why the sleeve picks what it picks, and how the console says so
+
+**ONE NUMBER CHOOSES ALL TWENTY NAMES.**
+
+```
+score = closes[-22] / closes[-253] - 1
+```
+
+A plain total return over 231 sessions, measured from 253 sessions ago to 22
+sessions ago, so the most recent month is deliberately skipped
+([momentum.py:46-79](nifty_algo/factor/momentum.py#L46-L79),
+`SESSIONS_PER_MONTH = 21`; short-horizon reversal would otherwise enter with
+the opposite sign). **No** volatility scaling, risk adjustment, z-scoring,
+winsorisation, sector neutralisation or second factor. `score` and
+`momentum_12_1` on a `SleevePick` are literally the same float read from the
+same dict - there is no composite in this book, unlike `swing/scanner._score`.
+
+The funnel, all of which `SleeveScan` already carried:
+
+| stage | what narrows it |
+| --- | --- |
+| universe | ~2,400 names from Kite's instrument dump |
+| restriction | `all` is a true no-op; `nifty500` is today's constituents |
+| eligibility | ≥300 sessions, close ≥ Rs 20, 60-day ADV ≥ Rs 1cr, then the band |
+| scored | too little history is **omitted, never scored 0** - zero would place it mid-cross-section, a decision disguised as a default |
+| top_n | the 20 highest, **ties broken alphabetically** for reproducibility |
+| screen | top 60 by momentum, accept in rank order until 20 pass, then STOP |
+
+**At the default `band="all"` the band gate rejects NOTHING** (`lo=-inf`,
+`hi=+inf`), so all the narrowing is price/turnover/history plus the universe
+key. Live on the unrestricted universe that leaves 1,349 eligible of 2,437.
+
+**`why_for(pick, scan)` IS THE CASE, AND ITS MOST IMPORTANT LINE IS THE
+NEGATIVE ONE.** Modelled on `SwingPick.why()`, which this book had no
+equivalent of. A list of favourable-looking facts - strong trend, near its
+high, deep liquidity, a respectable sector - reads as a multi-factor case for
+what is a single-factor pick, so the panel labels every descriptive field as
+having had **no vote** and states outright that nothing about the company
+entered the ranking. It is a module function, not a method, because half the
+case is cross-sectional and lives on the scan.
+
+**"THE HIGHEST-RANKED NAME NOT CHOSEN" IS THE WRONG MARGINAL NAME.** Under the
+halal screen that name is usually a REJECTION, which scores *above* the whole
+book rather than below it. Measured live it returned ATHERENERG at +222.8%
+against a top pick of +137.5%, so the case printed "clears the cut by
+**-85.4pp**" for the number one name. `marginal_symbol` now steps over
+`screened_out`: absent-for-failing-a-screen and absent-for-scoring-too-low are
+two different facts and only the second is a cut. Regression:
+`test_the_marginal_name_is_the_one_that_missed_on_SCORE`.
+
+**And the margin is worth reading.** On the restricted book rank 1 cleared the
+cut by +73.6pp while rank 20 cleared it by **+3.1pp** - a rank of 20 out of 472
+reads as decisive until you see it won by three points.
+
+**THE "12-1" LABEL WAS A LITERAL IN THREE PLACES**, so a `mom6_1` run printed a
+6-1 signal under a 12-1 heading - and `score_universe` falls back to 12-1 on an
+unregistered formation key without complaining, so a typo produced a correct
+book under a wrong name. `momentum.formation_label` /
+`formation_sentence` derive both from `FORMATIONS`, the scan carries them, and
+the UI and CLI read them. A panel whose job is to explain the signal must not
+be able to name the wrong one.
 
 ## F4: the Nifty 500 restriction is FREE, and its apparent benefit is hindsight
 
@@ -1046,6 +1155,37 @@ the round trip is ~Rs 48, about 0.1R of a Rs 500 risk budget. Rates carry
 - Ties resolve pessimistically: intrabar, the stop wins (including for the trailing stop). A swing outcome where one daily bar covers both stop and target is recorded `ambiguous` and counted as a **loss**.
 - Both books consume `signals.py`, `CapitalConfig` and `ExitLadder`, which is why the whole suite runs before anything is called done - see **Definition of done** above.
 
+**THE FAILURE MODE HERE IS A TEST THAT PASSES WHILE PROVING NOTHING**, and two
+were found in one pass. Neither was ever red.
+
+- **A figure in a docstring has no test behind it.**
+  `indices.daily_drawdown` claimed month-end marking hides 6.6pp of the Nifty
+  500's fall (-60.4% marked against -67.0% daily) and REVERSES which side of
+  the 500 pair fell less. Recomputed: **-63.7% daily, a 3.27pp gap, and no
+  reversal** - the reversal is the **Nifty 50** pair's (Shariah deeper on
+  marks, shallower daily). Two of three claims false, and
+  `data/v0_shariah_index.txt` - generated by that very module - had said so all
+  along. The test named after the claim only checked a synthetic one-session
+  crash while its docstring invited you to believe it covered the window
+  figures. Figures now live in the report; the docstring cites it, and
+  `test_the_daily_grid_claims_match_the_committed_report` pins the two
+  surviving claims **against the tracked artifact** rather than the gitignored
+  parquet, so it cannot become a test that quietly does not run.
+- **A conditional skip can hollow out an invariant.**
+  `test_ticket_geometry_holds_for_any_setup_found` was parametrized over ten
+  hand-picked seeds and skipped when `detect()` found no setup; four of them
+  found none, so **40% of the invariant never executed** and the skip message
+  said "the geometry claim is vacuous" to anyone reading the four skips in a
+  green run. They were 4 of the suite's 5 skips.
+
+**So: prefer DISCOVERING a fixture to hand-picking one, and assert rather than
+skip once the input is chosen to qualify.** `_seeds_with_setups()` scans until
+it finds ten that produce a setup (88 of the first 120 do, so it costs ~12
+`detect()` calls), the invariant then **asserts** `found is not None`, and a
+separate test pins the count at ten - so a detector that degrades fails loudly
+instead of presenting as a smaller passing run. A hand-picked seed rots the
+moment the detector moves, and a skip makes the rot invisible.
+
 ## The console is gated, and the gate is above the imports
 
 `nifty_algo/ui/auth.py` runs in `app.py` **between** `st.set_page_config()` and
@@ -1125,6 +1265,26 @@ value is PRESENT as far as `bridge_secrets` is concerned, so
 `test_the_bridge_never_overwrites_a_real_environment_variable` now deletes the
 key it needs missing instead of assuming the machine has none. Depending on the
 ambient environment is the habit that caused all of this.
+
+**THE SAME LEAK HAS A TWIN, AND `data/settings.json` IS IT.**
+`conftest._no_saved_settings` is the second half of the same fixture pair.
+`state.get_config()` applies the saved settings to the module-level `DEFAULT`
+on first access and every AppTest file runs `app.py`, so on any machine that
+has actually used the console one AppTest wrote **that account's** universe and
+pot onto the shared config for the rest of the process. With
+`factor_universe: nifty500` saved, seven tests across
+`test_factor_sleeve.py`, `test_factor_restriction.py` and
+`test_ui_page_sleeve.py` failed - they assert the `all` universe's `+18.79%`
+and got `nifty500`'s control at `+17.60%`. Green from a cold checkout, red on
+the owner's laptop: the worst failure shape this suite has.
+
+**Patch `load`, and ONLY for the real `DEFAULT_PATH`.**
+`tests/test_settings_store.py` exercises `apply_to` for real over `tmp_path`
+round trips, so stubbing `apply_to` outright would delete the coverage of the
+very thing being isolated. Filtering on the resolved path blocks the user's
+file and leaves every explicit path working. `DEFAULT_PATH` is bound as a
+default ARGUMENT at import in all three functions, so patching the module
+constant redirects nothing - the function is the only seam.
 
 ## Older note: how that failure used to present
 

@@ -52,12 +52,70 @@ def test_flat_tape_produces_no_setup(cfg):
 
 # ---------------------------------------------------------------- invariants
 
-@pytest.mark.parametrize("seed", [1, 2, 3, 5, 7, 11, 13, 17, 19, 23])
+#: How many series the geometry invariant is asserted on.
+GEOMETRY_SEED_COUNT = 10
+
+
+def _seeds_with_setups(want: int = GEOMETRY_SEED_COUNT,
+                       limit: int = 200) -> list[int]:
+    """
+    Seeds that actually produce a setup - FOUND, not guessed.
+
+    THIS INVARIANT USED TO RUN ON 6 SERIES WHILE CLAIMING 10. It was
+    parametrized over a hand-picked `[1, 2, 3, 5, 7, 11, 13, 17, 19, 23]` and
+    skipped when `detect()` found nothing, and on the current detector seeds 1,
+    13, 19 and 23 find nothing - so 40% of the ticket-geometry claim silently
+    did not execute, and the skip message said as much ("the geometry claim is
+    vacuous") to anyone who read the four skips in a green run. They were 4 of
+    the suite's 5.
+
+    A fresh hand-picked list would rot the same way, because a seed stops
+    qualifying whenever the detector moves and a skip is invisible. Discovering
+    them costs about 12 `detect()` calls on 140 bars - 88 of the first 120
+    seeds qualify - and it keeps the invariant at 10/10 by construction.
+
+    Returns fewer than `want` only if the detector has degraded far enough that
+    `limit` series cannot produce them, which
+    `test_the_geometry_invariant_runs_on_every_seed_it_claims` turns into a
+    failure rather than a quieter suite.
+    """
+    cfg = Config()
+    found: list[int] = []
+    for seed in range(1, limit + 1):
+        setup, _ = S.detect("T", daily_bars(trending(seed=seed)), cfg)
+        if setup is not None:
+            found.append(seed)
+            if len(found) == want:
+                break
+    return found
+
+
+GEOMETRY_SEEDS = _seeds_with_setups()
+
+
+def test_the_geometry_invariant_runs_on_every_seed_it_claims(cfg):
+    """
+    A parametrized invariant that quietly shrinks is worse than a missing one.
+
+    The count is asserted separately from the invariant itself so that "the
+    detector stopped finding setups" cannot present as a smaller passing run.
+    """
+    assert len(GEOMETRY_SEEDS) == GEOMETRY_SEED_COUNT, (
+        f"only {len(GEOMETRY_SEEDS)} of {GEOMETRY_SEED_COUNT} seeds produce a "
+        f"setup - the detector has degraded, or `trending()` has")
+    for seed in GEOMETRY_SEEDS:
+        setup, note = S.detect("T", daily_bars(trending(seed=seed)), cfg)
+        assert setup is not None, f"seed {seed} stopped qualifying: {note}"
+
+
+@pytest.mark.parametrize("seed", GEOMETRY_SEEDS)
 def test_ticket_geometry_holds_for_any_setup_found(cfg, seed):
     df = daily_bars(trending(seed=seed))
-    found, _ = S.detect("T", df, cfg)
-    if found is None:
-        pytest.skip("no setup on this series - the geometry claim is vacuous")
+    found, note = S.detect("T", df, cfg)
+    # ASSERT, DO NOT SKIP. The seeds were chosen for producing a setup, so one
+    # that produces none is a regression in the detector - not a reason to
+    # assert the geometry on fewer series than the test name promises.
+    assert found is not None, f"seed {seed} produced no setup: {note}"
 
     a = float(atr(df, cfg.swing.atr_period).iloc[-1])
     close = float(df["close"].iloc[-1])
