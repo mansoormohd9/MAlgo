@@ -41,7 +41,7 @@ python scripts/fetch_history.py         # real 5m NIFTY history (resumable)
 python scripts/fetch_vix.py             # India VIX, for SYNTHETIC_PREMIUM backtests
 ```
 
-Tests (977: 972 passing, 5 skipped; pytest, `pythonpath = . tests` so `nifty_algo` and the conftest helpers both import without an install step):
+Tests (1042: 1041 passing, 1 skipped; pytest, `pythonpath = . tests` so `nifty_algo` and the conftest helpers both import without an install step). **One skip, and it is the only one that should ever be here** - `test_experiment_intraday.py:187`, a sample file too short for one fold. It used to be five: the other four were one parametrized invariant going vacuous, which is the failure mode described under **Testing conventions**:
 
 ```bash
 pytest                                                     # the only run that counts as done
@@ -1317,6 +1317,61 @@ mapping rather than from process-wide state.
 Until then a full run on a logged-in machine reports one failure that is not a
 regression, which is precisely the kind of noise that trains you to skim a red
 suite.
+
+## Relative data paths, and the launch directory that decided what they meant
+
+**EVERY DATA PATH IN `config.py` IS RELATIVE** - `data/cache`,
+`data/nifty100.csv`, `data/settings.json`, `journal/` - and "relative to what"
+was answered by the CURRENT WORKING DIRECTORY, which is a property of how the
+process was started rather than of the repo. `streamlit run app.py` from
+anywhere but the root therefore reported:
+
+    No factor cache at data/cache/factor_daily_india.parquet.
+    Run: python scripts/fetch_factor_history.py --years 10
+
+with a 62 MB cache sitting in `data/cache/` the whole time. **The advice was the
+worst part**: that fetch is ~35 minutes and thousands of broker calls to rebuild
+a file that already existed. A missing file and an unfindable file are different
+faults and only one is fixed by downloading anything - so the message now prints
+the ABSOLUTE path it looked at and says outright that if the file exists this is
+not the error it appears to be.
+
+**THE LOUD ONE WAS THE LEAST DANGEROUS.** Three others on the same page failed
+SILENTLY, each answering a different question fluently:
+
+| reader | from the wrong directory | what you saw |
+| --- | --- | --- |
+| `membership.load` | no constituent lists | "50 / Next 50 split unavailable" on a repo committing all four CSVs; `nifty500` raised `UnknownUniverse` |
+| `fundamentals.read_cached` | `{}` | every name unclassified, which the halal screen treats as a **REJECT**; and `load_fundamentals` refetched the whole shortlist from Yahoo |
+| `halal.load_overrides` | `({}, [])` | your hand-made rulings stopped applying, with no warning - the one outcome its own docstring calls worse than no ruling at all |
+
+**TWO FIXES, AT TWO DIFFERENT SCOPES, AND BOTH ARE NEEDED.**
+
+`app.py` **anchors the working directory** (`os.chdir` to its own directory)
+before `load_dotenv()` and before the page imports. One line fixes every
+relative path on every page at once - including `.env` itself, which
+`load_dotenv` searches for upward from the CWD, so the same bad launch also
+found no `APP_PASSWORD`. A library may not do this; a process entry point may,
+and `app.py` IS the process.
+
+[paths.py](nifty_algo/paths.py) is the library-side answer, for readers that
+must work regardless of who launched them - the sleeve CLI, a script, a test.
+`at_root` anchors a relative path to `REPO_ROOT` and **returns an absolute one
+unchanged**. That passthrough is load-bearing: always joining to the root would
+relocate a `tmp_path` fixture and a user's `--cache /elsewhere/x.parquet` into
+the repo, which is a wrong answer that reads like a working one.
+
+**Applied at the readers on the sleeve's own path** - `factor/drawdown.load`,
+`factor/membership.load`, `fundamentals.cache_path` (one helper for all three
+call sites, so the READ and the WRITE can never anchor differently) and
+`halal.load_overrides`. Everything else is covered by the chdir; anchoring a
+read without its matching write would be worse than leaving both relative.
+
+**The regression suite is [test_paths.py](tests/test_paths.py), and it computes
+the repo root WITHOUT `at_root`** - otherwise an existence check is fooled by
+the very resolver under test, the test skips saying "not built on this machine",
+and the suite reproduces the exact conflation of *absent* with *unfindable*
+that caused the bug. Six of its eleven tests fail if the anchor is removed.
 
 ## Data and secrets
 

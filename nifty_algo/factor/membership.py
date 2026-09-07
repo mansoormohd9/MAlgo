@@ -28,6 +28,8 @@ import io as _io
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ..paths import at_root
+
 #: band key -> (committed file, NSE's published list)
 INDEX_FILES: dict[str, tuple[str, str]] = {
     "nifty50": ("data/nifty50.csv",
@@ -123,7 +125,16 @@ def _symbols_from(path: Path) -> set:
 
 
 def load(root: str | Path = ".") -> Membership:
-    root = Path(root)
+    """
+    The constituent lists, read from `root` - anchored to the repo by default.
+
+    `root="."` used to mean the CURRENT WORKING DIRECTORY, so launching from
+    anywhere but the repo made every list "missing" and the sleeve reported
+    "50 / Next 50 split unavailable" on a repo that has all four CSVs
+    committed. `at_root` leaves an explicit absolute root alone, which is what
+    keeps the `tmp_path` tests honest. See `paths.py`.
+    """
+    root = at_root(root)
     m = Membership()
     for key, (rel, _url) in INDEX_FILES.items():
         path = root / rel

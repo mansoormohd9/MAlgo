@@ -38,7 +38,24 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterable
 
+from ..paths import at_root
+
 CACHE_NAME = "fundamentals.json"
+
+
+def cache_path(cfg) -> Path:
+    """
+    The cache file, ANCHORED TO THE REPO rather than to the working directory.
+
+    `cfg.swing.cache_dir` is the relative "data/cache", so read from any other
+    directory this pointed at nothing - and the failure is silent and
+    expensive in both directions: `load_fundamentals` would refetch every
+    shortlisted name from Yahoo one request at a time, and `read_cached` would
+    return `{}` so every name arrived unclassified, which the halal screen
+    treats as a REJECT. One helper for all three call sites, so the read and
+    the write can never anchor differently. See `paths.py`.
+    """
+    return at_root(Path(cfg.swing.cache_dir)) / CACHE_NAME
 
 # Candidate Yahoo line items, best first. The first one present wins.
 _TOTAL_ASSETS = ("Total Assets",)
@@ -126,8 +143,8 @@ def load_fundamentals(stocks: Iterable, cfg, market, force_refresh: bool = False
     the module docstring for why the first half of that matters.
     """
     stocks = list(stocks)
-    cache_path = Path(cfg.swing.cache_dir) / CACHE_NAME
-    cache = _read_cache(cache_path)
+    cache_file = cache_path(cfg)
+    cache = _read_cache(cache_file)
     max_age = timedelta(days=cfg.swing.fundamentals_cache_days)
 
     keyed = {s.symbol: market.qualified(s.symbol) for s in stocks}
@@ -154,13 +171,13 @@ def load_fundamentals(stocks: Iterable, cfg, market, force_refresh: bool = False
         # Merge back into the whole cache rather than replacing it: another
         # market's entries live in the same file and must survive this write.
         cache.update({keyed[sym]: f for sym, f in out.items()})
-        _write_cache(cache_path, cache)
+        _write_cache(cache_file, cache)
     return out
 
 
 def cache_age_days(cfg) -> int | None:
     """How old the fundamentals cache is, for the freshness strip."""
-    path = Path(cfg.swing.cache_dir) / CACHE_NAME
+    path = cache_path(cfg)
     if not path.exists():
         return None
     return (datetime.now() - datetime.fromtimestamp(path.stat().st_mtime)).days
@@ -182,7 +199,7 @@ def read_cached(cfg, market) -> dict[str, Fundamentals]:
     `{market}:{SYMBOL}` on disk, bare symbol in the return value - the same
     asymmetry `load_fundamentals` documents, and for the same reason.
     """
-    cache = _read_cache(Path(cfg.swing.cache_dir) / CACHE_NAME)
+    cache = _read_cache(cache_path(cfg))
     prefix = f"{market.key}:"
     return {key[len(prefix):]: f for key, f in cache.items()
             if key.startswith(prefix)}

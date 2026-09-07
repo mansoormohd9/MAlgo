@@ -49,6 +49,7 @@ import pandas as pd
 
 from ..config import DEFAULT
 from ..experiment_core import two_sided_sign_p
+from ..paths import REPO_ROOT, at_root
 from ..swing.costs_equity import DEFAULT_EQUITY_COSTS
 from . import backtest as fb
 
@@ -529,11 +530,19 @@ def load(cfg_factor):
     rewrites the parquet on a miss - the same reason `run_s1_swing_null.py`
     reads its cache directly.
     """
-    path = Path(cfg_factor.cache_dir) / cfg_factor.cache_name
+    # ANCHORED TO THE REPO, NOT TO THE WORKING DIRECTORY. `cache_dir` is the
+    # relative "data/cache", so launched from anywhere else this resolved to a
+    # path that does not exist while a 62 MB cache sat in the repo - and the
+    # error then told you to spend ~35 minutes re-fetching it. See `paths.py`.
+    path = at_root(Path(cfg_factor.cache_dir) / cfg_factor.cache_name)
     if not path.exists():
         raise FileNotFoundError(
-            f"No factor cache at {path}. "
-            f"Run: python scripts/fetch_factor_history.py --years 10")
+            f"No factor cache at {path} (looked there because "
+            f"cache_dir={cfg_factor.cache_dir!r} was resolved against the "
+            f"repo root {REPO_ROOT}). "
+            f"If that file exists, this is not the error you think it is - "
+            f"check cache_dir/cache_name rather than re-fetching. "
+            f"Otherwise run: python scripts/fetch_factor_history.py --years 10")
     raw = pd.read_parquet(path)
     bars, bench = {}, None
     for symbol, g in raw.groupby("symbol"):

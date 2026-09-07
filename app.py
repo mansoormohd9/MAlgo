@@ -26,8 +26,30 @@ constructed for anybody who loaded the URL. See `nifty_algo/ui/auth.py`.
 """
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 import streamlit as st
 from dotenv import load_dotenv
+
+# THE WORKING DIRECTORY IS ANCHORED HERE, AND IT MUST HAPPEN BEFORE ANYTHING
+# READS A FILE.
+#
+# Every data path in `config.py` is relative - `data/cache`, `data/nifty100.csv`,
+# `data/settings.json`, `journal/` - and so is `load_dotenv()`, which searches
+# upward from the CWD for `.env`. Relative to the CWD means relative to however
+# you launched the app, so `streamlit run` from any other directory made the
+# Monthly sleeve report "No factor cache at data/cache/factor_daily_india.parquet"
+# with a 62 MB cache present, and told you to spend ~35 minutes re-fetching it.
+# The same launch would silently find no `.env`, hence no `APP_PASSWORD`.
+#
+# One chdir fixes every one of those at once, which is why it is here rather
+# than threaded through twenty call sites. `app.py` lives at the repo root, so
+# its own location is the anchor - the one thing that does not depend on the
+# launch. Libraries do not get to do this; a process entry point does, and this
+# file is the process. `nifty_algo/paths.py` is the library-side answer for
+# readers that must work no matter who launched them.
+os.chdir(Path(__file__).resolve().parent)
 
 load_dotenv()
 

@@ -41,6 +41,7 @@ import csv
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ..paths import at_root
 from . import halal_taxonomy
 from . import markets as markets_mod
 
@@ -407,7 +408,12 @@ def load_overrides(path: str | Path) -> tuple[dict[str, dict], list[str]]:
     a ruling you meant to apply and which was silently dropped is worse than
     no ruling at all.
     """
-    p = Path(path)
+    # ANCHORED. `overrides_csv` is the relative "data/halal_overrides.csv",
+    # and a missing file returns no rulings - so read from the wrong working
+    # directory your rulings silently stopped applying and names changed
+    # verdict with no warning anywhere. That is the one outcome this function's
+    # own docstring says is worse than no ruling at all. See `paths.py`.
+    p = at_root(path)
     if not p.exists():
         return {}, []
 
