@@ -42,7 +42,7 @@ python scripts/fetch_history.py         # real 5m NIFTY history (resumable)
 python scripts/fetch_vix.py             # India VIX, for SYNTHETIC_PREMIUM backtests
 ```
 
-Tests (1043: 1042 passing, 1 skipped; pytest, `pythonpath = . tests` so `nifty_algo` and the conftest helpers both import without an install step). **One skip, and it is the only one that should ever be here** - `test_experiment_intraday.py:187`, a sample file too short for one fold. It used to be five: the other four were one parametrized invariant going vacuous, which is the failure mode described under **Testing conventions**:
+Tests (1056: 1055 passing, 1 skipped; pytest, `pythonpath = . tests` so `nifty_algo` and the conftest helpers both import without an install step). **One skip, and it is the only one that should ever be here** - `test_experiment_intraday.py:187`, a sample file too short for one fold. It used to be five: the other four were one parametrized invariant going vacuous, which is the failure mode described under **Testing conventions**:
 
 ```bash
 pytest                                                     # the only run that counts as done
