@@ -1,6 +1,7 @@
 """Shared fixtures: bar builders that let a test engineer an exact setup."""
 from __future__ import annotations
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -54,6 +55,45 @@ def _no_live_credentials(monkeypatch):
     """
     for key in CREDENTIAL_KEYS:
         monkeypatch.setenv(key, "")
+
+
+@pytest.fixture(autouse=True)
+def _no_saved_settings(monkeypatch):
+    """
+    THE SUITE MUST NEVER READ `data/settings.json`. This is what makes that
+    true, and it is the same bug as `_no_live_credentials` above.
+
+    `state.get_config()` applies the saved settings to the module-level
+    `DEFAULT` on first access, and every AppTest test file runs `app.py`. So
+    on any machine that has actually used the console, one AppTest wrote that
+    account's real pot and universe onto the shared config FOR THE REST OF THE
+    PROCESS - and `test_factor_sleeve.py`, `test_factor_restriction.py` and
+    `test_ui_page_sleeve.py` then measured the `all` universe against
+    `nifty500` numbers. Seven tests failed on this developer's laptop and
+    none on a cold checkout, which is exactly the noise that trains you to
+    skim a red suite.
+
+    PATCH `load`, NOT `apply_to`, AND ONLY FOR THE REAL PATH.
+    `test_settings_store.py` exercises `apply_to` for real over `tmp_path`
+    round trips, so stubbing it outright would delete the coverage of the very
+    thing being isolated. Filtering on the path blocks the user's file and
+    leaves every explicit path untouched.
+
+    `DEFAULT_PATH` is bound as a default ARGUMENT at import, so patching the
+    module constant redirects nothing - `test_ui_page_sleeve.py` already
+    records that. The function is the only seam.
+    """
+    from nifty_algo import settings_store
+
+    real = Path(settings_store.DEFAULT_PATH).resolve()
+    original = settings_store.load
+
+    def _guarded(path=settings_store.DEFAULT_PATH):
+        if Path(path).resolve() == real:
+            return {}
+        return original(path)
+
+    monkeypatch.setattr(settings_store, "load", _guarded)
 
 
 def make_bars(rows: list[dict], start: datetime = BASE_DAY,

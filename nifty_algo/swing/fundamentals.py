@@ -166,6 +166,28 @@ def cache_age_days(cfg) -> int | None:
     return (datetime.now() - datetime.fromtimestamp(path.stat().st_mtime)).days
 
 
+def read_cached(cfg, market) -> dict[str, Fundamentals]:
+    """
+    Whatever the cache already holds for this market. NEVER FETCHES.
+
+    `load_fundamentals` is the wrong door for a caller that only wants a label
+    it can do without: it refreshes anything older than
+    `fundamentals_cache_days` as a side effect, so asking it for a sector would
+    fire one slow request per missing name in the middle of drawing a panel.
+    This reads the file and stops - a symbol absent from the cache comes back
+    absent, which is a fact the caller must render rather than repair.
+
+    No staleness check on purpose. A balance sheet a week old is worth
+    refetching; a GICS sector label a week old is the same label. Keyed
+    `{market}:{SYMBOL}` on disk, bare symbol in the return value - the same
+    asymmetry `load_fundamentals` documents, and for the same reason.
+    """
+    cache = _read_cache(Path(cfg.swing.cache_dir) / CACHE_NAME)
+    prefix = f"{market.key}:"
+    return {key[len(prefix):]: f for key, f in cache.items()
+            if key.startswith(prefix)}
+
+
 # ---------------- one symbol ----------------
 
 def _fetch_one(stock) -> Fundamentals:

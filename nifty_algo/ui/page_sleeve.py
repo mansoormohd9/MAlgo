@@ -66,14 +66,23 @@ def render() -> None:
         )
         return
 
+    # ONE SOURCE OF TRUTH FOR THE ORDER. `decide()` computed every quantity
+    # already; the panels below look it up rather than subtracting held from
+    # target a second time, because two answers to "what do I buy" is how a
+    # console recommends buying something twice.
+    actions = st.session_state.get(_ACTIONS_KEY) or []
+    by_symbol = {a.symbol: a for a in actions}
+    holdings = st.session_state.get(_HOLDINGS_KEY)
+
     _cadence(scan, p)
     _context(scan, p)
     _sizing(cfg, scan, p)
     st.subheader(f"The book the sleeve wants ({len(scan.picks)})")
-    _picks_table(scan)
+    _picks_table(scan, by_symbol)
     _concentration(scan, p)
+    _sector_mix(cfg, scan, holdings, p)
     for pick in scan.picks:
-        _pick_card(pick, scan, p)
+        _pick_card(pick, scan, by_symbol.get(pick.symbol), p)
     _call(scan, p)
     _review(cfg, scan, p)
     _screened_out(scan, p)
@@ -116,11 +125,27 @@ def _record(cfg, p) -> None:
 # ------------------------------------------------------------- the controls
 
 def _controls(cfg, p) -> None:
+    """
+    EVERY WIDGET HERE CARRIES AN EXPLICIT `key`, AND THAT IS LOAD-BEARING.
+
+    Streamlit hashes a widget's `value=`/`index=` into its element id UNLESS a
+    key is given (`elements/lib/utils.py`, `key_as_main_identity=True`). Each
+    control below reads the shared config for its default and writes the
+    result straight back, and `get_config()` returns the module-level `DEFAULT`
+    itself - so without a key the identity MOVED on the run after every
+    accepted change. The new id had no stored state, the widget fell back to
+    its default, and the change was silently discarded: the pot advanced one
+    step per two clicks of the stepper, and the universe selector ate every
+    second selection on the one panel whose whole purpose is never to quote
+    the wrong book. `page_settings.py` already keys its three pots for the
+    same reason.
+    """
     c0, c1, c2, c3, c4 = st.columns([1.3, 1.3, 1, 1, 1.1])
 
     universe = c0.selectbox(
         "Universe", list(restr.UNIVERSES),
         index=list(restr.UNIVERSES).index(cfg.factor.universe),
+        key="sleeve_universe",
         help="Which slice of the NSE may be ranked. 'all' is what every "
              "recorded number describes; 'nifty500' is a fact today but "
              "LOOK-AHEAD in any backtest.")
@@ -129,12 +154,14 @@ def _controls(cfg, p) -> None:
     pot = c1.number_input(
         "Factor pot (₹)", min_value=0.0, step=25_000.0,
         value=float(cfg.capital.factor_capital_inr),
+        key="sleeve_pot",
         help="A zero pot sizes every ticket to zero — the scan still runs and "
              "reports, it just cannot size anything.")
     cfg.capital.factor_capital_inr = float(pot)
 
     screened = c2.toggle(
         "Halal screen", value=bool(cfg.factor.halal_screened),
+        key="sleeve_halal",
         help="Screens DOWN the ranking: the highest-ranked names that pass, "
              "looking no further than the shortlist. The recorded returns were "
              "measured WITHOUT it.")
@@ -142,12 +169,13 @@ def _controls(cfg, p) -> None:
 
     regime = c3.toggle(
         "Show regime", value=bool(cfg.factor.regime_ma_days),
+        key="sleeve_regime",
         help="Reports whether the Nifty is above its 50-day average. Shown as "
              "a fact; it never changes the picks.")
     cfg.factor.regime_ma_days = 50 if regime else 0
 
     with_news = c4.toggle(
-        "Fetch news", value=False,
+        "Fetch news", value=False, key="sleeve_news",
         help="Headlines for the picks. Context for you — it cannot reorder "
              "the ranking.")
 
@@ -297,15 +325,25 @@ def _sizing(cfg, scan, p) -> None:
 
 # --------------------------------------------------------------- the picks
 
-def _picks_table(scan) -> None:
+def _picks_table(scan, by_symbol) -> None:
+    """
+    TWO QUANTITIES, NAMED APART. `target` is shares to HOLD - the equal-weight
+    ticket floored to whole shares and filled against a running balance. The
+    order is `target` minus what you already own, and it comes from `decide()`
+    rather than being recomputed here. This column used to be headed `buy` and
+    carry the target, so a name held 40 with a target of 48 read as "buy 48"
+    while the correct order, four panels down, was "TOP_UP 8".
+    """
     if not scan.picks:
         st.info("Nothing ranked. Check the bar cache is current.")
         return
     rows = []
     for p_ in scan.picks:
+        action = by_symbol.get(p_.symbol)
         rows.append({
             "#": p_.rank,
             "symbol": p_.symbol,
+            "sector": p_.sector or sl.UNCLASSIFIED,
             "mom 12-1": f"{p_.momentum_12_1:+.0%}",
             "vol 12m": f"{p_.vol_12m:.0%}",
             "off high": f"{p_.from_52w_high:.1%}",
@@ -315,9 +353,25 @@ def _picks_table(scan) -> None:
                       else ("pass" if p_.halal_ok else "FAIL")),
             "held": int(p_.held_qty) if p_.is_held else 0,
             "P&L": "—" if p_.pnl_pct is None else f"{p_.pnl_pct:+.1%}",
-            "buy": p_.target_qty,
+            "target": p_.target_qty,
+            "order": _order_text(action),
         })
     st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+    st.caption(
+        "**target** is shares to HOLD, not shares to buy. **order** is the "
+        "difference against what you already own and is the same number "
+        "“The call” below carries — that table and its CSV stay the only "
+        "place a tradeable quantity is downloadable."
+    )
+
+
+def _order_text(action) -> str:
+    """`decide()`'s verdict for one name, or an em dash when it had none."""
+    if action is None:
+        return "—"
+    if not action.is_trade:
+        return "hold"
+    return f"{action.kind} {action.qty}"
 
 
 def _concentration(scan, p) -> None:
@@ -342,7 +396,93 @@ def _concentration(scan, p) -> None:
         p.warning, "◑")
 
 
-def _pick_card(pick, scan, p) -> None:
+def _sector_mix(cfg, scan, holdings, p) -> None:
+    """
+    Where the money sits, wanted against held.
+
+    STATED, NEVER JUDGED. There is no sector cap on this sleeve and the
+    backtested book had none - nothing in F1-F5 measured one - so this panel
+    gets the same treatment as the regime line: a fact that changes no pick. A
+    threshold drawn here would be a number chosen on a page rather than one
+    derived from a result, and it would read as advice the record cannot
+    support.
+    """
+    mix = sl.sector_mix(cfg, scan, holdings)
+    if not mix.rows:
+        return
+
+    with st.expander("Where the money sits, by sector", expanded=True):
+        rows = []
+        for r in mix.rows:
+            row = {
+                "sector": r.sector,
+                "wanted ₹": f"{r.wanted_inr:,.0f}",
+                "wanted": f"{r.wanted_pct:.1%}",
+                "names": r.names,
+            }
+            # THE HELD COLUMNS ARE ABSENT, NOT BLANK, WHEN THE READ FAILED. A
+            # 0.0% against a denominator that could not be established reads
+            # exactly like one that could, and it would be acted on.
+            if mix.held_available:
+                row["held ₹"] = f"{r.held_inr:,.0f}"
+                row["held"] = f"{r.held_pct:.1%}"
+                row["shift"] = f"{r.shift_pp:+.1f}pp"
+            rows.append(row)
+        st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+
+        st.caption(
+            f"Wanted weight is FUNDED rupees — target shares × price, "
+            f"₹{mix.wanted_total_inr:,.0f} across {len(scan.picks)} picks — "
+            f"so a name the pot never reached weighs nothing here."
+        )
+        if mix.unfunded:
+            banner(f"<b>{len(mix.unfunded)} pick(s) the pot did not reach "
+                   f"weigh zero above:</b> "
+                   f"{html.escape(', '.join(mix.unfunded))}. The sleeve wanted "
+                   f"them; the cash ran out first. Their sectors are "
+                   f"under-represented in this table, not absent from the "
+                   f"ranking.", p.warning, "▣")
+
+        if not mix.held_available:
+            banner(f"<b>{html.escape(mix.held_note)}.</b> The held columns are "
+                   f"withheld rather than shown as zero — a share computed "
+                   f"against a denominator that could not be established reads "
+                   f"exactly like one that was.", p.critical, "⛔")
+        else:
+            st.caption(
+                f"Held weight is ₹{mix.held_total_inr:,.0f} of converted "
+                f"value, from the same holdings map “The call” uses — so the "
+                f"two panels cannot disagree about what you own. **That "
+                f"snapshot is the whole account**, so anything you hold for "
+                f"another book counts here too (it is also why “The call” "
+                f"proposes SELL for every held name outside the top "
+                f"{scan.top_n})."
+            )
+            if mix.unclassified_held:
+                st.caption(
+                    f"Unclassified holdings: "
+                    f"{html.escape(', '.join(mix.unclassified_held))} — names "
+                    f"the fundamentals cache carries no sector for, including "
+                    f"anything outside this NSE universe such as a foreign ETF."
+                )
+
+        banner(
+            "<b>The sleeve has no sector cap, and the backtested book had "
+            "none.</b> Cross-sectional momentum concentrates by construction — "
+            "it holds whatever is running. Nothing in F1–F5 measured a cap, so "
+            "no threshold is drawn here and this table changes no pick. It is "
+            "shown so you can size the sleeve against the rest of your net "
+            "worth knowing what is in it.",
+            p.series_1, "▤")
+        st.caption(
+            "Labels are Yahoo/GICS, not NSE's — the factor universe is Kite's "
+            "instrument dump and carries no industry column, which is why "
+            "`factor_market` borrows the GICS taxonomy. They will not match "
+            "the sector pills on the Swing book page."
+        )
+
+
+def _pick_card(pick, scan, action, p) -> None:
     held = f" · holding {int(pick.held_qty)}" if pick.is_held else ""
     title = (f"{pick.rank}. {pick.symbol} · {pick.momentum_12_1:+.0%} "
              f"12-1 · {pick.index_band}{held}")
@@ -351,10 +491,14 @@ def _pick_card(pick, scan, p) -> None:
         c1.metric("Price", f"₹{pick.price:,.2f}")
         c2.metric("Vol 3m / 12m", f"{pick.vol_3m:.0%} / {pick.vol_12m:.0%}")
         c3.metric("ADV", f"₹{pick.turnover_inr / 1e7:,.1f} cr")
-        c4.metric("Target", f"{pick.target_qty} sh"
-                            if pick.target_qty else "unfunded")
-        st.caption(f"liquidity band: {pick.liquidity_band} · "
-                   f"{pick.from_52w_high:.1%} off its 52-week high")
+        # "Target (hold)", not "Target". The unqualified label was read as an
+        # order, which it is not - the order is beside it, from `decide()`.
+        c4.metric("Target (hold)", f"{pick.target_qty} sh"
+                                   if pick.target_qty else "unfunded")
+        st.caption(f"sector: {pick.sector or sl.UNCLASSIFIED} · "
+                   f"liquidity band: {pick.liquidity_band} · "
+                   f"{pick.from_52w_high:.1%} off its 52-week high · "
+                   f"order: {_order_text(action)}")
         _halal_panel(pick, p)
         _news_panel(pick, p)
 

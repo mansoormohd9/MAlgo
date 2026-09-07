@@ -1,0 +1,116 @@
+==============================================================================
+V0 - DOES THE SHARIAH CONSTRAINT COST RETURN OR PAY IT?
+==============================================================================
+  Source: niftyindices.com (the index administrator), gross TRI.
+  Risk-free for Sharpe: 6.50%  (stated, not measured - VERIFY)
+
+  GROSS TRI on both sides. niftyindices publishes NTR (net of dividend withholding) for the parent indices only - it is absent for both Shariah indices over the whole history - so there is no net basis on which this comparison could be made. Gross TRI overstates what a taxable Indian resident receives on BOTH sides, and it overstates it more on the side with the higher payout, which is the parent.
+
+------------------------------------------------------------------------------
+  Nifty50 Shariah  vs  Nifty 50
+    2006-12-29 .. 2026-09-04  (19.7 years, 238 month-end marks)
+
+    index                    CAGR      vol   Sharpe     maxDD  recovery  (on marks)
+    Nifty 50              +10.88%    20.4%     0.30    -59.5%        33     -54.7%
+    Nifty50 Shariah        +9.22%    19.3%     0.23    -59.4%        69     -56.1%
+    excess                -1.65pp                      -0.1pp       +36
+
+    maxDD and recovery are DAILY. The last column is the SAME drawdown seen only at
+    month-ends - shallower, friendlier, and the grid the sleeve was sized off.
+
+  MONTH-BY-MONTH - the statistic that decides
+    months won by Nifty50 Shariah: 112/237   (47%)
+    two-sided sign p:           0.4358
+    median monthly difference:  -0.210%
+    compounded over the window: -25.6%   (wealth ratio, not a difference of returns)
+    mean monthly diff:          -0.146%
+    ... minus its best 3 months:-0.262%
+
+  ROLLING 5-YEAR EXCESS
+    178 overlapping 5-year windows, 76 positive (43%)
+    excess pp:  min -7.37   p25 -1.69   median -0.45   p75 +0.92   max +3.90
+
+    worst window : 2021-06-30 .. 2026-06-30   -7.37pp
+    best window  : 2012-12-31 .. 2017-12-29   +3.90pp
+
+    These windows OVERLAP by construction - adjacent ones share 59 of 60 months -
+    so the count of positive windows is a shape, not a sample size, and no sign test
+    is run on it. The monthly sign test above is the one with independent draws.
+
+  WHERE THE EXCESS SAT - calendar blocks, NOT pre-registered
+    window         constrained    parent     excess   months won
+    first half          +7.93%    +8.78%    -0.85pp       60/120
+    second half        +10.44%   +12.69%    -2.25pp       52/116
+
+    2007-2011           +3.19%    +4.27%    -1.08pp        29/60
+    2012-2016          +11.58%   +11.03%    +0.55pp        31/59
+    2017-2021          +20.62%   +16.93%    +3.69pp        28/59
+    2022-2026           +0.66%    +8.39%    -7.73pp        24/57
+
+------------------------------------------------------------------------------
+  Nifty500 Shariah  vs  Nifty 500
+    2006-12-29 .. 2026-09-04  (19.7 years, 238 month-end marks)
+
+    index                    CAGR      vol   Sharpe     maxDD  recovery  (on marks)
+    Nifty 500             +11.69%    21.7%     0.33    -63.7%        75     -60.4%
+    Nifty500 Shariah      +11.76%    19.5%     0.35    -63.1%        70     -59.8%
+    excess                +0.07pp                      -0.6pp        -5
+
+    maxDD and recovery are DAILY. The last column is the SAME drawdown seen only at
+    month-ends - shallower, friendlier, and the grid the sleeve was sized off.
+
+  MONTH-BY-MONTH - the statistic that decides
+    months won by Nifty500 Shariah: 112/237   (47%)
+    two-sided sign p:           0.4358
+    median monthly difference:  -0.032%
+    compounded over the window: +1.2%   (wealth ratio, not a difference of returns)
+    mean monthly diff:          -0.032%
+    ... minus its best 3 months:-0.119%
+
+  ROLLING 5-YEAR EXCESS
+    178 overlapping 5-year windows, 137 positive (77%)
+    excess pp:  min -4.15   p25 +0.19   median +1.20   p75 +2.12   max +4.60
+
+    worst window : 2021-06-30 .. 2026-06-30   -4.15pp
+    best window  : 2012-12-31 .. 2017-12-29   +4.60pp
+
+    These windows OVERLAP by construction - adjacent ones share 59 of 60 months -
+    so the count of positive windows is a shape, not a sample size, and no sign test
+    is run on it. The monthly sign test above is the one with independent draws.
+
+  WHERE THE EXCESS SAT - calendar blocks, NOT pre-registered
+    window         constrained    parent     excess   months won
+    first half          +9.83%    +9.05%    +0.77pp       59/120
+    second half        +13.53%   +13.97%    -0.44pp       53/116
+
+    2007-2011           +3.68%    +2.99%    +0.69pp        31/60
+    2012-2016          +14.92%   +12.81%    +2.11pp        28/59
+    2017-2021          +20.80%   +16.91%    +3.90pp        30/59
+    2022-2026           +6.37%   +10.97%    -4.60pp        23/57
+
+==============================================================================
+  WHAT THIS SAYS ABOUT WHETHER TO CONTINUE
+
+    Nifty50 Shariah: the constraint costs 1.65pp a year against Nifty 50,
+      wins 47% of months (sign p 0.436) and 43% of rolling 5-year windows.
+
+    Nifty500 Shariah: the constraint pays 0.07pp a year against Nifty 500,
+      wins 47% of months (sign p 0.436) and 77% of rolling 5-year windows.
+
+  LIMITS, so no number above is read without them:
+    - THE 2022-2026 BLOCK IS THE ONE TO ARGUE WITH. Both pairs
+      turn sharply negative there, and the obvious explanation -
+      Indian financials led that rally and the screen excludes
+      them - is a CONJECTURE. Nothing in this data tests it: an
+      index level carries no sector attribution. Treat it as the
+      hypothesis to check, not as the reason.
+    - An index is not a portfolio: no tax, no brokerage, no
+      tracking error, and the administrator rebalances for free.
+      The comparison between two of them is clean because both
+      carry the same omissions; the LEVEL of either is optimistic.
+    - 20 years is one realisation
+      containing one crash. The sleeve's +7.94pp became +0.60pp
+      on a window it had not seen.
+    - Both Shariah indices start at their 2006-12-29 base date,
+      so nothing here says anything about 1995-2006.
+==============================================================================

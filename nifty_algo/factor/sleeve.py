@@ -211,6 +211,15 @@ class SleevePick:
     liquidity_band: str = ""
     index_band: str = mb.UNKNOWN
 
+    #: Yahoo's GICS labels, attached AFTER `top_n` has chosen - exactly like
+    #: `halal` and `news` below, and for the same reason. Momentum ranks on
+    #: price and nothing else; a sector that could reorder the book would make
+    #: the live sleeve a different and untested strategy. Empty means the
+    #: classification is unknown, which is a fact to render, never a default
+    #: bucket to fold a name into.
+    sector: str = ""
+    industry: str = ""
+
     halal: object | None = None
     news: object | None = None
 
@@ -433,14 +442,20 @@ def stock_for(symbol: str, market, fundamentals=None) -> Stock:
                  yf_ticker=f"{symbol}{market.yf_suffix}")
 
 
-def screen_symbols(symbols: list, cfg: Config, market, progress=None) -> dict:
+def screen_symbols(symbols: list, cfg: Config, market,
+                   progress=None) -> tuple[dict, dict]:
     """
-    `{symbol: HalalVerdict}` for a shortlist, fetching fundamentals for it.
+    `({symbol: HalalVerdict}, {symbol: Fundamentals})` for a shortlist.
 
     Only ever called on the shortlist, never the universe: fundamentals are one
     slow network request per name, and paying for 2,400 of them to rank 20 is
     exactly the cost the swing scanner's cheap-to-expensive gate ordering
     exists to avoid.
+
+    THE FACTS COME BACK OUT because they were paid for. This used to return
+    verdicts alone and drop `facts` on the floor, so a caller wanting the
+    sector Yahoo had already handed us either re-read the cache or refetched
+    the lot. Returning both keeps the expensive call the only call.
     """
     from ..swing import fundamentals as fund_mod
     from ..swing import halal
@@ -456,6 +471,43 @@ def screen_symbols(symbols: list, cfg: Config, market, progress=None) -> dict:
         f = facts.get(symbol)
         out[symbol] = halal.screen(stock_for(symbol, market, f), f, cfg,
                                    overrides=overrides, market=market)
+    return out, facts
+
+
+def classify(symbols: list, cfg: Config, market, known=None) -> dict:
+    """
+    `{symbol: (sector, industry)}` for a list of names, WITHOUT FETCHING.
+
+    `known` is whatever a caller already has in hand - the facts
+    `screen_symbols` just returned - and it wins, because those objects were
+    fetched this second and the file write that follows them can fail
+    silently. Everything else falls back to the fundamentals cache as it
+    stands on disk.
+
+    A symbol nobody has classified is absent from the result. That is
+    deliberate: an unclassified name is a fact about the data, and folding it
+    into a sector because a dict wanted a key would put money in a bucket
+    nobody put it in.
+    """
+    from ..swing import fundamentals as fund_mod
+
+    known = known or {}
+    if not symbols:
+        # `read_cached` parses ~2,400 records off disk. This page reruns on
+        # every interaction, so paying 35ms to look up nothing is a cost worth
+        # one line to avoid.
+        return {}
+    try:
+        cached = fund_mod.read_cached(cfg, market)
+    except Exception:                                      # pragma: no cover
+        cached = {}
+    out = {}
+    for symbol in symbols:
+        f = known.get(symbol) or cached.get(symbol)
+        sector = (getattr(f, "yahoo_sector", None) or "").strip()
+        industry = (getattr(f, "yahoo_industry", None) or "").strip()
+        if sector or industry:
+            out[symbol] = (sector, industry)
     return out
 
 
@@ -506,7 +558,7 @@ def scan(cfg: Config, bars: dict, benchmark=None, today: date | None = None,
     # --- rank first, then screen DOWN the ranking, as the backtest does ---
     if fcfg.halal_screened:
         ranked = mom.top_n(scores, max(fcfg.halal_shortlist, fcfg.top_n))
-        verdicts = screen_symbols(ranked, cfg, market, progress=progress)
+        verdicts, facts = screen_symbols(ranked, cfg, market, progress=progress)
         chosen = []
         for symbol in ranked:
             if len(chosen) >= fcfg.top_n:
@@ -520,7 +572,11 @@ def scan(cfg: Config, bars: dict, benchmark=None, today: date | None = None,
         out.shortlist_short = len(chosen) < fcfg.top_n
     else:
         chosen = mom.top_n(scores, fcfg.top_n)
-        verdicts = {}
+        verdicts, facts = {}, {}
+
+    # Sectors for the chosen names, from the facts the screen already paid for
+    # and the cache otherwise. AFTER `top_n`, so it cannot reach the ranking.
+    labels = classify(chosen, cfg, market, known=facts)
 
     all_turnover = np.array([elig.turnover.get(s, 0.0) for s in elig.symbols],
                             dtype=float)
@@ -541,6 +597,7 @@ def scan(cfg: Config, bars: dict, benchmark=None, today: date | None = None,
                                           all_turnover),
             index_band=members.band_of(symbol),
             halal=verdicts.get(symbol))
+        pick.sector, pick.industry = labels.get(symbol, ("", ""))
         pick.target_value_inr = out.ticket_inr
 
         pos = held_map.get(symbol)
@@ -626,6 +683,151 @@ def _attach_news(picks: list, cfg: Config, market, progress=None) -> None:
         results = news_mod.unavailable([p.symbol for p in picks], str(e))
     for p in picks:
         p.news = results.get(p.symbol)
+
+
+# ------------------------------------------------- where the money sits
+
+#: The bucket for a name nobody has classified. A LABEL, not a sector - it
+#: exists so the money is still on screen when the label is missing.
+UNCLASSIFIED = "unclassified"
+
+
+@dataclass(frozen=True)
+class SectorRow:
+    """One sector, wanted against held. Held is None when it is not known."""
+    sector: str
+    wanted_inr: float
+    wanted_pct: float
+    names: int
+    held_inr: float | None = None
+    held_pct: float | None = None
+    held_names: int | None = None
+
+    @property
+    def shift_pp(self) -> float | None:
+        """Percentage POINTS the rebalance would move this sector, or None."""
+        if self.held_pct is None:
+            return None
+        return (self.wanted_pct - self.held_pct) * 100.0
+
+
+@dataclass
+class SectorMix:
+    """
+    Where the sleeve's money sits, and where it already sits.
+
+    THE SLEEVE HAS NO SECTOR CAP AND THE BACKTESTED BOOK HAD NONE. Nothing in
+    F1-F5 measured one, so this is reported the way `RegimeState` is reported:
+    as a fact that changes no pick. Cross-sectional momentum concentrates by
+    construction - it holds whatever is running - and a threshold drawn here
+    would be a number chosen on a page rather than one derived from a result.
+    """
+    rows: list = field(default_factory=list)
+    wanted_total_inr: float = 0.0
+    held_total_inr: float | None = None
+    held_available: bool = False
+    held_note: str = "not read"
+    #: Picks the pot never reached. They weigh nothing, so without naming them
+    #: a sector the sleeve WANTED would silently read as one it does not.
+    unfunded: tuple = ()
+    #: Held names carrying no classification, so an `unclassified` row can say
+    #: what is in it rather than leaving a number nobody can attribute.
+    unclassified_held: tuple = ()
+
+    @property
+    def has_unclassified(self) -> bool:
+        return any(r.sector == UNCLASSIFIED for r in self.rows)
+
+
+def sector_mix(cfg: Config, scan_result: SleeveScan, holdings=None) -> SectorMix:
+    """
+    Where the money sits, wanted against held.
+
+    Wanted weight is FUNDED rupees - `target_qty * price` - because that is
+    what "how much am I putting into this sector" asks. A pick the pot never
+    reached therefore weighs nothing, which is honest and also invisible, so
+    `unfunded` names it. Same discipline as `wanted_log` beside `holdings_log`:
+    the ranking's request and the account's capacity are two different facts
+    and neither may stand in for the other.
+
+    Held weight is WITHHELD ENTIRELY when the holdings read failed or a
+    currency would not convert - `held_inr` and `held_pct` come back None
+    rather than 0. A share computed against a denominator that could not be
+    established reads exactly like one that was, and it would be acted on.
+    That is `PortfolioSnapshot.weight()`'s rule, applied here.
+
+    The held side is the same map `decide()` uses, so the panel and the call
+    cannot disagree about what is owned. Note what that means: the snapshot is
+    the WHOLE account, so anything held for another book counts here too -
+    which is already true of the SELL rows `decide()` emits, and is simply
+    visible for the first time.
+    """
+    wanted: dict[str, list] = {}          # sector -> [rupees, name count]
+    unfunded = []
+    for pick in scan_result.picks:
+        value = float(pick.target_qty) * float(pick.price)
+        if pick.target_qty <= 0:
+            unfunded.append(pick.symbol)
+        bucket = wanted.setdefault(pick.sector or UNCLASSIFIED, [0.0, 0])
+        bucket[0] += value
+        bucket[1] += 1
+
+    held_map, available, note = _holdings_map(holdings)
+    held: dict[str, list] = {}            # sector -> [rupees, name count]
+    unclassified_held: list[str] = []
+    held_total: float | None = None
+
+    if available:
+        market = markets_mod.factor_market(cfg)
+        by_symbol = {p.symbol: p for p in scan_result.picks}
+        # Only the names the picks did not already classify need the cache.
+        extra = [s for s in held_map if s not in by_symbol]
+        labels = classify(extra, cfg, market)
+        values = getattr(holdings, "value_inr", {}) or {}
+        held_total = 0.0
+        for symbol, pos in held_map.items():
+            pick = by_symbol.get(symbol)
+            if pick is not None and pick.sector:
+                sector = pick.sector
+            else:
+                sector = (labels.get(symbol) or ("", ""))[0] or UNCLASSIFIED
+            # The CONVERTED value, never `value_native` - a dollar line added
+            # to a rupee total is a sector weight that is 88x wrong and looks
+            # entirely ordinary.
+            value = float(values.get(getattr(pos, "key", ""), 0.0) or 0.0)
+            if sector == UNCLASSIFIED:
+                unclassified_held.append(symbol)
+            bucket = held.setdefault(sector, [0.0, 0])
+            bucket[0] += value
+            bucket[1] += 1
+            held_total += value
+
+    wanted_total = sum(v[0] for v in wanted.values())
+    rows = []
+    for sector in set(wanted) | set(held):
+        w_inr, w_names = wanted.get(sector, [0.0, 0])
+        h = held.get(sector)
+        rows.append(SectorRow(
+            sector=sector,
+            wanted_inr=w_inr,
+            wanted_pct=(w_inr / wanted_total) if wanted_total > 0 else 0.0,
+            names=w_names,
+            held_inr=(h[0] if h else 0.0) if available else None,
+            held_pct=(((h[0] if h else 0.0) / held_total)
+                      if available and held_total else
+                      (0.0 if available else None)),
+            held_names=(h[1] if h else 0) if available else None,
+        ))
+
+    # `unclassified` last always - it is a statement about the data, and a
+    # sorted table that floated it to the top would read as the largest sector.
+    rows.sort(key=lambda r: (r.sector == UNCLASSIFIED,
+                             -(max(r.wanted_inr, r.held_inr or 0.0)),
+                             r.sector))
+    return SectorMix(
+        rows=rows, wanted_total_inr=wanted_total,
+        held_total_inr=held_total, held_available=available, held_note=note,
+        unfunded=tuple(unfunded), unclassified_held=tuple(unclassified_held))
 
 
 # ------------------------------------------------- between rebalances

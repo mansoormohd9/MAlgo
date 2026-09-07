@@ -591,3 +591,220 @@ def test_the_report_labels_flags_as_prompts_not_signals(cfg, world):
     text = sl.report(scan, sl.decide(scan, held), sl.review(cfg, scan, held))
     assert "never orders" in text
     assert "prompts to read" in text
+
+
+# --------------------------------------------------------- the sector mix
+
+class _Fund:
+    """Just the two fields `classify` reads."""
+    def __init__(self, sector, industry=""):
+        self.yahoo_sector = sector
+        self.yahoo_industry = industry
+
+
+class _KeyedPos(_Pos):
+    """A position with the `key` a real `Position` carries."""
+    def __init__(self, symbol, quantity, market="india", **kw):
+        super().__init__(symbol, quantity, **kw)
+        self.key = f"{market}:{symbol}"
+
+
+class _ValuedSnapshot(_Snapshot):
+    """A snapshot that converts, the way `aggregate.load` produces one."""
+    def __init__(self, positions, value_inr=None, **kw):
+        super().__init__(positions, **kw)
+        self.value_inr = dict(value_inr or {
+            p.key: p.quantity * p.last_price for p in positions})
+
+
+def _labels(monkeypatch, mapping):
+    """Pin what the fundamentals cache appears to hold. No network, no file."""
+    from nifty_algo.swing import fundamentals as fund_mod
+    monkeypatch.setattr(
+        fund_mod, "read_cached",
+        lambda cfg, market: {s: _Fund(v) for s, v in mapping.items()})
+
+
+def test_sector_cannot_reach_the_ranking(cfg, world, monkeypatch):
+    """
+    Momentum ranks on price and nothing else.
+
+    Sector is attached AFTER `top_n` has chosen, exactly as `halal` and `news`
+    are - so relabelling every name must leave the book byte-identical. A
+    sector that could reorder the picks would make the live sleeve a different
+    and untested strategy while every figure on the page still described the
+    tested one. Same guard as `test_news_cannot_reach_the_ranking`.
+    """
+    day = _last_mark(world)
+    plain = sl.scan(cfg, world, today=day)
+
+    _labels(monkeypatch, {s: f"Sector {i}" for i, s in enumerate(world)})
+    labelled = sl.scan(cfg, world, today=day)
+
+    assert [p.symbol for p in labelled.picks] == [p.symbol for p in plain.picks]
+    assert [p.rank for p in labelled.picks] == [p.rank for p in plain.picks]
+    assert [p.target_qty for p in labelled.picks] == [
+        p.target_qty for p in plain.picks]
+    assert all(p.sector for p in labelled.picks)
+    assert all(p.sector == "" for p in plain.picks)
+
+
+def test_the_wanted_side_is_funded_rupees(cfg, world, monkeypatch):
+    _labels(monkeypatch, {s: "Industrials" for s in world})
+    scan = sl.scan(cfg, world, today=_last_mark(world))
+    mix = sl.sector_mix(cfg, scan)
+
+    assert [r.sector for r in mix.rows] == ["Industrials"]
+    row = mix.rows[0]
+    assert row.names == len(scan.picks)
+    assert row.wanted_inr == pytest.approx(
+        sum(p.target_qty * p.price for p in scan.picks))
+    assert row.wanted_pct == pytest.approx(1.0)
+    assert mix.wanted_total_inr == pytest.approx(row.wanted_inr)
+
+
+def test_an_unclassified_name_is_its_own_row_and_goes_last(cfg, world,
+                                                           monkeypatch):
+    """
+    A missing fact is never folded into a bucket nobody put it in, and it
+    never floats to the top of a sorted table where it would read as the
+    largest sector.
+    """
+    day = _last_mark(world)
+    scan = sl.scan(cfg, world, today=day)
+    named = scan.picks[0].symbol
+    _labels(monkeypatch, {named: "Technology"})       # every other name: none
+
+    scan = sl.scan(cfg, world, today=day)
+    mix = sl.sector_mix(cfg, scan)
+
+    sectors = [r.sector for r in mix.rows]
+    assert sl.UNCLASSIFIED in sectors
+    assert sectors[-1] == sl.UNCLASSIFIED
+    assert mix.has_unclassified
+    assert sum(r.names for r in mix.rows) == len(scan.picks)
+
+
+def test_the_held_side_is_withheld_when_holdings_were_not_read(cfg, world,
+                                                               monkeypatch):
+    """
+    None, not zero. A share computed against a denominator that could not be
+    established reads exactly like one that was, and it would be acted on -
+    the rule PortfolioSnapshot.weight() applies, applied to a sector table.
+    """
+    _labels(monkeypatch, {s: "Industrials" for s in world})
+    scan = sl.scan(cfg, world, today=_last_mark(world))
+
+    for holdings in (None, _Snapshot([], complete=False, notes=["kite down"])):
+        mix = sl.sector_mix(cfg, scan, holdings)
+        assert mix.held_available is False
+        assert mix.held_total_inr is None
+        assert all(r.held_inr is None for r in mix.rows)
+        assert all(r.held_pct is None for r in mix.rows)
+        assert all(r.shift_pp is None for r in mix.rows)
+
+
+def test_the_held_side_uses_converted_rupees(cfg, world, monkeypatch):
+    """
+    NEVER value_native. A dollar line added to a rupee total is a sector
+    weight ~88x wrong that looks entirely ordinary - the same failure
+    swing/fx.py fails closed to prevent.
+    """
+    day = _last_mark(world)
+    scan = sl.scan(cfg, world, today=day)
+    a, b = scan.picks[0].symbol, scan.picks[1].symbol
+    _labels(monkeypatch, {a: "Technology", b: "Energy"})
+    scan = sl.scan(cfg, world, today=day)
+
+    held = _ValuedSnapshot(
+        [_KeyedPos(a, 10, last_price=1.0), _KeyedPos(b, 10, last_price=1.0)],
+        value_inr={f"india:{a}": 30_000.0, f"india:{b}": 10_000.0})
+    mix = sl.sector_mix(cfg, scan, held)
+
+    assert mix.held_available is True
+    assert mix.held_total_inr == pytest.approx(40_000.0)
+    by = {r.sector: r for r in mix.rows}
+    assert by["Technology"].held_inr == pytest.approx(30_000.0)
+    assert by["Technology"].held_pct == pytest.approx(0.75)
+    assert by["Energy"].held_pct == pytest.approx(0.25)
+    assert by["Technology"].shift_pp == pytest.approx(
+        (by["Technology"].wanted_pct - 0.75) * 100.0)
+
+
+def test_a_held_name_outside_the_picks_still_lands_in_a_sector(cfg, world,
+                                                               monkeypatch):
+    """
+    The snapshot is the whole account, so the held column must classify names
+    the ranking never chose - and say unclassified when it cannot, rather
+    than dropping the money.
+    """
+    day = _last_mark(world)
+    scan = sl.scan(cfg, world, today=day)
+    outsider = "WIN11"
+    assert outsider not in {p.symbol for p in scan.picks}
+    _labels(monkeypatch, {p.symbol: "Industrials" for p in scan.picks})
+    scan = sl.scan(cfg, world, today=day)
+
+    held = _ValuedSnapshot([_KeyedPos(outsider, 10, last_price=1.0)],
+                           value_inr={f"india:{outsider}": 5_000.0})
+    mix = sl.sector_mix(cfg, scan, held)
+
+    assert mix.unclassified_held == (outsider,)
+    by = {r.sector: r for r in mix.rows}
+    assert by[sl.UNCLASSIFIED].held_inr == pytest.approx(5_000.0)
+    assert by[sl.UNCLASSIFIED].names == 0
+    assert mix.held_total_inr == pytest.approx(5_000.0)
+
+
+def test_an_unfunded_pick_is_named_rather_than_dropped(cfg, world,
+                                                       monkeypatch):
+    """
+    A pick the pot never reached weighs nothing, which is honest and also
+    invisible. Without naming it, a sector the sleeve WANTED reads as one it
+    does not - the wanted_log beside holdings_log discipline.
+    """
+    _labels(monkeypatch, {s: "Industrials" for s in world})
+    cfg.capital.factor_capital_inr = 1.0          # buys nothing at any price
+    scan = sl.scan(cfg, world, today=_last_mark(world))
+    mix = sl.sector_mix(cfg, scan)
+
+    assert all(p.target_qty == 0 for p in scan.picks)
+    assert set(mix.unfunded) == {p.symbol for p in scan.picks}
+    assert mix.wanted_total_inr == 0.0
+    assert all(r.wanted_pct == 0.0 for r in mix.rows)
+    assert sum(r.names for r in mix.rows) == len(scan.picks)
+
+
+def test_classifying_never_reaches_the_network(cfg, world, monkeypatch):
+    """
+    load_fundamentals refreshes anything older than a week as a side effect,
+    so asking it for a sector would fire one slow request per missing name in
+    the middle of drawing a panel. read_cached is the door that cannot.
+    """
+    from nifty_algo.swing import fundamentals as fund_mod
+
+    def _boom(*a, **k):                                    # pragma: no cover
+        raise AssertionError("classify fetched")
+
+    monkeypatch.setattr(fund_mod, "load_fundamentals", _boom)
+    monkeypatch.setattr(fund_mod, "_fetch_one", _boom)
+
+    market = markets_mod.factor_market(cfg)
+    out = sl.classify(list(world), cfg, market)
+    assert isinstance(out, dict)
+
+    scan = sl.scan(cfg, world, today=_last_mark(world))
+    assert sl.sector_mix(cfg, scan).rows
+
+
+def test_known_facts_beat_the_cache(cfg, world, monkeypatch):
+    """
+    The objects screen_symbols just fetched win over the file, because the
+    write that follows them swallows its own errors - so a freshly screened
+    name could otherwise come back unclassified.
+    """
+    _labels(monkeypatch, {"WIN00": "Stale"})
+    market = markets_mod.factor_market(cfg)
+    out = sl.classify(["WIN00"], cfg, market,
+                      known={"WIN00": _Fund("Fresh", "Widgets")})
+    assert out["WIN00"] == ("Fresh", "Widgets")

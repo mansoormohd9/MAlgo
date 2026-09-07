@@ -284,3 +284,160 @@ def test_the_micro_cap_warning_is_suppressed_once_restricted(page, monkeypatch):
     next(b for b in page.button if "Run scan" in b.label).click().run()
     assert not page.exception
     assert "sit outside the Nifty 500" not in _text(page)
+
+
+# ------------------------------------------------------ the controls hold
+
+def test_the_pot_survives_a_second_increment(page):
+    """
+    THE BUG THIS FILE COULD NOT SEE. Every control on this page reads the
+    shared config for its default and writes the result straight back, and
+    Streamlit hashes `value=` into a widget's element id unless a `key` is
+    given. So the identity moved on the run AFTER every accepted change, the
+    new id had no stored state, and the widget fell back to its default: the
+    pot advanced one step per two clicks of the stepper.
+
+    The existing tests never caught it because they set the pot and read the
+    config in the SAME run, which is the one run in the cycle that works. Two
+    changes in succession is the smallest sequence that fails.
+    """
+    from nifty_algo.config import DEFAULT
+
+    page.number_input[0].set_value(200_000.0).run()
+    assert DEFAULT.capital.factor_capital_inr == 200_000.0
+    assert page.number_input[0].value == 200_000.0
+
+    page.number_input[0].set_value(225_000.0).run()
+    assert page.number_input[0].value == 225_000.0
+    assert DEFAULT.capital.factor_capital_inr == 225_000.0
+
+    page.number_input[0].set_value(250_000.0).run()
+    assert page.number_input[0].value == 250_000.0
+    assert DEFAULT.capital.factor_capital_inr == 250_000.0
+
+
+def test_the_universe_selector_survives_a_second_change(page):
+    """
+    Same defect, and worse consequences: this is the control that decides
+    which recorded numbers the page is allowed to quote, so a swallowed
+    selection shows one universe's figures above another universe's book.
+    """
+    page.selectbox[0].set_value("nifty500").run()
+    assert page.selectbox[0].value == "nifty500"
+
+    page.selectbox[0].set_value("all").run()
+    assert page.selectbox[0].value == "all"
+    assert "+18.79%" in _text(page)
+
+    page.selectbox[0].set_value("nifty500").run()
+    assert page.selectbox[0].value == "nifty500"
+    assert "+17.60%" in _text(page)
+
+
+def test_the_toggles_survive_a_second_change(page):
+    from nifty_algo.config import DEFAULT
+
+    regime = next(t for t in page.toggle if t.label == "Show regime")
+    regime.set_value(True).run()
+    assert DEFAULT.factor.regime_ma_days == 50
+
+    next(t for t in page.toggle if t.label == "Show regime").set_value(
+        False).run()
+    assert DEFAULT.factor.regime_ma_days == 0
+
+    next(t for t in page.toggle if t.label == "Show regime").set_value(
+        True).run()
+    assert DEFAULT.factor.regime_ma_days == 50
+
+
+# --------------------------------------------------- target is not an order
+
+def _run_scan(page, pot=500_000.0):
+    page.number_input[0].set_value(pot).run()
+    next(b for b in page.button if "Run scan" in b.label).click().run()
+    assert not page.exception
+    return page.session_state["factor_sleeve_scan"]
+
+
+def test_the_picks_table_names_target_and_order_apart(page):
+    """
+    `target_qty` is shares to HOLD. The column used to be headed `buy`, so a
+    name held 40 with a target of 48 read as "buy 48" when the order was 8.
+    """
+    _run_scan(page)
+    picks = next(df.value for df in page.dataframe
+                 if "symbol" in df.value.columns)
+    assert "target" in picks.columns
+    assert "order" in picks.columns
+    assert "buy" not in picks.columns
+
+
+def test_the_order_column_comes_from_decide(page):
+    """
+    ONE SOURCE OF TRUTH. The table and "The call" must never disagree about a
+    quantity, so the page looks the order up rather than subtracting held from
+    target a second time.
+    """
+    _run_scan(page)
+    actions = {a.symbol: a for a in page.session_state["factor_sleeve_actions"]}
+    picks = next(df.value for df in page.dataframe
+                 if "order" in df.value.columns)
+    for _, row in picks.iterrows():
+        action = actions[row["symbol"]]
+        expected = (f"{action.kind} {action.qty}" if action.is_trade
+                    else "hold")
+        assert row["order"] == expected
+
+
+def test_a_held_name_shows_its_top_up_not_its_target(page, monkeypatch):
+    """The exact confusion the relabel exists to remove."""
+    from nifty_algo.portfolio.base import Position
+    from nifty_algo.portfolio import aggregate as agg
+
+    scan = _run_scan(page)
+    symbol = scan.picks[0].symbol
+    owned = max(1, scan.picks[0].target_qty - 3)
+
+    snapshot = agg.PortfolioSnapshot(
+        positions=[Position(key=f"india:{symbol}", symbol=symbol,
+                            market="india", quantity=float(owned),
+                            average_price=1.0, last_price=1.0, currency="INR")],
+        results=[], value_inr={f"india:{symbol}": float(owned)})
+    monkeypatch.setattr(agg, "load", lambda cfg: snapshot)
+
+    next(b for b in page.button if "Run scan" in b.label).click().run()
+    assert not page.exception
+
+    actions = {a.symbol: a for a in page.session_state["factor_sleeve_actions"]}
+    assert actions[symbol].kind == "TOP_UP"
+    picks = next(df.value for df in page.dataframe
+                 if "order" in df.value.columns)
+    row = picks[picks["symbol"] == symbol].iloc[0]
+    assert row["order"] == f"TOP_UP {actions[symbol].qty}"
+    assert row["target"] != actions[symbol].qty
+
+
+# ------------------------------------------------------------ the sector mix
+
+def test_the_sector_panel_renders_and_never_judges(page):
+    """
+    No sector cap was ever measured on this book, so the panel states and does
+    not advise. A threshold here would be a number chosen on a page.
+    """
+    _run_scan(page)
+    body = _text(page)
+    assert "no sector cap" in body.lower()
+    assert "Yahoo/GICS" in body
+
+
+def test_the_held_columns_are_absent_when_holdings_were_not_read(page):
+    """
+    A 0.0% against a denominator that could not be established reads exactly
+    like one that could. The columns are withheld, not zeroed.
+    """
+    _run_scan(page)
+    frames = [df.value for df in page.dataframe
+              if "sector" in df.value.columns and "wanted" in df.value.columns]
+    assert frames, "the sector table did not render"
+    assert "held" not in frames[0].columns
+    assert "shift" not in frames[0].columns
