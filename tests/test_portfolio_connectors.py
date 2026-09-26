@@ -155,12 +155,12 @@ def test_every_registered_connector_satisfies_the_protocol():
         assert connector.key == key
 
 
-def test_ibkr_is_registered_and_says_what_it_needs():
-    """The stub exists so the protocol is proven against two brokers. It must
-    answer without raising, and it must name what implementing it needs."""
+def test_an_unconfigured_ibkr_says_what_it_needs():
+    """No Flex token (conftest blanks it): answer without raising, as
+    UNAVAILABLE, and name both the setup and the manual fallback."""
     result = registry.get("ibkr").fetch()
     assert result.available is False
-    assert "ib_insync" in result.note
+    assert "IBKR_FLEX_TOKEN" in result.note
     assert "manual_positions.csv" in result.note
 
 

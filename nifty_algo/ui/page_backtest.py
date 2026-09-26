@@ -246,13 +246,15 @@ def _swing(cfg, p) -> None:
     c1, c2, c3 = st.columns([1, 1, 2])
     years = c1.number_input("Years", min_value=1.0, max_value=10.0,
                             value=3.0, step=0.5, key="swing_bt_years")
-    pot = c2.number_input("Swing pot (₹)", min_value=0.0, step=5_000.0,
+    pot = c2.number_input("What-if pot (₹)", min_value=0.0, step=5_000.0,
                           value=float(cfg.capital.swing_capital_inr or
                                       100_000.0),
                           key="swing_bt_pot",
-                          help="Sizes every ticket. The backtest refuses to "
+                          help="A what-if for this run only - never saved. "
+                               "Sizes every ticket; the backtest refuses to "
                                "deploy more than this in total, because live "
-                               "the third buy is simply rejected.")
+                               "the third buy is simply rejected. Your real "
+                               "pot is set on Money & goals.")
     c3.caption(
         "Reads the daily bars already cached by the scan where it can. "
         "A longer window downloads more history the first time, which takes "
@@ -265,8 +267,7 @@ def _swing(cfg, p) -> None:
         return
 
     if pot <= 0:
-        st.error("A ₹0 pot sizes every ticket to zero. Set it above, or on "
-                 "the Settings page.")
+        st.error("A ₹0 pot sizes every ticket to zero. Set a what-if above.")
         return
 
     # `get_config()` hands back the process-global DEFAULT, so BOTH of these

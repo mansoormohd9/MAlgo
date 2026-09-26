@@ -1,0 +1,18 @@
+<FlexQueryResponse queryName="positions" type="AF">
+  <FlexStatements count="1">
+    <FlexStatement accountId="U1234567" fromDate="20260925" toDate="20260925">
+      <OpenPositions>
+        <OpenPosition accountId="U1234567" assetCategory="STK" symbol="SPUS" description="SP FUNDS S&amp;P 500 SHARIA ETF" currency="USD" listingExchange="ARCA" position="120.5" markPrice="45.10" costBasisPrice="38.00" levelOfDetail="SUMMARY" />
+        <OpenPosition accountId="U1234567" assetCategory="STK" symbol="HLAL" description="WAHED FTSE USA SHARIAH ETF" currency="USD" listingExchange="NASDAQ" position="200" markPrice="55.00" costBasisPrice="48.50" levelOfDetail="SUMMARY" />
+        <OpenPosition accountId="U1234567" assetCategory="STK" symbol="ISDW" description="ISHARES MSCI WORLD ISLAMIC UCITS" currency="USD" listingExchange="LSEETF" position="30" markPrice="60.00" costBasisPrice="52.00" levelOfDetail="SUMMARY" />
+        <OpenPosition accountId="U1234567" assetCategory="STK" symbol="AAPL" description="APPLE INC" currency="USD" listingExchange="NASDAQ" position="4.25" markPrice="230.00" costBasisPrice="180.00" levelOfDetail="SUMMARY" />
+        <OpenPosition accountId="U1234567" assetCategory="STK" symbol="AAPL" description="APPLE INC" currency="USD" listingExchange="NASDAQ" position="4.25" markPrice="230.00" costBasisPrice="180.00" levelOfDetail="LOT" />
+        <OpenPosition accountId="U1234567" assetCategory="OPT" symbol="AAPL 261218C00250000" description="AAPL CALL" currency="USD" listingExchange="CBOE" position="1" markPrice="3.20" levelOfDetail="SUMMARY" />
+      </OpenPositions>
+      <CashReport>
+        <CashReportCurrency accountId="U1234567" currency="BASE_SUMMARY" endingCash="1500.00" />
+        <CashReportCurrency accountId="U1234567" currency="USD" endingCash="1500.00" />
+      </CashReport>
+    </FlexStatement>
+  </FlexStatements>
+</FlexQueryResponse>

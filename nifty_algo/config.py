@@ -1075,6 +1075,69 @@ class PortfolioConfig:
 
 
 @dataclass
+class PlanConfig:
+    """
+    The investor, not the strategy: what the money is FOR and how it is split.
+
+    WHY THIS EXISTS. Every other section of this file configures a book. None of
+    them could answer the question a book's pot depends on - how much of the net
+    worth should be in it - so each pot was typed in isolation, on its own page.
+    `factor/drawdown.sizing_report` had already derived the sleeve's safe share
+    of net worth from its measured drawdown, and there was nowhere to put the
+    net worth it multiplies.
+
+    THESE ARE YOUR NUMBERS, SO THEY PERSIST (`settings_store.FIELDS`) and are
+    flat floats rather than a dict, because `apply_to` coerces by the type of
+    the default and a dict would coerce anything to anything.
+
+    TARGET WEIGHTS DEFAULT TO ZERO, AND ZERO MEANS "NOT SET". A default split
+    shipped in version control would be the code quietly choosing an
+    allocation; the Money & goals page offers a starting point you have to
+    press, and `planning.allocation` refuses to compute drift until the
+    targets sum to 100%.
+    """
+    age: int = 0
+    monthly_expenses_inr: float = 0.0
+    #: Months of expenses to hold in cash before anything is invested.
+    emergency_months: float = 6.0
+    #: The WHOLE-portfolio fall you would hold through without selling. It is
+    #: what sizes the factor sleeve: share = tolerance / planning drawdown.
+    tolerated_drawdown_pct: float = 0.15
+    #: Drift, in percentage points, before a class is flagged for rebalancing.
+    rebalance_band_pp: float = 5.0
+    #: What you expect to add each month - "where the next rupee goes".
+    monthly_investment_inr: float = 0.0
+
+    w_india_equity: float = 0.0
+    w_foreign_equity: float = 0.0
+    w_gold: float = 0.0
+    w_fixed_income: float = 0.0
+    w_cash: float = 0.0
+
+    #: A property of the holder, not of any strategy. Drives the default of
+    #: every screen toggle and a note on interest-bearing classes.
+    halal_only: bool = False
+
+    def targets(self) -> dict[str, float]:
+        return {
+            "india_equity": self.w_india_equity,
+            "foreign_equity": self.w_foreign_equity,
+            "gold": self.w_gold,
+            "fixed_income": self.w_fixed_income,
+            "cash": self.w_cash,
+        }
+
+
+@dataclass
+class UiConfig:
+    """Console preferences that describe you rather than a strategy."""
+    #: The option, swing and intraday books - all measured, all closed or
+    #: losing to their nulls - live behind this switch rather than in the
+    #: main flow. Hidden, never deleted: the research is the record.
+    show_research_lab: bool = False
+
+
+@dataclass
 class ShortPremiumConfig:
     """
     Intraday NIFTY option SELLING. The FOURTH book.
@@ -1453,6 +1516,8 @@ class Config:
         default_factory=ShortPremiumBrokerConfig)
     factor: FactorConfig = field(default_factory=FactorConfig)
     portfolio: PortfolioConfig = field(default_factory=PortfolioConfig)
+    plan: PlanConfig = field(default_factory=PlanConfig)
+    ui: UiConfig = field(default_factory=UiConfig)
 
 
 DEFAULT = Config()

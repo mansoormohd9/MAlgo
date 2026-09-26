@@ -84,7 +84,17 @@ def test_only_account_facts_are_persisted():
     assert keys == {"option_capital_inr", "swing_capital_inr",
                     "foreign_capital_inr", "equity_dry_run", "ddpi_active",
                     "factor_capital_inr", "factor_universe",
-                    "factor_halal_screened"}
+                    "factor_halal_screened",
+                    # The investor profile and split (Money & goals): account
+                    # facts about the HOLDER, which every pot now hangs off.
+                    "plan_age", "plan_monthly_expenses_inr",
+                    "plan_emergency_months", "plan_tolerated_drawdown_pct",
+                    "plan_rebalance_band_pp", "plan_monthly_investment_inr",
+                    "plan_w_india_equity", "plan_w_foreign_equity",
+                    "plan_w_gold", "plan_w_fixed_income", "plan_w_cash",
+                    "plan_halal_only",
+                    # Which accounts you hold money in, and the lab switch.
+                    "portfolio_connectors", "ui_show_research_lab"}
 
 
 def test_the_sleeve_settings_survive_a_restart(path):
@@ -148,3 +158,43 @@ def test_live_orders_do_survive_when_ddpi_is_active(path):
 
     assert fresh.equity_broker.dry_run is False
     assert not notes
+
+
+def test_the_plan_survives_a_restart(path):
+    """Money & goals is set once; forgetting it would silently un-plan."""
+    cfg = Config()
+    cfg.plan.age = 32
+    cfg.plan.monthly_expenses_inr = 60_000.0
+    cfg.plan.w_india_equity = 55.0
+    cfg.plan.halal_only = True
+    cfg.portfolio.connectors = ("manual", "kite", "cas")
+    cfg.ui.show_research_lab = True
+    ss.save(cfg, path)
+
+    fresh = Config()
+    assert ss.apply_to(fresh, path) == []
+    assert fresh.plan.age == 32 and isinstance(fresh.plan.age, int)
+    assert fresh.plan.monthly_expenses_inr == 60_000.0
+    assert fresh.plan.w_india_equity == 55.0
+    assert fresh.plan.halal_only is True
+    assert fresh.portfolio.connectors == ("manual", "kite", "cas")
+    assert fresh.ui.show_research_lab is True
+
+
+def test_an_unknown_connector_is_dropped_and_named(path):
+    """A typo must not mark every snapshot incomplete forever."""
+    path.write_text('{"portfolio_connectors": ["manual", "kiet"]}',
+                    encoding="utf-8")
+    fresh = Config()
+    notes = ss.apply_to(fresh, path)
+    assert fresh.portfolio.connectors == ("manual",)
+    assert any("kiet" in n for n in notes)
+
+
+def test_a_bare_connector_string_is_not_split_into_characters(path):
+    """`tuple("kite")` is ('k','i','t','e'); every one of those is unknown,
+    and filtering them would have left nothing - not even the manual file."""
+    path.write_text('{"portfolio_connectors": "kite"}', encoding="utf-8")
+    fresh = Config()
+    ss.apply_to(fresh, path)
+    assert fresh.portfolio.connectors == ("manual", "kite")

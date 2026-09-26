@@ -44,6 +44,8 @@ data/cache/
 # the strategy - the strategy's tunables all live in config.py, in version
 # control, where changing one is a diff somebody can read.
 data/settings.json
+# Your mutual-fund balances, imported from a CAS on the Connect page.
+data/cas_holdings.json
 
 # --- Python ---
 __pycache__/

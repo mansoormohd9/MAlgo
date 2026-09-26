@@ -24,7 +24,7 @@ from datetime import date
 import pandas as pd
 import streamlit as st
 
-from .components import banner
+from .components import banner, kite_login_panel
 from .state import get_book, get_config, get_equity_broker
 from .theme import get_palette
 from ..broker import kite_equity as eq_mod
@@ -72,7 +72,7 @@ def render() -> None:
 def _mode_banner(cfg, broker, p) -> None:
     if broker.dry_run:
         banner("<b>DRY RUN</b> — payloads are journalled, nothing reaches "
-               "Zerodha. Turn this off on the Settings page when you are "
+               "Zerodha. Turn this off on Money & goals when you are "
                "ready.", p.series_1, "ℹ")
     else:
         banner("<b>LIVE</b> — orders placed from this page spend real money.",
@@ -103,7 +103,7 @@ def _checklist(cfg, broker, book, p) -> None:
                 "Kite issues one per login and it dies overnight — there is "
                 "no refresh token."
             )
-            _login_panel(session)
+            kite_login_panel(session)
 
     # --- 2. holdings authorisation ---
     state, why = broker.protection_state()
@@ -151,32 +151,6 @@ def _checklist(cfg, broker, book, p) -> None:
             f"today.</b> Any stop that triggers will be rejected by CDSL — "
             f"it will still show as active in Kite.",
             p.critical, "⛔")
-
-
-def _login_panel(session) -> None:
-    """The daily login, inline. It was CLI-only before this page existed."""
-    try:
-        url = session.login_url()
-    except Exception as e:
-        st.caption(f"Cannot build a login URL: {e}")
-        return
-    st.link_button("Open Kite login", url, width="stretch")
-    pasted = st.text_input(
-        "Paste the redirect URL (or just the request_token)",
-        key="kite_request_token",
-        help="After logging in, Kite redirects to your registered URL with "
-             "?request_token=... in it. Paste the whole address.",
-    )
-    if pasted and st.button("Exchange for a token", key="kite_exchange"):
-        from ..broker.kite_login import extract_request_token
-        try:
-            session.exchange(extract_request_token(pasted))
-        except Exception as e:
-            st.error(f"{e}")
-            return
-        st.session_state.pop("equity_broker", None)
-        st.success("Authenticated.")
-        st.rerun()
 
 
 # ---------------------------------------------------------------- the run

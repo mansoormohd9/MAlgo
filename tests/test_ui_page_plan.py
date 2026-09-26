@@ -1,5 +1,10 @@
 """
-The Settings page — the capital boxes in particular.
+Money & goals — the capital boxes in particular.
+
+MOVED FROM `test_ui_page_settings.py` with the boxes themselves: every pot is
+now edited on Money & goals (`page_plan.py`) and nowhere else. The swing and
+option boxes sit in the "Research lab pots" expander, so `_open` turns the lab
+on. Every assertion below is the one it was on Settings.
 
 WHY THIS FILE EXISTS. `page_settings.py` had no coverage at all, and the first
 number anyone typed into the swing-capital box took the whole app down with a
@@ -25,7 +30,8 @@ from streamlit.testing.v1 import AppTest
 
 from nifty_algo import settings_store
 from nifty_algo.config import Config
-from nifty_algo.ui import page_settings
+from nifty_algo import onboarding
+from nifty_algo.ui import page_plan
 
 APP = str(Path(__file__).resolve().parent.parent / "app.py")
 
@@ -41,10 +47,11 @@ def _open(cfg) -> AppTest:
     at = AppTest.from_file(APP, default_timeout=180)
     sign_in(at)          # app.py gates on auth.require_login()
     at.session_state["cfg"] = cfg
+    cfg.ui.show_research_lab = True   # the swing/option boxes live there
     seed_offline_broker(at, cfg)      # never a real broker - see conftest
     at.run()
     assert not at.exception, _why(at)
-    at.sidebar.radio[0].set_value("Settings").run()
+    at.sidebar.radio[0].set_value(onboarding.PLAN).run()
     assert not at.exception, _why(at)
     return at
 
@@ -168,7 +175,7 @@ def test_a_zero_risk_percentage_does_not_divide_by_zero():
     cfg.capital.session_stop_pct = 0.0
     from nifty_algo.ui.theme import get_palette
 
-    page_settings._pot_note(cfg, 30_000.0, get_palette())   # must not raise
+    page_plan._pot_note(cfg, 30_000.0, get_palette())   # must not raise
     assert cfg.capital.reward_risk_ratio == 0.0             # not a crash
 
 
@@ -180,7 +187,7 @@ def test_pot_note_is_safe_for_any_pot_size():
     cfg = _fresh()
     palette = __import__("nifty_algo.ui.theme", fromlist=["get_palette"]).get_palette()
     for pot in (0.0, 0.01, 1.0, 999.0, 12_000.0, 30_000.0, 1e9):
-        page_settings._pot_note(cfg, pot, palette)   # must not raise
+        page_plan._pot_note(cfg, pot, palette)   # must not raise
 
 
 # ---------------------------------------------------------------- persistence
@@ -192,7 +199,7 @@ def test_typing_does_not_persist_until_save_is_pressed(monkeypatch, tmp_path):
     otherwise commit a number you were halfway through typing.
     """
     saves: list = []
-    monkeypatch.setattr(page_settings, "save_settings",
+    monkeypatch.setattr(page_plan, "save_settings",
                         lambda: saves.append(True))
 
     cfg = _fresh()
@@ -206,7 +213,7 @@ def test_typing_does_not_persist_until_save_is_pressed(monkeypatch, tmp_path):
 
 def test_pressing_save_commits_all_three_pots(monkeypatch, tmp_path):
     path = tmp_path / "settings.json"
-    monkeypatch.setattr(page_settings, "save_settings",
+    monkeypatch.setattr(page_plan, "save_settings",
                         lambda: settings_store.save(cfg, path))
 
     cfg = _fresh()
@@ -214,7 +221,7 @@ def test_pressing_save_commits_all_three_pots(monkeypatch, tmp_path):
     at.number_input(key="cap_option").set_value(250_000.0).run()
     at.number_input(key="cap_swing").set_value(30_000.0).run()
     at.number_input(key="cap_foreign").set_value(800_000.0).run()
-    at.button(key="save_capital").click().run()
+    at.button(key="save_plan").click().run()
 
     assert not at.exception, _why(at)
     assert cfg.capital.swing_capital_inr == 30_000.0
@@ -233,7 +240,7 @@ def test_the_page_renders_at_its_defaults():
     at = _open(_fresh())
 
     assert not at.exception, _why(at)
-    assert at.title[0].value == "Settings"
+    assert at.title[0].value == "Money & goals"
     # An unfunded pot must say it will stand the scan down, not stay silent.
     assert "stand" in " ".join(m.value for m in at.markdown).lower()
 

@@ -30,8 +30,8 @@ waiting: between your click and the fill, nothing of yours needs to be running.
 python -m venv .venv && .venv\Scripts\activate      # Windows
 pip install -r requirements.txt
 
-python -m nifty_algo.demo_risk        # the economics — read this first
-streamlit run app.py                  # the console
+streamlit run app.py                  # the console - start at "1 · Connect"
+python -m nifty_algo.demo_risk        # the option book's economics (research lab)
 ```
 
 That runs on the synthetic chain with no data. To use real data:
@@ -56,19 +56,29 @@ run identical code. Note that `run_live` attaches **no broker**: it will use a
 real chain when Kite is authenticated, but it can never place an order, because
 reading quotes and sending orders are separate permissions.
 
-### The nine pages
+### The console: five steps, then the research lab
+
+The sidebar is the order money actually flows. A first-time user lands on
+step 1, and a checklist under the page list says what is done and what is next
+— each "done" is computed from state (a login, a holding read, a split that
+sums to 100%), never ticked.
 
 | Page | What it does |
 |---|---|
-| **Live alerts** | Session governors with the live ratcheting floor, open positions and where their stops actually sit, alert cards with a **Place order** button, candlestick chart with the levels/trendlines/VWAP the strategies used, and a *why nothing fired* table |
-| **Daily brief** | Pre-open frame (gap, ATR, VIX, expiry, the day's rupee budget); the option chain with **which gate each strike fails**; and a journal-driven review of any past day |
-| **Daily picks** | A different book: once a day it sweeps one market's universe — **India** (Nifty 100), **US** (the union of SPUS + HLAL constituents) or **UK** (FTSE 100) — applies a **halal (Shariah) screen** under both the FTSE/Yasaar and AAOIFI standards, and returns at most three cash-equity LONG **swing** tickets, priced in that market's currency and in rupees, with an overlap check against the Shariah ETFs you already hold and a ledger accounting for every symbol |
-| **Trade book** | **What you actually own.** The morning checklist (Kite token, CDSL authorisation, free cash), open positions with where the stop really sits, armed triggers still waiting, every disagreement between the ledger and Zerodha, and the realised results of trades you *took* — as opposed to picks the scanner made |
-| **Portfolio** | The cross-border picture no single ticket can show: the **US estate-tax meter** ($60,000 non-resident exemption, and which of your holdings count toward it), US-vs-Ireland domicile comparison, what your funds actually own, and LRS/TCS arithmetic. Arithmetic with citations, not advice |
-| **Strategies** | Toggle each of the ten setups, tune every parameter, control the regime gate |
-| **Backtest** | Two books, two panels. Intraday: walk-forward, metrics, equity curve, **and how the day rules behaved**. Swing: the same over daily equity bars, with its survivorship and point-in-time caveats printed above every number |
+| **1 · Connect** | Choose which accounts hold your money — Zerodha (Kite login inline), IBKR (read-only Flex statement), mutual funds (CAMS/KFintech CAS PDF import) — and record balances with no API (EPF, PPF, NPS, FDs, gold, cash) in an editable table. **Read now** shows which accounts answered |
+| **2 · Money & goals** | **The only place any money number is edited.** Age, expenses, emergency-fund months, monthly investment, the whole-portfolio fall you would sit through, a target split across Indian equity / foreign equity / gold / fixed income / cash, the halal-only preference, and every pot — committed together by one Save. The sleeve pot is shown against its ceiling: tolerated fall ÷ the sleeve's 90% planning drawdown × net worth. DDPI and the live-order switch live here too |
+| **3 · Allocation** | Net worth against the split: drift per class, the emergency-fund check, and where next month's money should go (new money fills gaps first; a trim is named only when it cannot). Percentages are withheld whenever an account failed to answer |
+| **4 · Monthly sleeve** | The momentum sleeve — the only book that beat its own null. Pot read-only (set in step 2) |
+| **5 · US / LRS** | The US estate-tax meter, domicile comparison, fund look-through and LRS/TCS arithmetic. Reads IBKR when connected, typed balances otherwise — never both, since they would double-count |
+| **Holdings** | Every line from every account, with which accounts answered at the top |
+| **Research** | Macro and portfolio-risk fact packs |
 | **Journal** | The append-only record, filterable, CSV/JSONL export |
-| **Settings** | The three capital pots, the live-orders switch, DDPI status, feed choice, notification channels, `.env` status |
+| **Settings** | Notification channels and `.env` credential status |
+
+**Show research lab** (sidebar toggle, persisted) adds the books that were
+measured and lost to their nulls, or are closed — kept for the record, out of
+the way: **Daily picks** and **Trade book** (swing), **Live alerts**, **Daily
+brief**, **Strategies** and **Backtest** (intraday options).
 
 ---
 
@@ -521,7 +531,7 @@ a Cloud deployment survives it. Do not treat the deployed journal as a record.
 ## Testing
 
 ```bash
-pytest                    # 540 tests
+pytest                    # the whole suite - the only run that counts
 ```
 
 The suite that matters most is `tests/test_lookahead.py`. Every other failure

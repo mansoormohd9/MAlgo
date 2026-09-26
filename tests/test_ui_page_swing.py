@@ -148,6 +148,7 @@ def _render(cfg, market_key, result, bars):
     at = AppTest.from_file(APP, default_timeout=180)
     sign_in(at)          # app.py gates on auth.require_login()
     at.session_state["cfg"] = cfg
+    cfg.ui.show_research_lab = True     # a research-lab page
     at.session_state["swing_market"] = market_key
     at.session_state[f"swing_result_{market_key}"] = result
     # The Arm panel on every pick card asks the broker for free cash, so

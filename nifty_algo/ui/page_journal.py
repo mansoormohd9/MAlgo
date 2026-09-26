@@ -51,8 +51,8 @@ def render() -> None:
     journal = get_journal()
     days = journal.available_days()
     if not days:
-        st.info("No journal entries yet. They appear once the engine evaluates a "
-                "bar — run a pass on the **Live** page.")
+        st.info("No journal entries yet. Every order payload, broker read and "
+                "research-lab evaluation is written here as it happens.")
         return
 
     c1, c2 = st.columns([1, 2])

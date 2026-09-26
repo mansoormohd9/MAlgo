@@ -64,6 +64,33 @@ def save_settings() -> None:
     settings_store.save(get_config())
 
 
+def get_snapshot(refresh: bool = False):
+    """
+    The holdings snapshot, read once per session and shared by every page.
+
+    Connect, Money & goals, Allocation and Holdings all need the same answer,
+    and each reading the brokers independently is four sets of API calls that
+    can disagree about what you own because one of them ran a minute later.
+    `refresh` after a login or a manual edit.
+
+    Rows typed on the US / LRS page (never written to disk) are passed to the
+    manual connector as `extra`, exactly as that page always did.
+    """
+    if refresh:
+        st.session_state.pop("portfolio_snapshot", None)
+    if "portfolio_snapshot" not in st.session_state:
+        from ..portfolio import aggregate
+        typed = st.session_state.get("typed_positions", [])
+        st.session_state.portfolio_snapshot = aggregate.load(
+            get_config(), manual={"extra": typed})
+    return st.session_state.portfolio_snapshot
+
+
+def peek_snapshot():
+    """The cached snapshot, or None - never triggers a broker read."""
+    return st.session_state.get("portfolio_snapshot")
+
+
 # ---------------------------------------------------------------- swing book
 
 def get_kite_session():

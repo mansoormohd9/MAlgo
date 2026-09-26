@@ -10,7 +10,7 @@ Windows, `.venv` at the repo root. Use `.venv\Scripts\python.exe` (or activate f
 pip install -r requirements.txt
 
 python -m nifty_algo.demo_risk          # prints the account economics - read before touching risk code
-streamlit run app.py                    # the console (7 pages)
+streamlit run app.py                    # the console: 5 steps + research lab
 python -m nifty_algo.run_live --provider kite --telegram   # headless alerts, never places an order
 python -m nifty_algo.brief              # the day's frame + scored chain, CLI form of the Daily brief page
 python -m nifty_algo.swing.scanner --market india|us|uk   # the swing book, headless
@@ -1186,6 +1186,52 @@ it finds ten that produce a setup (88 of the first 120 do, so it costs ~12
 separate test pins the count at ten - so a detector that degrades fails loudly
 instead of presenting as a smaller passing run. A hand-picked seed rots the
 moment the detector moves, and a skip makes the rot invisible.
+
+## The console is steps, not books - and every pot has ONE editor
+
+The sidebar (`nifty_algo/ui/nav.py`) is the order money flows: **1 · Connect
+-> 2 · Money & goals -> 3 · Allocation -> 4 · Monthly sleeve -> 5 · US / LRS**,
+then Holdings / Research / Journal / Settings. Labels are spelled once in
+`onboarding.py`, and `onboarding.steps()` computes each step's "done" from state
+(a login, a holding read, a split summing to 100%) - never a ticked flag. The
+option, swing and intraday pages sit behind the persisted **Show research lab**
+toggle (`UiConfig.show_research_lab`): hidden because each lost to its null,
+not deleted, and their lab labels are unprefixed so their page tests navigate
+unchanged once `cfg.ui.show_research_lab = True`.
+
+**`page_plan.py` (Money & goals) IS THE ONLY EDITOR OF ANY POT.** Before it the
+option pot had two editors, the foreign pot two, the sleeve pot one on its own
+page, and Backtest a fourth copy - under three save rules. The Strategies box
+wrote `starting_capital` onto the shared `DEFAULT` with no save, so the NEXT
+save from any page persisted it. Every other page now shows pots read-only;
+Backtest's is a labelled what-if. `test_ui_steps.py::test_no_page_but_money_and_goals_edits_a_pot`
+walks every page and fails the moment a second editor appears. Money & goals
+keeps Settings' deferred-assignment rule: widgets hold typed values, `cfg`
+changes only on **Save**, and previews read the widget.
+
+**`PlanConfig` is the investor, not a strategy** - profile, target split, the
+tolerated whole-portfolio fall, `halal_only` - and it persists. Target weights
+default to 0 meaning NOT SET: a shipped default split would be the code choosing
+an allocation. `planning/allocation.py` is pure: it withholds every percentage
+and every contribution plan when the snapshot is incomplete (the `weight()`
+rule), places new money into deficits before naming any trim (selling is tax),
+and derives the sleeve ceiling from F2b's own constants
+(`sleeve_share = tolerance / min(0.95, MEASURED_DRAWDOWN * DRAWDOWN_HAIRCUT)`).
+
+**One snapshot per session.** `state.get_snapshot()` is shared by Connect,
+Money & goals, Allocation, Holdings and US / LRS so no two pages disagree about
+what you own. US / LRS hides its typed fund boxes whenever `ibkr` is connected:
+both would reach the snapshot as `us:SPUS`, and `aggregate._combine` ADDS
+quantities on a key collision.
+
+**Connectors: IBKR is read-only via the Flex Web Service** (a long-lived token,
+no gateway process, cannot trade; statement cached 12h in `data/cache/`), and
+**mutual funds come from a CAS PDF** via `casparser` (normalised to gitignored
+`data/cas_holdings.json`; PDF and password never touch disk). casparser returns
+Decimals that serialise to STRINGS - `"0.000"` is truthy, so `normalise` converts
+before testing. `PortfolioConfig.connectors` now persists; `apply_to` drops
+unknown keys, refuses to split a bare string into characters, and always keeps
+`manual`. `conftest` blanks `IBKR_FLEX_TOKEN` like every other credential.
 
 ## The console is gated, and the gate is above the imports
 

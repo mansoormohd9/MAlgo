@@ -36,12 +36,11 @@ import pandas as pd
 import streamlit as st
 
 from .components import banner
-from .state import get_config, save_settings
+from .state import get_config
 from .theme import get_palette
 from ..swing import crossborder as crossborder_mod
 from ..swing import fx as fx_mod
 from ..swing import holdings as holdings_mod
-from ..portfolio import aggregate as portfolio_mod
 from ..portfolio.base import ETF, Position
 
 HOLDINGS_CSV = "data/etf_holdings.csv"
@@ -75,18 +74,21 @@ def render() -> None:
     p = get_palette()
     cfg = get_config()
 
-    st.title("Portfolio")
-    st.caption("Cross-border exposure, costs and reporting for an Indian "
-               "resident investing through IBKR under LRS.")
+    st.title("US / LRS")
+    st.caption("Step 5 of 5. Cross-border exposure, costs and reporting for "
+               "an Indian resident investing abroad under LRS.")
 
     banner(f"<b>Arithmetic, not advice.</b> {crossborder_mod.DISCLAIMER}",
            p.warning, "⚖")
 
     rate = _usd_rate(cfg, p)
     _capital_pool(cfg, rate, p)
-    values = _inputs(p)
+    if "ibkr" in cfg.portfolio.connectors:
+        values = _values_from_ibkr(p)
+    else:
+        values = _inputs(p)
+        _hand_to_snapshot(_typed_positions(values))
 
-    _connectors(cfg, values, p)
     _estate_meter(values, p)
     _domicile_comparison(p)
     _overlap_table(values, p)
@@ -94,48 +96,81 @@ def render() -> None:
     _reporting(p)
 
 
+def _hand_to_snapshot(typed: list) -> None:
+    """
+    Give the typed balances to the shared snapshot, and invalidate it when
+    they change - otherwise Allocation would keep showing the balances as
+    they were when the snapshot was first read.
+    """
+    signature = [(t.key, t.last_price) for t in typed]
+    if st.session_state.get("typed_signature", []) != signature:
+        st.session_state["typed_signature"] = signature
+        st.session_state["typed_positions"] = typed
+        st.session_state.pop("portfolio_snapshot", None)
+
+
+def _values_from_ibkr(p) -> dict:
+    """
+    The same figures the typed boxes provide, read from the IBKR statement.
+
+    THE BOXES ARE HIDDEN WHEN IBKR IS CONNECTED, because both would reach the
+    snapshot under the same key (`us:SPUS`) and `aggregate._combine` ADDS
+    quantities on a key collision - a typed balance plus the statement's
+    would double the fund in every weight. One source per fact.
+    """
+    from .state import get_snapshot
+    from ..portfolio.base import CASH
+    snapshot = get_snapshot()
+    values = {key: 0.0 for key, *_ in FUNDS}
+    values["DIRECT_US"] = 0.0
+    other_ccy = []
+    for pos in snapshot.positions:
+        if pos.source != "ibkr" or pos.asset_class == CASH:
+            continue
+        if pos.currency != "USD":
+            other_ccy.append(pos.symbol)
+            continue
+        if pos.symbol in values and pos.symbol != "DIRECT_US":
+            values[pos.symbol] += pos.value_native
+        elif pos.market == "us":
+            values["DIRECT_US"] += pos.value_native
+    for key in values:
+        st.session_state[f"fund_balance_{key}"] = values[key]
+    ibkr = next((r for r in snapshot.results if r.source == "ibkr"), None)
+    st.subheader("What you hold abroad")
+    if ibkr is None or not ibkr.available:
+        banner("<b>IBKR is connected but did not answer</b>, so every figure "
+               "below reads zero and understates your US exposure. "
+               + (ibkr.note if ibkr else ""), p.critical, "⛔")
+    else:
+        st.caption(f"From your IBKR Flex statement — {ibkr.note}.")
+    if other_ccy:
+        st.caption(f"Not in USD, so not counted in the US-situs figures: "
+                   f"{', '.join(other_ccy)}.")
+    return values
+
+
 # ---------------------------------------------------------------- the pool
 
 def _capital_pool(cfg, rate, p) -> None:
     """
-    Fund the foreign pool.
+    The foreign pool, READ-ONLY here.
 
-    This lives here rather than in Settings because it is the same act as
-    telling the page what you hold abroad. Until it is set, the US and UK
-    scans stand down by design - sizing a dollar trade off the domestic
-    balance would claim money that is not in that broker, and defaulting to
-    "use the Indian capital" would be exactly that mistake made silently.
+    It used to be edited on this page (saved on every keystroke) AND on
+    Settings (saved on a button) - two editors for one number with opposite
+    save rules. It is now set only on Money & goals.
     """
     st.subheader("Foreign capital pool")
     c1, c2 = st.columns([1, 2])
-    current = float(cfg.capital.foreign_capital_inr or 0.0)
-    entered = c1.number_input(
-        "Remitted and available abroad (₹)", min_value=0.0, step=50_000.0,
-        value=current, key="foreign_capital_inr_input",
-        help="What is actually in the IBKR account, in rupees. The US and UK "
-             "scans size off this pool; the Indian book is unaffected. Saved "
-             "as soon as you change it - unlike the capital boxes on "
-             "Settings, which wait for their Save button.")
-    cfg.capital.foreign_capital_inr = entered
-    # Persist it, or this widget's value silently overwrites whatever was
-    # saved on the Settings page the next time this page renders - two
-    # editors for one number, one of which forgets.
-    #
-    # Note this is the OPPOSITE of Settings, which holds a typed value back
-    # until Save is pressed. Both are right for their page: there is one
-    # field here and no Save button to press. Assigning BEFORE reading is
-    # also what keeps `risk_inr("foreign")` below consistent with the box
-    # above - the split between those two is exactly what made the Settings
-    # page divide by zero.
-    if entered != current:
-        save_settings()
+    entered = float(cfg.capital.foreign_capital_inr or 0.0)
+    c1.metric("Remitted and available abroad", f"₹{entered:,.0f}")
+    c1.caption("Set on **2 · Money & goals**.")
 
     per_trade = cfg.capital.risk_inr("foreign")
     if entered <= 0:
         c2.warning(
             "The foreign pool is ₹0, so the **US and UK scans will stand "
-            "down**. Set it here to enable them — the Indian book is "
-            "unaffected either way.")
+            "down**. Set it on Money & goals — the Indian book is unaffected.")
         return
 
     line = (f"Per-trade risk on the foreign book: **₹{per_trade:,.0f}** "
@@ -373,54 +408,3 @@ def _typed_positions(values: dict) -> list[Position]:
             asset_class=ETF, source="manual", account="typed", name=label))
     return out
 
-
-def _connectors(cfg, values, p) -> None:
-    """
-    Which sources answered, and which could not.
-
-    At the top of the holdings section rather than at the bottom, because
-    every figure below is a figure about what was READ. A source that failed
-    silently would make this page understate the account, and understating an
-    account is the direction that reads as reassurance.
-    """
-    st.subheader("Where these holdings come from")
-    snapshot = portfolio_mod.load(
-        cfg, manual={"extra": _typed_positions(values)})
-
-    st.dataframe(pd.DataFrame([{
-        "Source": r.source,
-        "Answered": "yes" if r.available else "NO",
-        "Positions": len(r.positions),
-        "Detail": r.note,
-    } for r in snapshot.results]), width="stretch", hide_index=True)
-
-    if not snapshot.complete:
-        banner(
-            "<b>This account is only partly readable, so portfolio "
-            "percentages are withheld.</b> A share computed against a "
-            "denominator we could not establish reads exactly like one that "
-            "was, and it would be acted on. " + " ".join(snapshot.caveats()),
-            p.warning, "⚠")
-    else:
-        banner(f"Every enabled connector answered. {snapshot.note()}",
-               p.good, "▣")
-
-    if snapshot.positions:
-        st.dataframe(pd.DataFrame([{
-            "Symbol": pos.symbol,
-            "Market": pos.market,
-            "Qty": pos.quantity,
-            "Last": pos.last_price,
-            "Currency": pos.currency,
-            "Value (₹)": round(snapshot.value_inr.get(pos.key, 0.0), 0),
-            "Source": pos.source,
-        } for pos in sorted(snapshot.positions,
-                            key=lambda x: -snapshot.value_inr.get(x.key, 0.0))]),
-            width="stretch", hide_index=True)
-
-    st.caption(
-        f"Enabled connectors: `{'`, `'.join(cfg.portfolio.connectors)}` "
-        f"(`PortfolioConfig.connectors`). One that is listed and cannot answer "
-        f"makes the snapshot incomplete; one that is not listed is never asked "
-        f"and never counted — which is what keeps the unimplemented IBKR "
-        f"connector from marking every snapshot incomplete forever.")

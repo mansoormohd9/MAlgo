@@ -49,7 +49,9 @@ TEMPLATE = (
     "# current worth in its own currency). `cost` is optional; without it the\n"
     "# line has no P&L and the reports say so rather than showing zero.\n"
     "#\n"
-    "# market : india | us | uk   asset_class : equity | etf | mf | cash\n"
+    "# market : india | us | uk\n"
+    "# asset_class : equity | etf | mf | cash | gold | fixed_income\n"
+    "#   (EPF, PPF, FDs and NPS-debt are fixed_income; NPS equity is mf)\n"
     "market,symbol,name,quantity,average_price,last_price,value,cost,"
     "currency,asset_class,account\n"
 )

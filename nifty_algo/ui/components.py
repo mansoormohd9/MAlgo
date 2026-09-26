@@ -226,3 +226,51 @@ def evaluations_table(evaluations: list[dict]) -> None:
     df = pd.DataFrame(evaluations)
     df.columns = [c.title() for c in df.columns]
     st.dataframe(df, width="stretch", hide_index=True)
+
+
+def kite_login_panel(session) -> None:
+    """
+    The daily Kite login, inline - ONE implementation for every page.
+
+    It used to live only inside Trade book, so logging in meant opening a page
+    about swing tickets you might not hold. Connect and Trade book both call
+    this now.
+
+    After an exchange it drops the cached equity broker, AND the option engine
+    if that engine was built without a broker: `_build_kite` attaches the real
+    chain and order path only when the session is authenticated AT BUILD TIME,
+    so an engine built before you logged in stayed on the synthetic chain
+    until you found "Reconnect feed" on Settings. An engine that already has a
+    broker is left alone - rebuilding resets the session's risk state.
+    """
+    if session is None:
+        err = st.session_state.get("kite_error")
+        st.caption("Kite is not configured: set `KITE_API_KEY` and "
+                   "`KITE_API_SECRET` in `.env`." + (f" ({err})" if err else ""))
+        return
+    try:
+        url = session.login_url()
+    except Exception as e:
+        st.caption(f"Cannot build a login URL: {e}")
+        return
+    st.link_button("Open Kite login", url, width="stretch")
+    pasted = st.text_input(
+        "Paste the redirect URL (or just the request_token)",
+        key="kite_request_token",
+        help="After logging in, Kite redirects to your registered URL with "
+             "?request_token=... in it. Paste the whole address.",
+    )
+    if pasted and st.button("Exchange for a token", key="kite_exchange"):
+        from ..broker.kite_login import extract_request_token
+        try:
+            session.exchange(extract_request_token(pasted))
+        except Exception as e:
+            st.error(f"{e}")
+            return
+        st.session_state.pop("equity_broker", None)
+        st.session_state.pop("kite_error", None)
+        engine = st.session_state.get("engine")
+        if engine is not None and getattr(engine, "broker", None) is None:
+            st.session_state.pop("engine", None)
+        st.success("Authenticated.")
+        st.rerun()

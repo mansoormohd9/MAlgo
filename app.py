@@ -1,9 +1,13 @@
 """
-Nifty intraday option-buying — alert console.
+Nifty Algo — your money, step by step.
 
     streamlit run app.py
 
-This app is a VIEWER over `nifty_algo.engine.TradingEngine`. Every decision is
+The main flow is five steps (Connect -> Money & goals -> Allocation -> Monthly
+sleeve -> US / LRS), built in `nifty_algo/ui/nav.py`. The intraday option
+book, the swing book and their tools sit behind "Show research lab".
+
+For the option book, this app is a VIEWER over `nifty_algo.engine.TradingEngine`. Every decision is
 made in the engine, which is headless and importable, so the alerts you see
 here are produced by exactly the same code as
 `python -m nifty_algo.run_live`. The UI decides nothing.
@@ -54,7 +58,7 @@ os.chdir(Path(__file__).resolve().parent)
 load_dotenv()
 
 st.set_page_config(
-    page_title="Nifty Algo — Alert Console",
+    page_title="Nifty Algo",
     page_icon="📈",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -69,25 +73,32 @@ from nifty_algo.ui.theme import CSS, get_palette          # noqa: E402
 from nifty_algo.ui import (page_live, page_brief, page_swing,        # noqa: E402
                            page_sleeve, page_book, page_portfolio,
                            page_research, page_strategies, page_backtest,
-                           page_journal, page_settings)
+                           page_journal, page_settings, page_connect,
+                           page_plan, page_allocation, page_holdings, nav)
 from nifty_algo.ui.state import get_config                # noqa: E402
 from nifty_algo.ui.components import banner               # noqa: E402
 from nifty_algo.ui import refresh                         # noqa: E402
+from nifty_algo import onboarding                         # noqa: E402
 
 st.markdown(CSS, unsafe_allow_html=True)
 
 PAGES = {
-    "Live alerts": page_live.render,
-    "Daily brief": page_brief.render,
-    "Daily picks": page_swing.render,
-    "Monthly sleeve": page_sleeve.render,
-    "Trade book": page_book.render,
-    "Portfolio": page_portfolio.render,
+    onboarding.CONNECT: page_connect.render,
+    onboarding.PLAN: page_plan.render,
+    onboarding.ALLOCATION: page_allocation.render,
+    onboarding.SLEEVE: page_sleeve.render,
+    onboarding.FOREIGN: page_portfolio.render,
+    "Holdings": page_holdings.render,
     "Research": page_research.render,
-    "Strategies": page_strategies.render,
-    "Backtest": page_backtest.render,
     "Journal": page_journal.render,
     "Settings": page_settings.render,
+    # research lab - listed only while the toggle is on (see nav.py)
+    "Daily picks": page_swing.render,
+    "Trade book": page_book.render,
+    "Live alerts": page_live.render,
+    "Daily brief": page_brief.render,
+    "Strategies": page_strategies.render,
+    "Backtest": page_backtest.render,
 }
 
 
@@ -96,42 +107,13 @@ def main() -> None:
     p = get_palette()
 
     with st.sidebar:
-        st.markdown("### Nifty Algo")
-        st.caption("Intraday option-buying alert console")
-        choice = st.radio("Page", list(PAGES), label_visibility="collapsed")
-
-        st.divider()
-        # In the sidebar, not on the Live page: polling used to exist only
-        # there, so reading the Daily brief meant the engine was never
-        # evaluated at all for as long as you stayed on it.
-        refresh.sidebar_controls(cfg)
-
+        choice = nav.sidebar(cfg)
+        if cfg.ui.show_research_lab:
+            st.divider()
+            # Polling drives the option engine only, which lives in the lab.
+            refresh.sidebar_controls(cfg)
         auth.logout_control()
-
-        st.divider()
-        st.caption(
-            f"**Options** ₹{cfg.capital.starting_capital:,.0f}  \n"
-            f"**Swing (India)** ₹{cfg.capital.swing_capital_inr:,.0f}  \n"
-            f"**Target / stop** +{cfg.capital.session_target_pct:.0%} / "
-            f"−{cfg.capital.session_stop_pct:.0%}  \n"
-            f"**Max entries** {cfg.capital.max_entries_per_session}  \n"
-            f"**Risk / trade** ₹{cfg.capital.risk_per_trade_rupees:,.0f} "
-            f"at {cfg.capital.reward_risk_ratio:.0f}:1"
-        )
-        st.divider()
-        mode = ("DRY RUN — orders logged, not sent"
-                if cfg.broker.dry_run else "LIVE ORDERS — real money")
-        st.markdown(
-            f"<span style='color:{p.muted};font-size:.78rem;line-height:1.5'>"
-            f"<b>{mode}</b><br>"
-            f"Entries need your click; exits are automatic.<br><br>"
-            f"For alerts with the browser closed, run:<br>"
-            f"<code>python -m nifty_algo.run_live --telegram</code><br>"
-            f"(that runner never places an order at all)<br><br>"
-            f"Not investment advice. SEBI data shows over 90% of retail F&O "
-            f"traders lose money.</span>",
-            unsafe_allow_html=True,
-        )
+        nav.lab_footer(cfg, p)
 
     _protection_banner(cfg, p)
     PAGES[choice]()
@@ -165,7 +147,7 @@ def _protection_banner(cfg, p) -> None:
             f"<b>{len(live)} live ticket(s) and no CDSL authorisation "
             f"recorded today.</b> Any stop that triggers will be REJECTED — "
             f"it will still show as active in Kite. Authorise holdings, or "
-            f"enable DDPI once on Settings.",
+            f"enable DDPI once on Money & goals.",
             p.critical, "⛔")
     except Exception:
         pass

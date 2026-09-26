@@ -153,13 +153,13 @@ def _controls(cfg, p) -> None:
              "LOOK-AHEAD in any backtest.")
     cfg.factor.universe = universe
 
-    pot = c1.number_input(
-        "Factor pot (₹)", min_value=0.0, step=25_000.0,
-        value=float(cfg.capital.factor_capital_inr),
-        key="sleeve_pot",
-        help="A zero pot sizes every ticket to zero — the scan still runs and "
-             "reports, it just cannot size anything.")
-    cfg.capital.factor_capital_inr = float(pot)
+    # READ-ONLY. The pot used to be edited here and saved on Run scan, while
+    # three other pots were edited on two other pages under two other save
+    # rules. Every pot is now set on Money & goals, beside the net-worth
+    # ceiling that says how big it may be.
+    c1.metric("Factor pot", f"₹{cfg.capital.factor_capital_inr:,.0f}",
+              help="Set on 2 · Money & goals. A zero pot sizes every ticket to "
+                   "zero — the scan still runs and reports.")
 
     screened = c2.toggle(
         "Halal screen", value=bool(cfg.factor.halal_screened),
@@ -168,6 +168,9 @@ def _controls(cfg, p) -> None:
              "looking no further than the shortlist. The recorded returns were "
              "measured WITHOUT it.")
     cfg.factor.halal_screened = bool(screened)
+    if cfg.plan.halal_only and not screened:
+        st.warning("Your plan on Money & goals is halal-only, and the screen "
+                   "is off - these picks are not screened.")
 
     regime = c3.toggle(
         "Show regime", value=bool(cfg.factor.regime_ma_days),

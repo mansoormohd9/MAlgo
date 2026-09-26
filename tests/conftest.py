@@ -21,6 +21,8 @@ CREDENTIAL_KEYS: tuple[str, ...] = (
     "SMTP_HOST", "SMTP_USER", "SMTP_PASSWORD",
     "FYERS_APP_ID", "FYERS_SECRET_KEY",
     "DHAN_CLIENT_ID", "DHAN_ACCESS_TOKEN",
+    # The IBKR Flex token reads the real account's statement.
+    "IBKR_FLEX_TOKEN", "IBKR_FLEX_QUERY_ID",
 )
 
 

@@ -125,9 +125,12 @@ def render() -> None:
     with t3:
         cap, sess = cfg.capital, cfg.session
         c1, c2 = st.columns(2)
-        cap.starting_capital = c1.number_input("Starting capital (₹)",
-                                               value=float(cap.starting_capital),
-                                               step=10_000.0)
+        # READ-ONLY. This box used to write `starting_capital` straight onto
+        # the shared config with no key and no save - so the NEXT save from any
+        # page (the DDPI box, a sleeve scan) quietly persisted whatever had
+        # been typed here. Pots are edited on Money & goals only.
+        c1.metric("Starting capital", f"₹{cap.starting_capital:,.0f}",
+                  help="Set on 2 · Money & goals (research lab pots).")
         cap.max_entries_per_session = c2.slider("Max entries per session", 1, 6,
                                                 cap.max_entries_per_session)
         cap.session_target_pct = c1.slider("Session target (%)", 0.02, 0.30,

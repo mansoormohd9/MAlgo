@@ -22,6 +22,7 @@ import pytest
 from conftest import sign_in
 from streamlit.testing.v1 import AppTest
 
+from nifty_algo import onboarding
 from nifty_algo.factor import sleeve as sl
 
 APP = str(Path(__file__).resolve().parent.parent / "app.py")
@@ -96,8 +97,18 @@ def page(monkeypatch):
     at = AppTest.from_file(APP, default_timeout=180)
     sign_in(at)
     at.run()
-    at.sidebar.radio[0].set_value("Monthly sleeve").run()
+    at.sidebar.radio[0].set_value(onboarding.SLEEVE).run()
     return at
+
+
+def _fund(page, pot: float) -> None:
+    """
+    Fund the sleeve the way the console now does: on the shared config, which
+    Money & goals writes. `_restore_config` puts it back after the test.
+    """
+    from nifty_algo.config import DEFAULT
+    DEFAULT.capital.factor_capital_inr = float(pot)
+    page.run()
 
 
 def test_the_page_renders_before_any_scan(page):
@@ -191,7 +202,7 @@ def test_a_scan_renders_a_book_and_stays_provisional(page):
     The fixture's bars end well before today, so the page is never on a
     rebalance date - which is precisely the state it must refuse to arm.
     """
-    page.number_input[0].set_value(500_000.0).run()
+    _fund(page, 500_000.0)
     next(b for b in page.button if "Run scan" in b.label).click().run()
     assert not page.exception
 
@@ -210,14 +221,14 @@ def test_a_provisional_call_offers_no_download(page):
     book is not supposed to trade. A page that let you export a provisional
     list has handed you a monthly book to trade daily.
     """
-    page.number_input[0].set_value(500_000.0).run()
+    _fund(page, 500_000.0)
     next(b for b in page.button if "Run scan" in b.label).click().run()
     assert not page.exception
     assert not [b for b in page.button if "checklist" in b.label.lower()]
 
 
 def test_an_unfunded_pot_renders_and_says_so(page):
-    page.number_input[0].set_value(0.0).run()
+    _fund(page, 0.0)
     next(b for b in page.button if "Run scan" in b.label).click().run()
     assert not page.exception
     scan = page.session_state["factor_sleeve_scan"]
@@ -231,7 +242,7 @@ def test_the_page_never_offers_a_stop_loss_control(page):
     Offering the control anyway would let the page quietly contradict the
     result it is built on.
     """
-    page.number_input[0].set_value(500_000.0).run()
+    _fund(page, 500_000.0)
     next(b for b in page.button if "Run scan" in b.label).click().run()
     assert not page.exception
     labels = " ".join(getattr(w, "label", "") or "" for w in
@@ -257,7 +268,7 @@ def test_the_universe_selector_reaches_the_scan(page, monkeypatch):
 
     monkeypatch.setattr(restr, "resolver", _fake)
     page.selectbox[0].set_value("nifty500").run()
-    page.number_input[0].set_value(500_000.0).run()
+    _fund(page, 500_000.0)
     next(b for b in page.button if "Run scan" in b.label).click().run()
     assert not page.exception
 
@@ -280,7 +291,7 @@ def test_the_micro_cap_warning_is_suppressed_once_restricted(page, monkeypatch):
         lambda cfg, key, bars, uni, root=".": (
             restr.static({"WIN04", "WIN05", "WIN06"}), "stubbed"))
     page.selectbox[0].set_value("nifty500").run()
-    page.number_input[0].set_value(500_000.0).run()
+    _fund(page, 500_000.0)
     next(b for b in page.button if "Run scan" in b.label).click().run()
     assert not page.exception
     assert "sit outside the Nifty 500" not in _text(page)
@@ -288,32 +299,17 @@ def test_the_micro_cap_warning_is_suppressed_once_restricted(page, monkeypatch):
 
 # ------------------------------------------------------ the controls hold
 
-def test_the_pot_survives_a_second_increment(page):
+def test_the_pot_is_read_only_here(page):
     """
-    THE BUG THIS FILE COULD NOT SEE. Every control on this page reads the
-    shared config for its default and writes the result straight back, and
-    Streamlit hashes `value=` into a widget's element id unless a `key` is
-    given. So the identity moved on the run AFTER every accepted change, the
-    new id had no stored state, and the widget fell back to its default: the
-    pot advanced one step per two clicks of the stepper.
-
-    The existing tests never caught it because they set the pot and read the
-    config in the SAME run, which is the one run in the cycle that works. Two
-    changes in succession is the smallest sequence that fails.
+    The pot used to be a stepper on this page, saved on Run scan, while three
+    other pots were edited on two other pages under two other save rules. It
+    is set on Money & goals now (`test_ui_page_plan.py` carries the
+    two-changes-in-succession regression that used to live here), and this
+    page must not grow an editor for it again.
     """
-    from nifty_algo.config import DEFAULT
-
-    page.number_input[0].set_value(200_000.0).run()
-    assert DEFAULT.capital.factor_capital_inr == 200_000.0
-    assert page.number_input[0].value == 200_000.0
-
-    page.number_input[0].set_value(225_000.0).run()
-    assert page.number_input[0].value == 225_000.0
-    assert DEFAULT.capital.factor_capital_inr == 225_000.0
-
-    page.number_input[0].set_value(250_000.0).run()
-    assert page.number_input[0].value == 250_000.0
-    assert DEFAULT.capital.factor_capital_inr == 250_000.0
+    _fund(page, 250_000.0)
+    assert not page.number_input
+    assert any("250,000" in str(m.value) for m in page.metric)
 
 
 def test_the_universe_selector_survives_a_second_change(page):
@@ -353,7 +349,7 @@ def test_the_toggles_survive_a_second_change(page):
 # --------------------------------------------------- target is not an order
 
 def _run_scan(page, pot=500_000.0):
-    page.number_input[0].set_value(pot).run()
+    _fund(page, pot)
     next(b for b in page.button if "Run scan" in b.label).click().run()
     assert not page.exception
     return page.session_state["factor_sleeve_scan"]

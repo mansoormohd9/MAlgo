@@ -16,7 +16,7 @@ prevent.
 from __future__ import annotations
 
 from ..config import Config, DEFAULT
-from . import ibkr, kite, manual
+from . import cas, ibkr, kite, manual
 
 #: Construction order is display order. Manual first: it is the one that
 #: always answers, so a page that shows connectors in this order never opens
@@ -25,6 +25,7 @@ CONNECTORS: dict[str, type] = {
     manual.KEY: manual.ManualConnector,
     kite.KEY: kite.KiteConnector,
     ibkr.KEY: ibkr.IbkrConnector,
+    cas.KEY: cas.CasConnector,
 }
 
 

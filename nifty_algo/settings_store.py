@@ -55,6 +55,26 @@ FIELDS: tuple[tuple[str, str, str], ...] = (
     ("capital", "factor_capital_inr", "factor_capital_inr"),
     ("factor", "universe", "factor_universe"),
     ("factor", "halal_screened", "factor_halal_screened"),
+    # The investor profile and target allocation (`PlanConfig`). These are
+    # the numbers the code cannot derive and the ones every pot now hangs
+    # off, so a restart that forgot them would silently un-plan the account.
+    ("plan", "age", "plan_age"),
+    ("plan", "monthly_expenses_inr", "plan_monthly_expenses_inr"),
+    ("plan", "emergency_months", "plan_emergency_months"),
+    ("plan", "tolerated_drawdown_pct", "plan_tolerated_drawdown_pct"),
+    ("plan", "rebalance_band_pp", "plan_rebalance_band_pp"),
+    ("plan", "monthly_investment_inr", "plan_monthly_investment_inr"),
+    ("plan", "w_india_equity", "plan_w_india_equity"),
+    ("plan", "w_foreign_equity", "plan_w_foreign_equity"),
+    ("plan", "w_gold", "plan_w_gold"),
+    ("plan", "w_fixed_income", "plan_w_fixed_income"),
+    ("plan", "w_cash", "plan_w_cash"),
+    ("plan", "halal_only", "plan_halal_only"),
+    ("ui", "show_research_lab", "ui_show_research_lab"),
+    # Which accounts you hold money in. A claim about YOUR accounts, set on
+    # Connect - so it belongs with the pots, not in version-controlled config.
+    # Saved as a JSON list, coerced back to the tuple default by `apply_to`.
+    ("portfolio", "connectors", "portfolio_connectors"),
 )
 
 
@@ -130,6 +150,33 @@ def apply_to(cfg, path: Path | str = DEFAULT_PATH) -> list[str]:
         from .factor.restriction import UNIVERSES
     except Exception:                                      # pragma: no cover
         UNIVERSES = ()
+    # THE THIRD REFUSAL, for the same reason: a connector key that is not
+    # registered would be turned into an `unavailable` result by `aggregate`,
+    # marking every snapshot incomplete forever for a typo. Unknown keys are
+    # dropped and named.
+    try:
+        from .portfolio.registry import CONNECTORS
+    except Exception:                                      # pragma: no cover
+        CONNECTORS = {}
+    if CONNECTORS:
+        # A bare string ("kite") would have been coerced by `tuple()` into
+        # its characters, every one of which is then "unknown".
+        raw_conn = raw.get("portfolio_connectors")
+        if isinstance(raw_conn, str):
+            cfg.portfolio.connectors = (raw_conn,)
+        unknown = [k for k in cfg.portfolio.connectors if k not in CONNECTORS]
+        if unknown:
+            notes.append(f"portfolio_connectors in {path} names "
+                         f"{', '.join(map(repr, unknown))}, which is not a "
+                         f"registered connector - ignored.")
+            cfg.portfolio.connectors = tuple(
+                k for k in cfg.portfolio.connectors if k in CONNECTORS)
+        # The hand-kept file always answers; a list without it reads nothing
+        # at all, which would present as an empty account.
+        if "manual" not in cfg.portfolio.connectors:
+            cfg.portfolio.connectors = ("manual",) + tuple(
+                cfg.portfolio.connectors)
+
     if UNIVERSES and cfg.factor.universe not in UNIVERSES:
         notes.append(
             f"factor_universe in {path} is {cfg.factor.universe!r}, which is "

@@ -433,7 +433,10 @@ def test_the_right_pair_typed_into_the_form_opens_the_app(monkeypatch):
 
     assert not at.exception, _why(at)
     assert at.sidebar.radio, "the correct password did not open the app"
-    assert "Live alerts" in at.sidebar.radio[0].options
+    # The steps lead; the option book is behind the research-lab toggle.
+    from nifty_algo import onboarding
+    assert onboarding.CONNECT in at.sidebar.radio[0].options
+    assert "Live alerts" not in at.sidebar.radio[0].options
     assert any(b.label == "Sign out" for b in at.sidebar.button), \
         "no way back out once signed in"
 

@@ -53,8 +53,15 @@ EQUITY = "equity"
 ETF = "etf"
 MUTUAL_FUND = "mf"
 CASH = "cash"
+#: Physical, digital or sovereign gold, and gold ETFs entered by hand.
+GOLD = "gold"
+#: EPF, PPF, FDs, bonds, the debt leg of NPS - anything whose return is a
+#: coupon rather than a share of a business. Named for what it does in an
+#: allocation, not for any one product, and flagged on the plan page when the
+#: holder has asked for a halal-only book.
+FIXED_INCOME = "fixed_income"
 
-ASSET_CLASSES = (EQUITY, ETF, MUTUAL_FUND, CASH)
+ASSET_CLASSES = (EQUITY, ETF, MUTUAL_FUND, CASH, GOLD, FIXED_INCOME)
 
 
 @dataclass(frozen=True)

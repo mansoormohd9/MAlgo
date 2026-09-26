@@ -80,6 +80,7 @@ def _render(cfg, journal, bars):
     at = AppTest.from_file(APP, default_timeout=180)
     sign_in(at)          # app.py gates on auth.require_login()
     at.session_state["cfg"] = cfg
+    cfg.ui.show_research_lab = True     # a research-lab page
     at.session_state["journal"] = journal
     at.session_state["swing_bars_india"] = bars
     # Never a real broker. See `conftest.seed_offline_broker` - without this
