@@ -93,6 +93,20 @@ def test_only_account_facts_are_persisted():
                     "plan_w_india_equity", "plan_w_foreign_equity",
                     "plan_w_gold", "plan_w_fixed_income", "plan_w_cash",
                     "plan_halal_only",
+                    # The holder's reading of the contested rulings, and
+                    # their zakat inputs - properties of the holder too.
+                    "plan_accept_metal_etfs", "plan_zakat_date",
+                    "plan_zakat_nisab_basis", "plan_zakat_equity_method",
+                    "plan_zakat_equity_proxy_pct",
+                    "plan_zakat_include_retirement",
+                    "plan_gold_price_inr_per_g",
+                    "plan_silver_price_inr_per_g",
+                    "plan_interest_received_inr",
+                    "plan_dividends_received_inr",
+                    "plan_dividend_purification_pct",
+                    # The return YOU expect - the projection's one input
+                    # the code refuses to choose.
+                    "plan_expected_real_return_pct",
                     # Which accounts you hold money in, and the lab switch.
                     "portfolio_connectors", "ui_show_research_lab"}
 

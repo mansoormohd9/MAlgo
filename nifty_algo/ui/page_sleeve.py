@@ -115,6 +115,17 @@ def _record(cfg, p) -> None:
         hide_index=True, width="stretch")
     st.caption(f"These describe: {rec.describes}.")
     banner(f"<b>{html.escape(rec.caution)}</b>", p.warning, "⚠")
+    # The comparison a holder actually faces is not the null - it is a halal
+    # index fund held for years. Tax is the difference between the two
+    # regimes, and nothing has measured it yet (F6), so the page says so
+    # rather than letting a pre-tax CAGR stand for an after-tax outcome.
+    st.caption(
+        "Every figure above is **before tax**. The sleeve rebalances "
+        "monthly, so nearly every gain is short-term (STCG, 20%). A Shariah "
+        "index fund held for years pays 12.5% LTCG above ₹1.25 lakh a year, "
+        "and only when sold. The after-tax comparison has not been measured "
+        "(F6). Until it is, size this as a satellite beside a halal core "
+        "fund, not in place of one.")
     if rec.naive:
         # ONE LINE, IN SMALL PRINT, ON PURPOSE. The inflated figure is not a
         # caveat on the expectation above - it is simply the wrong number to

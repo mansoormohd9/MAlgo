@@ -91,6 +91,44 @@ def peek_snapshot():
     return st.session_state.get("portfolio_snapshot")
 
 
+def get_compliance(snapshot=None):
+    """
+    The halal verdict on every holding, or None when nothing has been read.
+
+    Cached against the snapshot OBJECT and the metal ruling, so Holdings,
+    Allocation, Zakat and the every-page banner cannot disagree, and a
+    re-read (a new snapshot) or a changed ruling recomputes it. Reads cached
+    balance sheets only - never fetches (see `planning/compliance.py`).
+    """
+    snapshot = snapshot if snapshot is not None else peek_snapshot()
+    if snapshot is None:
+        return None
+    from ..planning import compliance
+    cfg = get_config()
+    metals = bool(cfg.plan.accept_metal_etfs)
+    cached = st.session_state.get("halal_compliance")
+    # IDENTITY, NOT `id()`. A re-read frees the old snapshot, and CPython may
+    # hand its id to the new one - an `id()` key would then serve the
+    # previous holdings' verdicts for the new holdings, plausibly and
+    # silently. Holding the object itself makes `is` a true comparison.
+    fresh = (cached is not None and cached[0] is snapshot
+             and cached[1] == metals)
+    if not fresh:
+        # The fund list and the balance-sheet caches are re-read with each
+        # new snapshot, so a sleeve scan that fetched sheets is seen on the
+        # next "Re-read" rather than never in this session.
+        if cached is None or cached[0] is not snapshot:
+            st.session_state.halal_funds = compliance.load_fund_list()
+            st.session_state.halal_screener = compliance.equity_screener(cfg)
+        summary = compliance.assess(
+            snapshot, st.session_state.halal_funds,
+            screen_equity=st.session_state.halal_screener,
+            accept_metal_etfs=metals)
+        cached = (snapshot, metals, summary)
+        st.session_state.halal_compliance = cached
+    return cached[2]
+
+
 # ---------------------------------------------------------------- swing book
 
 def get_kite_session():

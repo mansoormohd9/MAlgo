@@ -49,11 +49,14 @@ TEMPLATE = (
     "# current worth in its own currency). `cost` is optional; without it the\n"
     "# line has no P&L and the reports say so rather than showing zero.\n"
     "#\n"
+    "# as_of (optional) : the date the figure describes, YYYY-MM-DD - so a\n"
+    "#   balance typed months ago shows its age instead of passing as today's.\n"
+    "#\n"
     "# market : india | us | uk\n"
     "# asset_class : equity | etf | mf | cash | gold | fixed_income\n"
     "#   (EPF, PPF, FDs and NPS-debt are fixed_income; NPS equity is mf)\n"
     "market,symbol,name,quantity,average_price,last_price,value,cost,"
-    "currency,asset_class,account\n"
+    "currency,asset_class,account,as_of\n"
 )
 
 
@@ -191,6 +194,7 @@ def _to_position(row: dict) -> tuple[Position | None, str]:
         source=KEY,
         account=(row.get("account") or "").strip(),
         name=(row.get("name") or "").strip(),
+        as_of=(row.get("as_of") or "").strip(),
     ), ""
 
 

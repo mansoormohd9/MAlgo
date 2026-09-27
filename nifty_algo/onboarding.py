@@ -28,6 +28,7 @@ PLAN = "2 · Money & goals"
 ALLOCATION = "3 · Allocation"
 SLEEVE = "4 · Monthly sleeve"
 FOREIGN = "5 · US / LRS"
+ZAKAT = "6 · Zakat & purification"
 
 
 @dataclass(frozen=True)
@@ -42,7 +43,7 @@ class Step:
 def steps(cfg, *, kite_authenticated: bool = False,
           holdings_count: int | None = None) -> list[Step]:
     """
-    The five steps, each with whether it is done and why not.
+    The six steps, each with whether it is done and why not.
 
     `holdings_count` is None when no snapshot has been read this session -
     which is different from zero, and is reported as "not checked yet" rather
@@ -94,7 +95,16 @@ def steps(cfg, *, kite_authenticated: bool = False,
          else "Your plan holds foreign equity - record the LRS pool in step 2."),
         optional=not wants_foreign)
 
-    return [connect, goals, allocation, sleeve, foreign]
+    # Required for a halal-only plan, optional otherwise. "Done" means the
+    # rulings are chosen - the amount itself is computed, never ticked.
+    rulings = bool(plan.zakat_nisab_basis) and bool(plan.zakat_equity_method)
+    zakat = Step(
+        ZAKAT, "Zakat & purification", rulings,
+        ("Nisab basis and method chosen." if rulings
+         else "Choose a nisab basis and how shares are counted, in step 2."),
+        optional=not plan.halal_only)
+
+    return [connect, goals, allocation, sleeve, foreign, zakat]
 
 
 def next_step(all_steps: list[Step]) -> Step | None:

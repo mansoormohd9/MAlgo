@@ -1,0 +1,27 @@
+# Funds and ETFs whose OWN MANDATE is Shariah-screened, read by
+# nifty_algo/planning/compliance.py. SOURCE, NOT DATA - committed, like the
+# universe files and halal_overrides.csv.
+#
+# A fund is matched by `symbol` (exchange ticker, or the ISIN a CAS reports)
+# or, when symbol is blank, by `name_contains` against the scheme name - CAS
+# schemes arrive with an ISIN and a long name, never a ticker.
+#
+# status : compliant | non_compliant | contested
+# purification_pct : the fund's published impure-income share of dividends,
+#   when it publishes one. BLANK MEANS UNKNOWN, never zero.
+#
+# VERIFIED_ON 2026-09-27: seeded from each fund's stated index/mandate. The
+# mandate is what makes a fund compliant, and it is stable; confirm on the
+# issuer's site before relying on an entry, and add any fund you hold that is
+# missing - an unlisted fund shows as unverified or not-halal, never as a pass.
+symbol,name_contains,name,status,standard,domicile,purification_pct,note
+SPUS,,SP Funds S&P 500 Sharia Industry Exclusions ETF,compliant,AAOIFI / S&P Shariah,US,,US-situs for estate tax
+HLAL,,Wahed FTSE USA Shariah ETF,compliant,FTSE / Yasaar,US,,US-situs for estate tax
+UMMA,,Wahed Dow Jones Islamic World ETF,compliant,Dow Jones Islamic Market,US,,US-situs for estate tax
+SPSK,,SP Funds Dow Jones Global Sukuk ETF,compliant,AAOIFI sukuk,US,,The halal stable leg; US-situs
+SPRE,,SP Funds S&P Global REIT Sharia ETF,compliant,AAOIFI / S&P Shariah,US,,US-situs for estate tax
+ISDW,,iShares MSCI World Islamic UCITS ETF,compliant,MSCI Islamic,IE,,Irish UCITS - outside US estate tax
+ISUS,,iShares MSCI USA Islamic UCITS ETF,compliant,MSCI Islamic,IE,,Irish UCITS - outside US estate tax
+SHARIABEES,,Nippon India ETF Shariah BeES,compliant,Nifty50 Shariah,IN,,Check it is still listed
+,TATA ETHICAL,Tata Ethical Fund,compliant,Shariah advisory board,IN,,Indian equity mutual fund
+,TAURUS ETHICAL,Taurus Ethical Fund,compliant,Shariah advisory board,IN,,Indian equity mutual fund

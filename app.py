@@ -74,7 +74,8 @@ from nifty_algo.ui import (page_live, page_brief, page_swing,        # noqa: E40
                            page_sleeve, page_book, page_portfolio,
                            page_research, page_strategies, page_backtest,
                            page_journal, page_settings, page_connect,
-                           page_plan, page_allocation, page_holdings, nav)
+                           page_plan, page_allocation, page_holdings,
+                           page_zakat, nav)
 from nifty_algo.ui.state import get_config                # noqa: E402
 from nifty_algo.ui.components import banner               # noqa: E402
 from nifty_algo.ui import refresh                         # noqa: E402
@@ -88,6 +89,7 @@ PAGES = {
     onboarding.ALLOCATION: page_allocation.render,
     onboarding.SLEEVE: page_sleeve.render,
     onboarding.FOREIGN: page_portfolio.render,
+    onboarding.ZAKAT: page_zakat.render,
     "Holdings": page_holdings.render,
     "Research": page_research.render,
     "Journal": page_journal.render,
@@ -116,7 +118,38 @@ def main() -> None:
         nav.lab_footer(cfg, p)
 
     _protection_banner(cfg, p)
+    _halal_banner(cfg, p)
     PAGES[choice]()
+
+
+def _halal_banner(cfg, p) -> None:
+    """
+    On EVERY page, while a halal-only holder owns something not halal.
+
+    Same reasoning as the protection banner: a warning confined to Holdings
+    is one you see only when you were already looking. It reads the snapshot
+    already in the session and never triggers a broker read, and it is
+    wrapped the same way - a notice that can crash the app gets disabled.
+    """
+    if not cfg.plan.halal_only:
+        return
+    try:
+        from nifty_algo.planning import compliance
+        from nifty_algo.ui.state import get_compliance
+
+        summary = get_compliance()
+        if summary is None:
+            return
+        bad = summary.of(compliance.NON_COMPLIANT)
+        if not bad:
+            return
+        names = ", ".join(r.position.symbol for r in bad[:4])
+        more = f" and {len(bad) - 4} more" if len(bad) > 4 else ""
+        banner(f"<b>{len(bad)} holding(s) are not halal</b> — {names}{more}. "
+               f"Your plan is halal-only. See <b>Holdings</b> for the reason "
+               f"on each line.", p.critical, "⛔")
+    except Exception:
+        pass
 
 
 def _protection_banner(cfg, p) -> None:

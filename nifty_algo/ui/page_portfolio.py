@@ -41,7 +41,7 @@ from .theme import get_palette
 from ..swing import crossborder as crossborder_mod
 from ..swing import fx as fx_mod
 from ..swing import holdings as holdings_mod
-from ..portfolio.base import ETF, Position
+from ..portfolio.base import EQUITY, ETF, Position
 
 HOLDINGS_CSV = "data/etf_holdings.csv"
 
@@ -75,7 +75,7 @@ def render() -> None:
     cfg = get_config()
 
     st.title("US / LRS")
-    st.caption("Step 5 of 5. Cross-border exposure, costs and reporting for "
+    st.caption("Step 5 of 6. Cross-border exposure, costs and reporting for "
                "an Indian resident investing abroad under LRS.")
 
     banner(f"<b>Arithmetic, not advice.</b> {crossborder_mod.DISCLAIMER}",
@@ -93,6 +93,7 @@ def render() -> None:
     _domicile_comparison(p)
     _overlap_table(values, p)
     _remittance(values, rate, p)
+    _interest_note(cfg, p)
     _reporting(p)
 
 
@@ -368,6 +369,22 @@ def _remittance(values, rate, p) -> None:
             f"{rate.note()}.")
 
 
+# ---------------------------------------------------------------- interest
+
+def _interest_note(cfg, p) -> None:
+    """
+    IBKR credits interest on idle cash by default - the one interest stream
+    a halal foreign account usually carries without knowing it.
+    """
+    if not cfg.plan.halal_only:
+        return
+    banner("<b>Idle cash at IBKR earns interest by default.</b> A halal "
+           "account should opt out in the account settings, or record what "
+           "was credited under <i>Interest credited</i> on "
+           "<b>2 · Money & goals</b> so the Zakat page counts it for "
+           "purification.", p.warning, "☪")
+
+
 # ---------------------------------------------------------------- reporting
 
 def _reporting(p) -> None:
@@ -398,13 +415,35 @@ def _typed_positions(values: dict) -> list[Position]:
     look-through and the risk briefing see what you hold.
     """
     out: list[Position] = []
-    for key, label, _domicile, _situs, _note in FUNDS:
+    for key, label, domicile, _situs, _note in FUNDS:
         amount = float(values.get(key, 0.0) or 0.0)
         if amount <= 0:
             continue
+        market = _listing_market(domicile)
         out.append(Position(
-            key=f"us:{key}", symbol=key, market="us", quantity=1.0,
+            key=f"{market}:{key}", symbol=key, market=market, quantity=1.0,
             average_price=0.0, last_price=amount, currency="USD",
             asset_class=ETF, source="manual", account="typed", name=label))
+    # The direct-shares box used to stop here, so it fed the estate meter and
+    # nothing else: net worth, the allocation and the sleeve ceiling all
+    # silently left out every US share typed into it.
+    direct = float(values.get("DIRECT_US", 0.0) or 0.0)
+    if direct > 0:
+        out.append(Position(
+            key="us:DIRECT_US", symbol="DIRECT_US", market="us", quantity=1.0,
+            average_price=0.0, last_price=direct, currency="USD",
+            asset_class=EQUITY, source="manual", account="typed",
+            name="Direct US shares (typed total)"))
     return out
+
+
+def _listing_market(domicile: str) -> str:
+    """
+    Where a fund LISTS, which is what its key is built from.
+
+    An Irish UCITS trades on the LSE, and the IBKR statement keys it `uk:` - a
+    typed balance keyed `us:` was the same fund under two names depending on
+    which source reported it.
+    """
+    return "uk" if domicile == "IE" else "us"
 

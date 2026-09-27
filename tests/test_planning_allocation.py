@@ -68,6 +68,45 @@ def test_a_gold_etf_from_kite_is_gold_but_a_jeweller_is_not():
     assert alloc.bucket_of(_pos("GOLDIAM", 1)) == alloc.INDIA_EQUITY
 
 
+def test_silver_is_a_metal_not_indian_equity():
+    """There was no silver bucket, so SILVERBEES counted as Indian equity."""
+    assert alloc.bucket_of(_pos("SILVERBEES", 1)) == alloc.BUCKET_GOLD
+
+
+def test_a_liquid_etf_is_cash_not_equity():
+    assert alloc.bucket_of(_pos("LIQUIDBEES", 1)) == alloc.BUCKET_CASH
+
+
+def test_an_nse_listed_international_etf_is_foreign_equity():
+    """It trades in rupees on NSE, so `market == "india"` - and was counted
+    as Indian equity, understating the foreign share."""
+    assert alloc.bucket_of(_pos("MON100", 1)) == alloc.FOREIGN_EQUITY
+    # A midcap ETF with a similar ticker is not caught.
+    assert alloc.bucket_of(_pos("MOM100", 1)) == alloc.INDIA_EQUITY
+
+
+def test_an_overseas_fund_of_funds_is_judged_by_its_name():
+    from nifty_algo.portfolio.base import MUTUAL_FUND
+    fof = Position(key="india:INF247L01AP3", symbol="INF247L01AP3",
+                   market="india", quantity=1.0, average_price=0.0,
+                   last_price=1.0, currency="INR", asset_class=MUTUAL_FUND,
+                   name="Motilal Oswal Nasdaq 100 Fund of Fund - Direct")
+    assert alloc.bucket_of(fof) == alloc.FOREIGN_EQUITY
+    # A share whose name happens to match is never a fund.
+    share = Position(key="india:WORLDX", symbol="WORLDX", market="india",
+                     quantity=1.0, average_price=0.0, last_price=1.0,
+                     currency="INR", asset_class=EQUITY, name="World Ltd")
+    assert alloc.bucket_of(share) == alloc.INDIA_EQUITY
+
+
+def test_the_halal_starting_point_sums_to_100_and_is_offered_only_when_asked():
+    assert sum(alloc.HALAL_STARTING_POINT.values()) == pytest.approx(100.0)
+    plan = _plan()
+    assert alloc.starting_point(plan) == alloc.STARTING_POINT
+    plan.halal_only = True
+    assert alloc.starting_point(plan) == alloc.HALAL_STARTING_POINT
+
+
 # ---------------------------------------------------------------- build
 
 def test_current_against_target():

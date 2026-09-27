@@ -70,6 +70,20 @@ FIELDS: tuple[tuple[str, str, str], ...] = (
     ("plan", "w_fixed_income", "plan_w_fixed_income"),
     ("plan", "w_cash", "plan_w_cash"),
     ("plan", "halal_only", "plan_halal_only"),
+    # How the holder reads the contested rulings, and their zakat inputs.
+    # Properties of the holder, like `halal_only` - never strategy config.
+    ("plan", "accept_metal_etfs", "plan_accept_metal_etfs"),
+    ("plan", "zakat_date", "plan_zakat_date"),
+    ("plan", "zakat_nisab_basis", "plan_zakat_nisab_basis"),
+    ("plan", "zakat_equity_method", "plan_zakat_equity_method"),
+    ("plan", "zakat_equity_proxy_pct", "plan_zakat_equity_proxy_pct"),
+    ("plan", "zakat_include_retirement", "plan_zakat_include_retirement"),
+    ("plan", "gold_price_inr_per_g", "plan_gold_price_inr_per_g"),
+    ("plan", "silver_price_inr_per_g", "plan_silver_price_inr_per_g"),
+    ("plan", "interest_received_inr", "plan_interest_received_inr"),
+    ("plan", "dividends_received_inr", "plan_dividends_received_inr"),
+    ("plan", "dividend_purification_pct", "plan_dividend_purification_pct"),
+    ("plan", "expected_real_return_pct", "plan_expected_real_return_pct"),
     ("ui", "show_research_lab", "ui_show_research_lab"),
     # Which accounts you hold money in. A claim about YOUR accounts, set on
     # Connect - so it belongs with the pots, not in version-controlled config.

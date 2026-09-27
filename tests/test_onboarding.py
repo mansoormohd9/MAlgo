@@ -17,7 +17,7 @@ def test_a_fresh_install_starts_at_connect():
     steps = onboarding.steps(Config())
     assert [s.page for s in steps] == [
         onboarding.CONNECT, onboarding.PLAN, onboarding.ALLOCATION,
-        onboarding.SLEEVE, onboarding.FOREIGN]
+        onboarding.SLEEVE, onboarding.FOREIGN, onboarding.ZAKAT]
     assert onboarding.next_step(steps).page == onboarding.CONNECT
 
 

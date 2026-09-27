@@ -85,6 +85,11 @@ class Position:
     source: str = ""                # connector key that reported it
     account: str = ""               # which account, when a broker has several
     name: str = ""
+    #: ISO date the figure describes, when it is not a live read - a CAS
+    #: statement date, or the date you typed an EPF balance. "" means read
+    #: live (or unknown). A six-month-old balance read as today's is a stale
+    #: fact wearing a fresh one's clothes; this is what lets a page say so.
+    as_of: str = ""
 
     @property
     def value_native(self) -> float:

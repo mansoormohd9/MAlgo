@@ -1061,6 +1061,10 @@ class PortfolioConfig:
     """
     connectors: tuple = ("manual", "kite")
     manual_path: str = "data/manual_positions.csv"
+    #: Your goals (Money & goals). Gitignored, like the manual balances - and
+    #: a field rather than a constant so a page test can point it at tmp_path
+    #: and never write the real file.
+    goals_path: str = "data/goals.csv"
 
     # Sessions of daily bars behind the correlation matrix and the beta
     # figures in the risk report. ~1 trading year: long enough that a single
@@ -1117,6 +1121,47 @@ class PlanConfig:
     #: A property of the holder, not of any strategy. Drives the default of
     #: every screen toggle and a note on interest-bearing classes.
     halal_only: bool = False
+    #: Physically-backed gold/silver ETFs are CONTESTED - permitted by many
+    #: scholars under conditions (allocated metal, redeemable, AAOIFI Shariah
+    #: Standard 57), questioned by others over T+1 settlement of a ribawi
+    #: asset. Off means they are shown as contested; on means you follow the
+    #: permissive view and they count as compliant. SGBs never follow this
+    #: switch: their 2.5% coupon is interest whatever view is taken of the gold.
+    accept_metal_etfs: bool = False
+
+    # --- Zakat & purification (`planning/zakat.py`). EVERY METHOD CHOICE
+    # DEFAULTS TO "NOT SET" ("" / 0), for the reason the target split does:
+    # a default nisab basis or equity method shipped in code would be the code
+    # quietly picking a madhhab. Until they are set, the page asks.
+    #: Your zakat anniversary (hawl), ISO date. Informational - the snapshot
+    #: is today's, and the page says so when today is not the date.
+    zakat_date: str = ""
+    #: "gold" (87.48 g) or "silver" (612.36 g).
+    zakat_nisab_basis: str = ""
+    #: "market_value" (all of it - the trading view) or "zakatable_assets"
+    #: (only the company's cash, receivables and inventory, via the proxy).
+    zakat_equity_method: str = ""
+    #: Share of a long-term holding's value treated as zakatable under the
+    #: zakatable-assets method. Often quoted at 25-30%; yours to set.
+    zakat_equity_proxy_pct: float = 0.0
+    #: EPF / PPF / NPS: excluded until the money is accessible, or included.
+    zakat_include_retirement: bool = False
+    #: Typed metal prices, ₹ per gram. 0 = unknown, and an unknown price is
+    #: no nisab - never a guessed one (the `fx.py` rule).
+    gold_price_inr_per_g: float = 0.0
+    silver_price_inr_per_g: float = 0.0
+    #: Interest credited over the year (bank, FD, IBKR cash, SGB coupons).
+    #: Purified in full.
+    interest_received_inr: float = 0.0
+    #: Dividends received from screened holdings, and the impure share to give
+    #: away. 0% with dividends entered reads "unknown", never "nothing owed".
+    dividends_received_inr: float = 0.0
+    dividend_purification_pct: float = 0.0
+
+    #: The after-inflation return the goals projection grows money at. 0 means
+    #: NOT SET and the projection is withheld - the code does not forecast a
+    #: return for you (`planning/goals.py`).
+    expected_real_return_pct: float = 0.0
 
     def targets(self) -> dict[str, float]:
         return {

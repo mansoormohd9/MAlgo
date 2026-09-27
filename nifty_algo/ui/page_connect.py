@@ -49,14 +49,14 @@ DESCRIPTIONS = {
 #: manual connector reads - kept in the connector's own order.
 CSV_COLUMNS = ("market", "symbol", "name", "quantity", "average_price",
                "last_price", "value", "cost", "currency", "asset_class",
-               "account")
+               "account", "as_of")
 
 
 def render() -> None:
     p = get_palette()
     cfg = get_config()
     st.title("Connect your accounts")
-    st.caption("Step 1 of 5. Tell the console where your money is. Every "
+    st.caption("Step 1 of 6. Tell the console where your money is. Every "
                "later step reads what this page connects.")
 
     enabled = _choose(cfg)
@@ -188,7 +188,8 @@ def _manual(cfg, p) -> None:
             "Give a single **value** in the line's own currency. "
             "`fixed_income` for EPF/PPF/FD/NPS-debt; `gold` for gold; `mf` "
             "for NPS equity; `cash` for savings and the emergency fund. "
-            "Saved to a gitignored file.")
+            "Put the statement date in `as_of` (YYYY-MM-DD) so an old balance "
+            "shows its age. Saved to a gitignored file.")
         path = at_root(cfg.portfolio.manual_path)
         df = _load_manual(path)
         edited = st.data_editor(

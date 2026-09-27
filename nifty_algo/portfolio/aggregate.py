@@ -243,6 +243,9 @@ def _combine(existing: Position | None, incoming: Position) -> Position:
         source=f"{existing.source}+{incoming.source}",
         account=existing.account or incoming.account,
         name=existing.name or incoming.name,
+        # The OLDER date wins: a line is only as fresh as its stalest part.
+        as_of=min((d for d in (existing.as_of, incoming.as_of) if d),
+                  default=""),
     )
 
 

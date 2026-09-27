@@ -30,7 +30,7 @@ NAV_KEY = "nav_page"
 
 def main_pages() -> list[str]:
     return [onboarding.CONNECT, onboarding.PLAN, onboarding.ALLOCATION,
-            onboarding.SLEEVE, onboarding.FOREIGN,
+            onboarding.SLEEVE, onboarding.FOREIGN, onboarding.ZAKAT,
             "Holdings", "Research", "Journal", "Settings"]
 
 

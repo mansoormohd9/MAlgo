@@ -12,21 +12,25 @@ Absolute rupees still show; they are facts about what was read.
 """
 from __future__ import annotations
 
+from datetime import date
+
 import pandas as pd
 import streamlit as st
 
 from .components import banner
-from .state import get_config, get_snapshot
+from .state import get_compliance, get_config, get_snapshot
 from .theme import get_palette
 from .. import onboarding
 from ..planning import allocation as alloc
+from ..planning import compliance
+from ..planning import tax as tax_mod
 
 
 def render() -> None:
     p = get_palette()
     cfg = get_config()
     st.title("Allocation")
-    st.caption("Step 3 of 5. Your whole portfolio against the split you set "
+    st.caption("Step 3 of 6. Your whole portfolio against the split you set "
                "in step 2.")
 
     c1, _ = st.columns([1, 4])
@@ -35,11 +39,14 @@ def render() -> None:
     a = alloc.build(snapshot, cfg.plan)
     for note in a.notes:
         banner(note, p.warning, "⚠")
+    _stale(snapshot, p)
 
     _headline(a, cfg, p)
+    _compliance_strip(get_compliance(snapshot), cfg, p)
     _table(a)
     _emergency(a, cfg, p)
     _next_money(a, cfg, p)
+    _tax(snapshot, p)
     _halal_note(cfg, p)
 
 
@@ -82,9 +89,14 @@ def _table(a) -> None:
             "Value (₹)": st.column_config.NumberColumn(format="localized"),
         })
     st.caption(
-        "Indian equity counts Kite holdings, Indian ETFs and equity mutual "
-        "funds; gold ETFs are recognised by symbol (record anything missed as "
-        "`gold`). The monthly sleeve's holdings sit inside Indian equity.")
+        "How holdings are classified: Indian equity is Kite shares, Indian "
+        "ETFs and equity/hybrid mutual funds. Gold & silver ETFs and SGBs are "
+        "recognised by symbol, metal funds by name. Liquid/overnight ETFs "
+        "(LIQUIDBEES) count as cash. NSE-listed international ETFs (MON100, "
+        "MAFANG…) and fund-of-funds investing abroad count as foreign equity. "
+        "Anything misfiled can be recorded by hand with the right "
+        "`asset_class`. The monthly sleeve's holdings sit inside Indian "
+        "equity.")
 
 
 def _emergency(a, cfg, p) -> None:
@@ -134,11 +146,88 @@ def _next_money(a, cfg, p) -> None:
                    "new money unless the drift is large.")
 
 
+def _compliance_strip(summary, cfg, p) -> None:
+    """
+    One line: how much of the whole is halal. The detail lives on Holdings.
+
+    Withheld with the rest of the page's percentages when an account failed,
+    for the same reason - "94% halal" against a partial book reads exactly
+    like one against the whole.
+    """
+    if summary is None or not summary.rows:
+        return
+    parts = []
+    for status in compliance.STATUSES:
+        share = summary.share(status)
+        if share is None:
+            continue
+        if share > 0 or status == compliance.COMPLIANT:
+            parts.append(f"{compliance.ICONS[status]} {share:.0%} "
+                         f"{compliance.LABELS[status].lower()}")
+    if not parts:
+        st.caption("Halal status withheld until every account answers.")
+        return
+    bad = summary.share(compliance.NON_COMPLIANT) or 0.0
+    colour = (p.critical if (bad > 0 and cfg.plan.halal_only)
+              else p.warning if summary.needs_attention else p.good)
+    banner(" · ".join(parts) + " — by value. Per-line reasons on "
+           "<b>Holdings</b>.", colour, "☪")
+
+
 def _halal_note(cfg, p) -> None:
     if cfg.plan.halal_only and cfg.plan.w_fixed_income > 0:
-        banner("Your plan is halal-only and holds a fixed-income target. EPF, "
-               "PPF, FDs and bond funds pay interest; if you hold them by "
-               "obligation (EPF is mandatory for most salaried jobs) consider "
-               "recording them but setting their target to what you cannot "
-               "avoid, and holding the stable leg in gold or cash.",
+        banner("Your plan is halal-only and holds a stable-leg target. EPF, "
+               "PPF, FDs and bond funds pay interest. Sukuk funds (SPSK on "
+               "the foreign side) are the halal version of this leg. If you "
+               "hold EPF by obligation (it is mandatory for most salaried "
+               "jobs), record it, set the target to what you cannot avoid, "
+               "and purify the interest on the Zakat page.",
                p.warning, "⚖")
+
+
+def _stale(snapshot, p) -> None:
+    """Balances that describe a date long past - shown, never silently used."""
+    old = alloc.stale_lines(snapshot.positions, date.today())
+    if not old:
+        return
+    names = ", ".join(f"{pos.symbol} ({age // 30} months)"
+                      for pos, age in old[:4])
+    banner(f"<b>{len(old)} balance(s) are more than "
+           f"{alloc.STALE_DAYS // 30} months old</b> — {names}. Update them "
+           f"on <b>{onboarding.CONNECT}</b> (or import a fresh CAS); the "
+           f"split below treats them as today's.", p.warning, "⏳")
+
+
+def _tax(snapshot, p) -> None:
+    """
+    The yearly LTCG exemption - the tax you can legally not pay.
+
+    Shown all year, loudest in January-March when an unused exemption is
+    about to expire. An UPPER BOUND, and labelled as one: Kite gives an
+    average price, not lots, so short-term lots are inside the figure.
+    """
+    st.subheader("Tax-free gains you can book this year")
+    view = tax_mod.harvest_view(snapshot)
+    today = date.today()
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Yearly LTCG exemption",
+              f"₹{tax_mod.LTCG_EXEMPTION_INR:,.0f}",
+              help="Section 112A, equity-oriented holdings only. Does not "
+                   "carry forward.")
+    c2.metric("Unrealised gain (upper bound)", f"₹{view.gain_inr:,.0f}")
+    c3.metric("Tax saved by harvesting", f"₹{view.tax_saved_inr:,.0f}",
+              help=f"Up to the exemption, at {tax_mod.LTCG_RATE:.1%}.")
+    if view.harvestable_inr > 0 and tax_mod.harvest_season(today):
+        banner(f"The financial year ends <b>{tax_mod.fy_end(today):%d %b}</b>. "
+               f"Selling lots held over 12 months to book up to "
+               f"₹{view.harvestable_inr:,.0f} of gain, then buying back, "
+               f"resets their cost at no tax.", p.good, "₹")
+    st.caption(
+        "Only lots held **over 12 months** qualify. The holding period is "
+        "not visible here (Kite reports an average price, not lots), so check "
+        "your tradebook before selling. Gold ETFs, debt funds and overseas "
+        "fund-of-funds are excluded - the exemption is for equity-oriented "
+        "holdings. "
+        + (f"{view.lines_without_cost} line(s) have no cost basis, so their "
+           f"gain is unknown, not zero. " if view.lines_without_cost else "")
+        + f"Rates as of {tax_mod.VERIFIED_ON}.")

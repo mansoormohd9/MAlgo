@@ -16,6 +16,7 @@ from streamlit.testing.v1 import AppTest
 
 from nifty_algo import onboarding
 from nifty_algo.config import Config
+from nifty_algo.planning import allocation as alloc
 from nifty_algo.ui import nav, page_connect, page_plan
 
 APP = str(Path(__file__).resolve().parent.parent / "app.py")
@@ -33,6 +34,7 @@ def _cfg(tmp_path, lines: str = "") -> Config:
     cfg = Config()
     cfg.portfolio.connectors = ("manual",)          # nothing that dials out
     cfg.portfolio.manual_path = str(tmp_path / "manual.csv")
+    cfg.portfolio.goals_path = str(tmp_path / "goals.csv")
     if lines:
         (tmp_path / "manual.csv").write_text(
             "market,symbol,name,quantity,average_price,last_price,value,"
@@ -96,6 +98,52 @@ def test_every_main_page_renders(tmp_path):
         assert not at.exception, f"{page}: {_why(at)}"
 
 
+def _metric(at, label: str) -> str:
+    return next(m.value for m in at.metric if m.label == label)
+
+
+def test_zakat_is_withheld_until_the_rulings_are_chosen(tmp_path):
+    cfg = _cfg(tmp_path, "india,SAVINGS,Savings,,,,100000,,INR,cash,\n")
+    at = _open(cfg, onboarding.ZAKAT)
+    assert _metric(at, "Zakat due (2.5%)") == "—"
+
+    cfg.plan.zakat_nisab_basis = "silver"
+    cfg.plan.silver_price_inr_per_g = 100.0
+    cfg.plan.zakat_equity_method = "market_value"
+    at.run()
+    assert not at.exception, _why(at)
+    assert _metric(at, "Zakat due (2.5%)") == "₹2,500"
+
+
+def test_a_halal_only_plan_flags_an_interest_bearing_holding(tmp_path):
+    cfg = _cfg(tmp_path, "india,EPF,EPF,,,,300000,,INR,fixed_income,\n"
+                         "india,SAVINGS,Savings,,,,100000,,INR,cash,\n")
+    cfg.plan.halal_only = True
+    at = _open(cfg, "Holdings")
+    text = " ".join(str(m.value) for m in at.markdown)
+    assert "not halal" in text and "EPF" in text
+    assert _metric(at, "⛔ Not halal") == "75%"
+
+
+def test_saved_goals_are_projected_once_net_worth_is_known(tmp_path):
+    cfg = _cfg(tmp_path, "india,SAVINGS,Savings,,,,500000,,INR,cash,\n")
+    (tmp_path / "goals.csv").write_text(
+        "name,target_inr,year,spend\nHouse,2500000,2031,true\n",
+        encoding="utf-8")
+    cfg.plan.expected_real_return_pct = 5.0
+    cfg.plan.monthly_investment_inr = 30_000.0
+    at = _open(cfg, onboarding.ALLOCATION)          # reads the snapshot
+    at.sidebar.radio[0].set_value(onboarding.PLAN).run()
+    assert not at.exception, _why(at)
+    goals_tables = [df.value for df in at.dataframe
+                    if "Goal" in df.value.columns]
+    assert goals_tables and goals_tables[0]["Goal"].tolist() == ["House"]
+    # Saving without touching a goal must not rewrite the file.
+    before = (tmp_path / "goals.csv").read_text(encoding="utf-8")
+    at.button(key="save_plan").click().run()
+    assert (tmp_path / "goals.csv").read_text(encoding="utf-8") == before
+
+
 # ---------------------------------------------------------------- one editor
 
 def test_no_page_but_money_and_goals_edits_a_pot(tmp_path):
@@ -142,6 +190,21 @@ def test_the_starting_point_fills_a_100pct_split_only_when_asked(tmp_path):
     at.button(key="plan_starting_point").click().run()
     at.button(key="save_plan").click().run()
     assert not at.exception, _why(at)
+    assert sum(cfg.plan.targets().values()) == pytest.approx(100.0)
+
+
+def test_a_halal_holder_is_offered_the_halal_starting_point(tmp_path):
+    """The shape follows the TYPED toggle, before Save, and moves the stable
+    leg into metals rather than into interest-bearing debt."""
+    cfg = _cfg(tmp_path)
+    at = _open(cfg, onboarding.PLAN)
+    at.toggle(key="plan_halal").set_value(True).run()
+    at.button(key="plan_starting_point").click().run()
+    at.button(key="save_plan").click().run()
+    assert not at.exception, _why(at)
+    assert cfg.plan.w_gold == alloc.HALAL_STARTING_POINT[alloc.BUCKET_GOLD]
+    assert cfg.plan.w_fixed_income \
+        == alloc.HALAL_STARTING_POINT[alloc.BUCKET_FIXED]
     assert sum(cfg.plan.targets().values()) == pytest.approx(100.0)
 
 

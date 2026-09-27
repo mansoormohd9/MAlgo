@@ -29,6 +29,7 @@ data/pytest_*.txt
 !data/ftse100.csv
 !data/etf_holdings.csv
 !data/halal_overrides.csv
+!data/halal_funds.csv
 # The LIVE sleeve's bars, and the one market-data file that is committed on
 # purpose. `data/cache/` below is ignored wholesale, so a deploy - Streamlit
 # Cloud clones from GitHub - arrives with no bars and the Monthly sleeve

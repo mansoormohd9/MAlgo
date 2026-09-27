@@ -97,7 +97,9 @@ def to_position(h: dict, statement_date: str) -> Position | None:
     kind = (h.get("type") or "").upper()
     if kind in _DEBT_TYPES:
         asset_class = FIXED_INCOME
-    elif "GOLD" in name.upper():
+    elif "GOLD" in name.upper() or "SILVER" in name.upper():
+        # Precious-metal funds and fund-of-funds. `GOLD` is the metals class;
+        # silver sits beside it in the "gold & silver" bucket.
         asset_class = GOLD
     else:
         asset_class = MUTUAL_FUND
@@ -106,7 +108,8 @@ def to_position(h: dict, statement_date: str) -> Position | None:
         key=f"india:{isin}", symbol=isin, market="india", quantity=units,
         average_price=(float(cost) / units) if cost else 0.0,
         last_price=value / units, currency="INR", asset_class=asset_class,
-        source=KEY, account=h.get("folio") or "", name=name)
+        source=KEY, account=h.get("folio") or "", name=name,
+        as_of=statement_date or "")
 
 
 def normalise(parsed: dict) -> dict:

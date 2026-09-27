@@ -27,6 +27,9 @@ second change - see CLAUDE.md, "EVERY WIDGET ON THIS PAGE CARRIES AN EXPLICIT
 """
 from __future__ import annotations
 
+from datetime import date
+
+import pandas as pd
 import streamlit as st
 
 from .components import banner
@@ -35,6 +38,8 @@ from .state import (get_config, get_equity_broker, peek_snapshot,
 from .theme import get_palette
 from .. import onboarding
 from ..planning import allocation as alloc
+from ..planning import goals as goals_mod
+from ..planning import zakat
 
 #: (bucket, PlanConfig field, widget key)
 TARGET_FIELDS = (
@@ -50,7 +55,7 @@ def render() -> None:
     p = get_palette()
     cfg = get_config()
     st.title("Money & goals")
-    st.caption(f"Step 2 of 5. What the money is for, how it should be split, "
+    st.caption(f"Step 2 of 6. What the money is for, how it should be split, "
                f"and how much each book may use. Nothing here is applied "
                f"until you press **Save**.")
 
@@ -60,14 +65,22 @@ def render() -> None:
     typed = {}
     typed.update(_profile(cfg))
     typed.update(_targets(cfg, p))
+    goal_fields, edited_goals, saved_goals = _goals(cfg, typed, p)
+    typed.update(goal_fields)
     typed.update(_pots(cfg, typed, p))
+    typed.update(_zakat(cfg))
 
-    changed = _differs(cfg, typed)
+    goals_changed = edited_goals != saved_goals
+    changed = _differs(cfg, typed) or goals_changed
     if changed:
         st.caption("Unsaved changes — press Save to apply them.")
     if st.button("Save", key="save_plan",
                  type="primary" if changed else "secondary"):
         _commit(cfg, typed)
+        if goals_changed:
+            # Written only when edited, so a Save that touched no goal never
+            # creates the file - and a page test never writes the real one.
+            goals_mod.save(edited_goals, cfg.portfolio.goals_path)
         save_settings()
         st.success("Saved to `data/settings.json` — gitignored, and it "
                    "survives a restart.")
@@ -116,7 +129,16 @@ def _profile(cfg) -> dict:
     out["halal_only"] = bool(c3.toggle(
         "Halal-only investing", value=bool(plan.halal_only), key="plan_halal",
         help="Turns the Shariah screen on for the monthly sleeve when saved, "
-             "and flags interest-bearing classes in your split."))
+             "flags any holding that is not halal on every page, and offers "
+             "a halal starting split."))
+    out["accept_metal_etfs"] = bool(st.toggle(
+        "I accept physically-backed gold & silver ETFs as halal",
+        value=bool(plan.accept_metal_etfs), key="plan_metal_etfs",
+        help="Contested. Many scholars permit them when backed by allocated, "
+             "redeemable metal (AAOIFI Shariah Standard 57); others object "
+             "to T+1 settlement of gold and silver. Off shows them as "
+             "'contested'; on counts them as halal. SGBs stay contested "
+             "either way - their 2.5% coupon is interest."))
     return out
 
 
@@ -127,9 +149,14 @@ def _targets(cfg, p) -> dict:
     st.caption("Percent of net worth. These are yours to choose — the page "
                "will not fill them in unless you ask for a starting point.")
 
-    if st.button("Use a starting point", key="plan_starting_point"):
+    # Reads the TYPED halal toggle, not `cfg`, so the shape offered matches
+    # what is on screen before Save - see the module docstring.
+    halal = bool(st.session_state.get("plan_halal", cfg.plan.halal_only))
+    start = alloc.HALAL_STARTING_POINT if halal else alloc.STARTING_POINT
+    if st.button("Use a halal starting point" if halal
+                 else "Use a starting point", key="plan_starting_point"):
         for bucket, _field, key in TARGET_FIELDS:
-            st.session_state[key] = float(alloc.STARTING_POINT[bucket])
+            st.session_state[key] = float(start[bucket])
         st.rerun()
 
     cols = st.columns(len(TARGET_FIELDS))
@@ -146,12 +173,102 @@ def _targets(cfg, p) -> dict:
     else:
         banner(f"Sums to <b>{total:.1f}%</b>. Allocation will not compute "
                f"drift until the split is exactly 100%.", p.warning, "⚠")
+    shape = " / ".join(f"{start[b]:.0f}" for b, *_ in TARGET_FIELDS)
     st.caption(
-        "The starting point (55 / 20 / 10 / 10 / 5) is a common shape for "
-        "someone in their early 30s with a long horizon: mostly equity, some "
-        "diversification abroad and into gold, a small stable leg. It is "
-        "arithmetic about a typical profile, not advice about yours.")
+        f"The starting point ({shape}) is a common shape for someone in their "
+        f"early 30s with a long horizon: mostly equity, some diversification "
+        f"abroad and into gold & silver, a small stable leg. "
+        + ("The halal version moves the stable leg into metals, keeping only "
+           "what you cannot avoid (EPF) or hold as sukuk. " if halal else "")
+        + "It is arithmetic about a typical profile, not advice about yours.")
     return out
+
+
+# ---------------------------------------------------------------- goals
+
+def _goals(cfg, typed: dict, p):
+    """
+    What the money is for, and whether the monthly investment gets there.
+
+    Returns (plan fields, goals as edited, goals as saved). The projection
+    reads the TYPED monthly investment and return - the deferred-assignment
+    rule in the module docstring - and today's net worth, withheld when an
+    account failed to answer.
+    """
+    st.subheader("Goals")
+    st.caption("Targets in **today's rupees**; the projection grows money at "
+               "the real (after-inflation) return you choose, so no inflation "
+               "guess hides in the arithmetic. Tick *spend* for money that "
+               "leaves (a house deposit); untick it for a corpus you need to "
+               "hold (retirement).")
+    saved, warnings = goals_mod.load(cfg.portfolio.goals_path)
+    for w in warnings:
+        banner(w, p.warning, "⚠")
+    frame = pd.DataFrame([{"name": g.name, "target_inr": g.target_inr,
+                           "year": g.year, "spend": g.spend} for g in saved],
+                         columns=list(goals_mod.COLUMNS))
+    edited = st.data_editor(
+        frame, key="plan_goals_editor", num_rows="dynamic", hide_index=True,
+        width="stretch",
+        column_config={
+            "name": st.column_config.TextColumn("Goal"),
+            "target_inr": st.column_config.NumberColumn(
+                "Target (₹, today's money)", min_value=0.0, step=100_000.0,
+                format="localized"),
+            "year": st.column_config.NumberColumn(
+                "Year", min_value=2000, max_value=2100, step=1, format="%d"),
+            "spend": st.column_config.CheckboxColumn("Spend", default=True),
+        })
+    goals = [g for g in (goals_mod.from_row(r) for r in
+                         edited.astype(object).where(edited.notna(), "")
+                         .to_dict("records")) if g is not None]
+
+    real = float(st.number_input(
+        "Expected real return (% a year, after inflation)", min_value=-10.0,
+        max_value=20.0, step=0.5,
+        value=float(cfg.plan.expected_real_return_pct), key="plan_real_return",
+        help="Yours to choose - the projection is withheld at 0. A long-run "
+             "equity-heavy portfolio is often assumed at 4-6% real; pick "
+             "lower to be safe."))
+
+    snapshot = peek_snapshot()
+    net = (snapshot.total_inr if snapshot is not None and snapshot.complete
+           else None)
+    proj = goals_mod.project(net, typed.get("monthly_investment_inr", 0.0),
+                             real, goals, date.today().year)
+    if proj is None:
+        missing = [why for why, bad in (
+            ("a goal", not goals),
+            ("an expected real return", real == 0),
+            ("today's net worth (read every account on Allocation)",
+             net is None)) if bad]
+        st.caption("Projection withheld - needs " + ", ".join(missing) + ".")
+    else:
+        st.line_chart(pd.DataFrame({"Projected wealth (₹, today's money)":
+                                    proj.wealth_inr}, index=proj.years),
+                      height=220)
+        st.dataframe(pd.DataFrame([{
+            "Goal": c.goal.name,
+            "Year": c.goal.year,
+            "Target (₹)": round(c.goal.target_inr),
+            "Projected (₹)": round(c.projected_inr),
+            "Status": ("✅ on track" if c.on_track
+                       else f"short ₹{c.short_inr:,.0f}"),
+            "Extra a month (₹)": (0 if c.on_track
+                                  else round(c.extra_monthly_inr)),
+        } for c in proj.checks]), hide_index=True, width="stretch",
+            column_config={
+                "Target (₹)": st.column_config.NumberColumn(format="localized"),
+                "Projected (₹)": st.column_config.NumberColumn(
+                    format="localized"),
+                "Extra a month (₹)": st.column_config.NumberColumn(
+                    format="localized"),
+            })
+        st.caption("Arithmetic, not a forecast. Starts from your whole net "
+                   "worth, including the emergency fund and EPF. \"Extra a "
+                   "month\" closes that goal alone and ignores how the same "
+                   "money would help the goals after it.")
+    return {"expected_real_return_pct": real}, goals, saved
 
 
 # ---------------------------------------------------------------- the pots
@@ -259,12 +376,102 @@ def _pot_note(cfg, swing: float, p) -> None:
     st.markdown("\n".join(rows))
 
 
+# ---------------------------------------------------------------- zakat
+
+def _zakat(cfg) -> dict:
+    """
+    The zakat and purification inputs. Every method choice starts UNSET.
+
+    They are rulings, not settings, so the page will not pick one for you:
+    until a basis and a method are chosen, the Zakat page names what is
+    missing instead of stating an amount (see `planning/zakat.py`).
+    """
+    plan = cfg.plan
+    with st.expander("Zakat & purification", expanded=bool(plan.halal_only)):
+        st.caption(f"Read by **{onboarding.ZAKAT}**. Prices are typed because "
+                   "an unknown price is no nisab, never a guessed one.")
+        c1, c2, c3 = st.columns(3)
+        try:
+            current = (date.fromisoformat(plan.zakat_date)
+                       if plan.zakat_date else None)
+        except ValueError:
+            current = None
+        picked = c1.date_input("Zakat date (your hawl)", value=current,
+                               key="plan_zakat_date")
+        bases = ("",) + zakat.BASES
+        basis = c2.selectbox(
+            "Nisab basis", bases,
+            index=bases.index(plan.zakat_nisab_basis)
+            if plan.zakat_nisab_basis in bases else 0,
+            format_func=lambda k: zakat.BASIS_LABELS.get(k, "— choose —"),
+            key="plan_zakat_basis")
+        methods = ("",) + zakat.METHODS
+        method = c3.selectbox(
+            "Shares & funds are counted at", methods,
+            index=methods.index(plan.zakat_equity_method)
+            if plan.zakat_equity_method in methods else 0,
+            format_func=lambda k: zakat.METHOD_LABELS.get(k, "— choose —"),
+            key="plan_zakat_method",
+            help="Scholars differ. Holdings bought to trade (the monthly "
+                 "sleeve turns over every month) are usually counted at full "
+                 "market value.")
+        c1, c2, c3, c4 = st.columns(4)
+        out = {
+            "zakat_date": picked.isoformat() if picked else "",
+            "zakat_nisab_basis": basis,
+            "zakat_equity_method": method,
+            "zakat_equity_proxy_pct": float(c1.number_input(
+                "Zakatable-assets proxy (%)", min_value=0.0, max_value=100.0,
+                step=5.0, value=float(plan.zakat_equity_proxy_pct),
+                key="plan_zakat_proxy",
+                help="Used only with the zakatable-assets method. Often "
+                     "quoted at 25-30% of a share's value.")),
+            "gold_price_inr_per_g": float(c2.number_input(
+                "Gold price (₹/g, 24k)", min_value=0.0, step=100.0,
+                value=float(plan.gold_price_inr_per_g), key="plan_gold_px")),
+            "silver_price_inr_per_g": float(c3.number_input(
+                "Silver price (₹/g)", min_value=0.0, step=1.0,
+                value=float(plan.silver_price_inr_per_g),
+                key="plan_silver_px")),
+            "zakat_include_retirement": bool(c4.toggle(
+                "Include EPF / PPF / NPS", key="plan_zakat_retire",
+                value=bool(plan.zakat_include_retirement),
+                help="Many scholars exclude money you cannot yet withdraw; "
+                     "others include it. Yours to decide.")),
+        }
+        st.markdown("**Purification** — income to give away, not zakat")
+        c1, c2, c3 = st.columns(3)
+        out["interest_received_inr"] = float(c1.number_input(
+            "Interest credited this year (₹)", min_value=0.0, step=500.0,
+            value=float(plan.interest_received_inr), key="plan_interest",
+            help="Savings account, FDs, EPF/PPF, IBKR cash, SGB coupons. "
+                 "Purified in full."))
+        out["dividends_received_inr"] = float(c2.number_input(
+            "Dividends from screened holdings (₹)", min_value=0.0,
+            step=500.0, value=float(plan.dividends_received_inr),
+            key="plan_dividends"))
+        out["dividend_purification_pct"] = float(c3.number_input(
+            "Impure share of dividends (%)", min_value=0.0, max_value=100.0,
+            step=0.5, value=float(plan.dividend_purification_pct),
+            key="plan_div_pct",
+            help="Shariah funds publish this yearly (SPUS and HLAL do). "
+                 "Left at 0 with dividends entered, the Zakat page reports "
+                 "it as unknown, not as nothing owed."))
+    return out
+
+
 # ---------------------------------------------------------------- commit
 
 _PLAN_KEYS = ("age", "monthly_expenses_inr", "emergency_months",
               "monthly_investment_inr", "tolerated_drawdown_pct",
-              "rebalance_band_pp", "halal_only", "w_india_equity",
-              "w_foreign_equity", "w_gold", "w_fixed_income", "w_cash")
+              "rebalance_band_pp", "halal_only", "accept_metal_etfs",
+              "w_india_equity",
+              "w_foreign_equity", "w_gold", "w_fixed_income", "w_cash",
+              "zakat_date", "zakat_nisab_basis", "zakat_equity_method",
+              "zakat_equity_proxy_pct", "gold_price_inr_per_g",
+              "silver_price_inr_per_g", "zakat_include_retirement",
+              "interest_received_inr", "dividends_received_inr",
+              "dividend_purification_pct", "expected_real_return_pct")
 _CAPITAL_KEYS = ("factor_capital_inr", "foreign_capital_inr",
                  "starting_capital", "swing_capital_inr")
 
